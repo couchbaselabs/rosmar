@@ -28,25 +28,44 @@ type Bucket struct {
 
 const kSchema = `
 CREATE TABLE bucket (
-	name text not null,
-	uuid text not null,
-	lastCas integer not null );
+	name 		text not null,
+	uuid 		text not null,
+	lastCas 	integer not null );
 
 CREATE TABLE collections (
-	id integer primary key autoincrement,
-	scope text not null,
-	name text not null,
-	unique (scope, name) );
+	id 			integer primary key autoincrement,
+	scope 		text not null,
+	name 		text not null,
+	lastCas 	integer default 0,
+	UNIQUE (scope, name) );
 
 CREATE TABLE documents (
-	collection integer references collections(id) on delete cascade,
-	key text not null,
-	cas integer not null,
-	exp integer,
-	xattrs blob,
-	isJSON integer default true,
-	value blob,
-	unique (collection, key) );
+	id 			integer primary key autoincrement,
+	collection 	integer references collections(id) on delete cascade,
+	key 		text not null,
+	cas 		integer not null,
+	exp 		integer,
+	xattrs 		blob,
+	isJSON 		integer default true,
+	value 		blob,
+	UNIQUE (collection, key) );
+
+CREATE TABLE views (
+	id 			integer primary key autoincrement,
+	collection 	integer references collections(id) on delete cascade,
+	designDoc 	text not null,
+	name 		text not null,
+	mapFn 		text not null,
+	reduceFn 	text,
+	lastCas 	integer default 0,
+	UNIQUE (collection, designDoc, name) );
+
+CREATE TABLE mapped (
+	view		integer references views(id) on delete cascade,
+	doc			integer references documents(id) on delete cascade,
+	cas			integer not null,
+	key			text not null,
+	value		text not null );
 
 INSERT INTO bucket (name, uuid, lastCas) VALUES ($1, $2, 0);
 INSERT INTO COLLECTIONS (scope, name) VALUES ($3, $4);
@@ -91,7 +110,7 @@ func deleteBucketPath(urlStr string) error {
 	if u.Query().Get("mode") == "memory" {
 		return nil
 	}
-	debug("Deleting db at path %s", u.Path)
+	info("Deleting db at path %s", u.Path)
 	err = os.Remove(u.Path)
 	_ = os.Remove(urlStr + "_wal")
 	_ = os.Remove(urlStr + "_shm")
@@ -114,6 +133,7 @@ func NewBucket(urlStr, bucketName string) (*Bucket, error) {
 	_, err = bucket.db.Exec(kSchema, bucketName, uuid, defaultScopeName, defaultCollectionName)
 	if err != nil {
 		_ = bucket.CloseAndDelete()
+		panic("Rosmar SQL schema error: " + err.Error())
 		return nil, err
 	}
 

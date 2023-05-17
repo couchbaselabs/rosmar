@@ -20,6 +20,7 @@ type Collection struct {
 	id            CollectionID // Unique collectionID
 	mutex         sync.Mutex
 	feeds         []*dcpFeed
+	views         map[ViewName]*rosmarView
 }
 
 type CollectionID uint32
@@ -459,19 +460,28 @@ func (c *Collection) getCas(key string) (cas CAS, err error) {
 	return
 }
 
-func (c *Collection) getNextCas(txn *sql.Tx) (cas CAS, err error) {
+// Returns the last CAS assigned to any doc in _any_ collection.
+func (bucket *Bucket) getLastCas(txn *sql.Tx) (cas CAS, err error) {
 	row := txn.QueryRow("SELECT lastCas FROM bucket")
 	err = row.Scan(&cas)
-	cas++
 	return
 }
 
+// Returns the last CAS assigned to any doc in this collection.
+func (c *Collection) getLastCas() (cas CAS, err error) {
+	row := c.db.QueryRow("SELECT lastCas FROM collections WHERE id=$1", c.id)
+	err = row.Scan(&cas)
+	return
+}
+
+// Updates the collection's and the bucket's lastCas.
 func (c *Collection) setLastCas(txn *sql.Tx, cas CAS) (err error) {
-	_, err = txn.Exec("UPDATE bucket SET lastCas=?", cas)
+	_, err = txn.Exec(`UPDATE bucket SET lastCas=$1;
+					   UPDATE collections SET lastCas=$1 WHERE id=$2`, cas, c.id)
 	return
 }
 
-func (c *Collection) withNewCas(fn func(txn *sql.Tx, newCas CAS) error) error {
+func (c *Collection) inTransaction(fn func(txn *sql.Tx) error) error {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
 
@@ -479,22 +489,27 @@ func (c *Collection) withNewCas(fn func(txn *sql.Tx, newCas CAS) error) error {
 	if err != nil {
 		return err
 	}
-
-	cas, err := c.getNextCas(txn)
-	if err != nil {
-		return err
-	}
-	err = fn(txn, cas)
-	if err == nil {
-		err = c.setLastCas(txn, cas)
-	}
-
+	err = fn(txn)
 	if err == nil {
 		err = txn.Commit()
 	} else {
 		txn.Rollback()
 	}
 	return err
+}
+
+func (c *Collection) withNewCas(fn func(txn *sql.Tx, newCas CAS) error) error {
+	return c.inTransaction(func(txn *sql.Tx) error {
+		newCas, err := c.bucket.getLastCas(txn)
+		if err == nil {
+			newCas++
+			err = fn(txn, newCas)
+			if err == nil {
+				err = c.setLastCas(txn, newCas)
+			}
+		}
+		return err
+	})
 }
 
 func encodeAsRaw(val interface{}, isJSON bool) (data []byte, err error) {

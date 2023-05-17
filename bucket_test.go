@@ -28,6 +28,10 @@ func makeTestBucket(t *testing.T) *Bucket {
 	bucket, err := NewBucket(testBucketPath(t), testBucketName)
 	require.NoError(t, err)
 	t.Cleanup(bucket.Close)
+
+	LoggingCallback = func(level LogLevel, fmt string, args ...any) {
+		t.Logf(logLevelNamesPrint[level]+fmt, args...)
+	}
 	return bucket
 }
 
