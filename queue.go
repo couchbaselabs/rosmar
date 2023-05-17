@@ -11,14 +11,6 @@ type queue[T any] struct {
 	cond *sync.Cond
 }
 
-// Returns a pointer to a new initialized queue
-func newQueue[T any]() *queue[T] {
-	return &queue[T]{
-		list: list.New(),
-		cond: sync.NewCond(&sync.Mutex{}),
-	}
-}
-
 // Initializes a queue struct
 func (q *queue[T]) init() {
 	q.list = list.New()

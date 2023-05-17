@@ -31,67 +31,65 @@ func (c *Collection) GetDDocs() (ddocs map[string]sgbucket.DesignDoc, err error)
 	return ddocs, err
 }
 
-func (c *Collection) GetDDoc(docname string) (ddoc sgbucket.DesignDoc, err error) {
+func (c *Collection) GetDDoc(designDoc string) (ddoc sgbucket.DesignDoc, err error) {
 	ddocs, err := c.GetDDocs()
 	if err != nil {
 		return
 	}
-	ddoc, found := ddocs[docname]
+	ddoc, found := ddocs[designDoc]
 	if !found {
-		err = sgbucket.MissingError{Key: docname}
+		err = sgbucket.MissingError{Key: designDoc}
 	}
 	return
 }
 
-func (c *Collection) PutDDoc(docname string, ddoc *sgbucket.DesignDoc) error {
+func (c *Collection) PutDDoc(designDoc string, ddoc *sgbucket.DesignDoc) error {
 	return c.inTransaction(func(txn *sql.Tx) error {
-		if existing, err := c.GetDDoc(docname); err == nil {
+		if existing, err := c.GetDDoc(designDoc); err == nil {
 			if reflect.DeepEqual(ddoc, &existing) {
 				return nil // unchanged
 			}
 		}
 		_, err := txn.Exec(`DELETE FROM views WHERE collection=$1 AND designDoc=$2`,
-			c.id, docname)
+			c.id, designDoc)
 		if err != nil {
 			return err
 		}
 		for name, view := range ddoc.Views {
 			_, err := txn.Exec(`INSERT INTO views (collection,designDoc,name,mapFn,reduceFn)
 							VALUES($1, $2, $3, $4, $5)`,
-				c.id, docname, name, view.Map, view.Reduce)
+				c.id, designDoc, name, view.Map, view.Reduce)
 			if err != nil {
 				return err
 			}
 		}
 		// Remove in-memory view objects for the affected views:
-		for name, _ := range c.views {
-			if name.designDoc == docname {
-				delete(c.views, name)
+		for name := range c.viewCache {
+			if name.designDoc == designDoc {
+				delete(c.viewCache, name)
 			}
 		}
-		c.forgetCachedViews(docname)
+		c.forgetCachedViews(designDoc)
 		return nil
 	})
 }
 
-func (c *Collection) DeleteDDoc(docname string) error {
-	result, err := c.db.Exec(`DELETE FROM views WHERE collection=$1 AND designDoc=$2`,
-		c.id, docname)
-	if err == nil {
-		if n, err2 := result.RowsAffected(); n == 0 && err2 == nil {
-			err = sgbucket.MissingError{Key: docname}
-		} else {
-			c.forgetCachedViews(docname)
+func (c *Collection) DeleteDDoc(designDoc string) error {
+	return c.inTransaction(func(txn *sql.Tx) error {
+		result, err := txn.Exec(`DELETE FROM views WHERE collection=$1 AND designDoc=$2`,
+			c.id, designDoc)
+		if err == nil {
+			if n, err2 := result.RowsAffected(); n == 0 && err2 == nil {
+				err = sgbucket.MissingError{Key: designDoc}
+			} else {
+				c.forgetCachedViews(designDoc)
+			}
 		}
-	}
-	return err
+		return err
+	})
 }
 
-// Remove in-memory view objects for a design doc:
-func (c *Collection) forgetCachedViews(docname string) {
-	for name, _ := range c.views {
-		if name.designDoc == docname {
-			delete(c.views, name)
-		}
-	}
-}
+var (
+	// Enforce interface conformance:
+	_ sgbucket.ViewStore = &Collection{}
+)

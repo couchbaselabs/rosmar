@@ -20,7 +20,7 @@ type Collection struct {
 	id            CollectionID // Unique collectionID
 	mutex         sync.Mutex
 	feeds         []*dcpFeed
-	views         map[ViewName]*rosmarView
+	viewCache     map[viewKey]*rosmarView
 }
 
 type CollectionID uint32
@@ -454,12 +454,6 @@ func remapError(err error, key string) error {
 	return err
 }
 
-func (c *Collection) getCas(key string) (cas CAS, err error) {
-	row := c.db.QueryRow("SELECT cas FROM documents WHERE collection=$1 AND key=$2", c.id, key)
-	err = row.Scan(&cas)
-	return
-}
-
 // Returns the last CAS assigned to any doc in _any_ collection.
 func (bucket *Bucket) getLastCas(txn *sql.Tx) (cas CAS, err error) {
 	row := txn.QueryRow("SELECT lastCas FROM bucket")
@@ -542,15 +536,6 @@ func decodeRaw(raw []byte, rv any) error {
 	} else {
 		return json.Unmarshal(raw, rv)
 	}
-}
-
-func copySlice(slice []byte) []byte {
-	if slice == nil {
-		return nil
-	}
-	copied := make([]byte, len(slice))
-	copy(copied, slice)
-	return copied
 }
 
 var (

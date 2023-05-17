@@ -49,6 +49,7 @@ CREATE TABLE documents (
 	isJSON 		integer default true,
 	value 		blob,
 	UNIQUE (collection, key) );
+CREATE INDEX docs_cas ON documents (collection, cas);
 
 CREATE TABLE views (
 	id 			integer primary key autoincrement,
@@ -63,9 +64,9 @@ CREATE TABLE views (
 CREATE TABLE mapped (
 	view		integer references views(id) on delete cascade,
 	doc			integer references documents(id) on delete cascade,
-	cas			integer not null,
 	key			text not null,
 	value		text not null );
+	CREATE INDEX mapped_doc ON mapped (view, doc);
 
 INSERT INTO bucket (name, uuid, lastCas) VALUES ($1, $2, 0);
 INSERT INTO COLLECTIONS (scope, name) VALUES ($3, $4);
@@ -133,8 +134,8 @@ func NewBucket(urlStr, bucketName string) (*Bucket, error) {
 	_, err = bucket.db.Exec(kSchema, bucketName, uuid, defaultScopeName, defaultCollectionName)
 	if err != nil {
 		_ = bucket.CloseAndDelete()
-		panic("Rosmar SQL schema error: " + err.Error())
-		return nil, err
+		panic("Rosmar SQL schema is invalid: " + err.Error())
+		//return nil, err
 	}
 
 	return bucket, nil
