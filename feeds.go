@@ -12,14 +12,15 @@ var activeFeedCount int32 // for tests
 
 //////// BUCKET API: (sgbucket.MutationFeedStore interface)
 
+func (bucket *Bucket) GetFeedType() sgbucket.FeedType {
+	return sgbucket.DcpFeedType
+}
+
 func (bucket *Bucket) StartDCPFeed(
 	args sgbucket.FeedArguments,
 	callback sgbucket.FeedEventCallbackFunc,
 	dbStats *expvar.Map,
 ) error {
-	bucket.lock.Lock()
-	defer bucket.lock.Unlock()
-
 	// If no scopes are specified, return feed for the default collection, if it exists
 	if args.Scopes == nil || len(args.Scopes) == 0 {
 		return bucket.DefaultDataStore().(*Collection).StartDCPFeed(args, callback, dbStats)
@@ -29,11 +30,11 @@ func (bucket *Bucket) StartDCPFeed(
 	requestedCollections := make([]*Collection, 0)
 	for scopeName, collections := range args.Scopes {
 		for _, collectionName := range collections {
-			collectionID, err := bucket.getCollectionID(scopeName, collectionName)
+			collection, err := bucket.getCollection(sgbucket.DataStoreNameImpl{scopeName, collectionName})
 			if err != nil {
 				return fmt.Errorf("DCPFeed args specified unknown collection: %s:%s", scopeName, collectionName)
 			}
-			requestedCollections = append(requestedCollections, bucket.collections[collectionID])
+			requestedCollections = append(requestedCollections, collection)
 		}
 	}
 
@@ -113,7 +114,7 @@ func (c *Collection) StartDCPFeed(
 }
 
 func (c *Collection) enqueueBackfillEvents(startCas uint64, keysOnly bool, q *eventQueue) error {
-	sql := fmt.Sprintf(`SELECT key, %s, cas FROM documents
+	sql := fmt.Sprintf(`SELECT key, %s, isJSON, cas FROM documents
 						WHERE collection=$1 AND cas >= $2 AND value NOT NULL
 						ORDER BY cas`,
 		ifelse(keysOnly, `null`, `value`))
@@ -123,7 +124,7 @@ func (c *Collection) enqueueBackfillEvents(startCas uint64, keysOnly bool, q *ev
 	}
 	for rows.Next() {
 		var doc document
-		if err := rows.Scan(&doc.key, &doc.value, &doc.cas); err != nil {
+		if err := rows.Scan(&doc.key, &doc.value, &doc.isJSON, &doc.cas); err != nil {
 			return err
 		}
 		q.push(doc.makeEvent(sgbucket.FeedOpMutation))
@@ -135,7 +136,7 @@ func (c *Collection) postEvent(event *sgbucket.FeedEvent) {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
 
-	info("%s: postEvent(%v, %q, type=%d, flags=0x%x)", c.DataStoreName, event.Opcode, event.Key, event.DataType, event.Flags)
+	info("%s: postEvent(%v, %q, type=%d, flags=0x%x)", c.DataStoreNameImpl, event.Opcode, event.Key, event.DataType, event.Flags)
 	var eventNoValue sgbucket.FeedEvent = *event // copies the struct
 	eventNoValue.Value = nil
 
@@ -197,10 +198,8 @@ func (doc *document) makeEvent(opcode sgbucket.FeedOpcode) *sgbucket.FeedEvent {
 		Opcode:   opcode,
 		Key:      []byte(doc.key),
 		Cas:      doc.cas,
-		DataType: sgbucket.FeedDataTypeJSON,
-	}
-	if !doc.isJSON {
-		event.DataType = sgbucket.FeedDataTypeRaw
+		DataType: ifelse(doc.isJSON, sgbucket.FeedDataTypeJSON, sgbucket.FeedDataTypeRaw),
+		// VbNo:     uint16(sgbucket.VBHash(doc.key, kNumVbuckets)),
 	}
 	if len(doc.xattrs) > 0 {
 		var xattrList []sgbucket.Xattr
@@ -214,3 +213,8 @@ func (doc *document) makeEvent(opcode sgbucket.FeedOpcode) *sgbucket.FeedEvent {
 	}
 	return &event
 }
+
+var (
+	// Enforce interface conformance:
+	_ sgbucket.MutationFeedStore2 = &Bucket{}
+)

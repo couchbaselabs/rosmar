@@ -161,6 +161,7 @@ func (c *Collection) updateView(view *rosmarView) error {
 			if err = rows.Scan(&doc_id, &input.DocID, &input.Doc, &input.VbSeq, &isJSON); err != nil {
 				return err
 			}
+			input.VbNo = sgbucket.VBHash(input.DocID, kNumVbuckets)
 			if !isJSON {
 				input.Doc = "{}" // ignore body of non-JSON docs
 			}

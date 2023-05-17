@@ -18,12 +18,12 @@ import (
 // Rosmar implementation of a collection-aware bucket.
 // Implements sgbucket interfaces BucketStore, DynamicDataStoreBucket, DeletableStore
 type Bucket struct {
-	url           string                         // Filesystem path or other URL
-	name          string                         // bucket name
-	collectionIDs map[DataStoreName]CollectionID // collectionID by scope and collection name
-	collections   map[CollectionID]*Collection   // Collection by collectionID
-	lock          sync.Mutex                     // mutex for synchronized access to Bucket
-	db            *sql.DB                        // SQLite database handle
+	url           string                                      // Filesystem path or other URL
+	name          string                                      // bucket name
+	collectionIDs map[sgbucket.DataStoreNameImpl]CollectionID // collectionID by scope and collection name
+	collections   map[CollectionID]*Collection                // Collection by collectionID
+	lock          sync.Mutex                                  // mutex for synchronized access to Bucket
+	db            *sql.DB                                     // SQLite database handle
 }
 
 const kSchema = `
@@ -73,6 +73,8 @@ INSERT INTO COLLECTIONS (scope, name) VALUES ($3, $4);
 `
 
 const kMaxOpenConnections = 8
+
+const kNumVbuckets = 32
 
 // URL to open, to create an in-memory database with no file
 const InMemoryURL = ":memory:"
@@ -131,7 +133,7 @@ func NewBucket(urlStr, bucketName string) (*Bucket, error) {
 	}
 
 	uuid := uuid.New().String()
-	_, err = bucket.db.Exec(kSchema, bucketName, uuid, defaultScopeName, defaultCollectionName)
+	_, err = bucket.db.Exec(kSchema, bucketName, uuid, sgbucket.DefaultScope, sgbucket.DefaultCollection)
 	if err != nil {
 		_ = bucket.CloseAndDelete()
 		panic("Rosmar SQL schema is invalid: " + err.Error())
@@ -144,7 +146,7 @@ func NewBucket(urlStr, bucketName string) (*Bucket, error) {
 func GetBucket(urlStr, bucketName string) (bucket *Bucket, err error) {
 	if bucket, err = openBucket(urlStr, bucketName, true); err == nil {
 		// sql.Open() doesn't really open the db; run a query to test the connection:
-		if _, err = bucket.getCollectionID(defaultScopeName, defaultCollectionName); err != nil {
+		if _, err = bucket.getCollectionID(sgbucket.DefaultScope, sgbucket.DefaultCollection); err != nil {
 			bucket = nil
 		}
 	}
@@ -184,7 +186,7 @@ func openBucket(urlStr string, bucketName string, exists bool) (*Bucket, error) 
 		name:          bucketName,
 		db:            db,
 		collections:   make(map[CollectionID]*Collection),
-		collectionIDs: make(map[DataStoreName]CollectionID),
+		collectionIDs: make(map[sgbucket.DataStoreNameImpl]CollectionID),
 	}
 	return bucket, nil
 }
@@ -264,13 +266,22 @@ func (bucket *Bucket) IsError(err error, errorType sgbucket.DataStoreErrorType) 
 }
 
 func (bucket *Bucket) GetMaxVbno() (uint16, error) {
-	return 1024, nil
+	return kNumVbuckets, nil
 }
 
 //////// DATA STORES:
 
+var defaultDataStoreName = sgbucket.DataStoreNameImpl{
+	Scope:      sgbucket.DefaultScope,
+	Collection: sgbucket.DefaultCollection,
+}
+
+func validateName(name sgbucket.DataStoreName) (sgbucket.DataStoreNameImpl, error) {
+	return sgbucket.NewValidDataStoreName(name.ScopeName(), name.CollectionName())
+}
+
 func (bucket *Bucket) DefaultDataStore() sgbucket.DataStore {
-	collection, err := bucket.getOrCreateCollection(DataStoreName{defaultScopeName, defaultCollectionName})
+	collection, err := bucket.getOrCreateCollection(defaultDataStoreName, true)
 	if err != nil {
 		warn("Unable to retrieve DefaultDataStore for rosmar Bucket: %v", err)
 		return nil
@@ -279,12 +290,12 @@ func (bucket *Bucket) DefaultDataStore() sgbucket.DataStore {
 }
 
 func (bucket *Bucket) NamedDataStore(name sgbucket.DataStoreName) (sgbucket.DataStore, error) {
-	sc, err := newValidScopeAndCollection(name.ScopeName(), name.CollectionName())
+	sc, err := validateName(name)
 	if err != nil {
 		return nil, fmt.Errorf("attempting to create/update database with a scope/collection that is %w", err)
 	}
 
-	collection, err := bucket.getOrCreateCollection(sc)
+	collection, err := bucket.getOrCreateCollection(sc, true)
 	if err != nil {
 		return nil, fmt.Errorf("unable to retrieve NamedDataStore for rosmar Bucket: %v", err)
 	}
@@ -292,7 +303,7 @@ func (bucket *Bucket) NamedDataStore(name sgbucket.DataStoreName) (sgbucket.Data
 }
 
 func (bucket *Bucket) CreateDataStore(name sgbucket.DataStoreName) error {
-	sc, err := newValidScopeAndCollection(name.ScopeName(), name.CollectionName())
+	sc, err := validateName(name)
 	if err != nil {
 		return err
 	}
@@ -301,8 +312,11 @@ func (bucket *Bucket) CreateDataStore(name sgbucket.DataStoreName) error {
 }
 
 func (bucket *Bucket) DropDataStore(name sgbucket.DataStoreName) error {
-	// intentionally not validating scope/collection name on drop, we'll either find a matching one or not.
-	return bucket.dropCollection(DataStoreName{name.ScopeName(), name.CollectionName()})
+	sc, err := validateName(name)
+	if err != nil {
+		return err
+	}
+	return bucket.dropCollection(sc)
 }
 
 func (bucket *Bucket) ListDataStores() ([]sgbucket.DataStoreName, error) {
@@ -320,42 +334,28 @@ func (bucket *Bucket) ListDataStores() ([]sgbucket.DataStoreName, error) {
 		if err := rows.Scan(&id, &scope, &name); err != nil {
 			return nil, err
 		}
-		result = append(result, DataStoreName{scope: scope, collection: name})
+		result = append(result, sgbucket.DataStoreNameImpl{Scope: scope, Collection: name})
 	}
 	return result, rows.Close()
 }
 
 //////// COLLECTIONS:
 
-// This is not part of an sgbucket interface, but it's necessary
 func (bucket *Bucket) getCollectionID(scope, collection string) (id CollectionID, err error) {
 	row := bucket.db.QueryRow(`SELECT id FROM collections WHERE scope=$1 AND name=$2`, scope, collection)
 	err = row.Scan(&id)
 	return
 }
 
-// This is not part of an sgbucket interface, but it's necessary
-func (bucket *Bucket) GetCollectionID(scope, collection string) (id CollectionID, err error) {
-	id, err = bucket.getCollectionID(scope, collection)
-	if err == sql.ErrNoRows {
-		var name DataStoreName
-		name, err = newValidScopeAndCollection(scope, collection)
-		if err == nil {
-			err = &sgbucket.MissingError{Key: name.String()}
-		}
-	}
-	return
-}
-
-func (bucket *Bucket) createCollection(name DataStoreName) (sgbucket.DataStore, error) {
+func (bucket *Bucket) createCollection(name sgbucket.DataStoreNameImpl) (*Collection, error) {
 	bucket.lock.Lock()
 	defer bucket.lock.Unlock()
 
 	return bucket._createCollection(name)
 }
 
-func (bucket *Bucket) _createCollection(name DataStoreName) (sgbucket.DataStore, error) {
-	result, err := bucket.db.Exec(`INSERT INTO collections (scope, name) VALUES (?, ?)`, name.scope, name.collection)
+func (bucket *Bucket) _createCollection(name sgbucket.DataStoreNameImpl) (*Collection, error) {
+	result, err := bucket.db.Exec(`INSERT INTO collections (scope, name) VALUES (?, ?)`, name.Scope, name.Collection)
 	if err != nil {
 		return nil, err
 	}
@@ -366,7 +366,11 @@ func (bucket *Bucket) _createCollection(name DataStoreName) (sgbucket.DataStore,
 	return bucket._initCollection(name, CollectionID(collectionID)), nil
 }
 
-func (bucket *Bucket) getOrCreateCollection(name DataStoreName) (sgbucket.DataStore, error) {
+func (bucket *Bucket) getCollection(name sgbucket.DataStoreNameImpl) (*Collection, error) {
+	return bucket.getOrCreateCollection(name, false)
+}
+
+func (bucket *Bucket) getOrCreateCollection(name sgbucket.DataStoreNameImpl, orCreate bool) (*Collection, error) {
 	bucket.lock.Lock()
 	defer bucket.lock.Unlock()
 
@@ -374,25 +378,29 @@ func (bucket *Bucket) getOrCreateCollection(name DataStoreName) (sgbucket.DataSt
 		return bucket.collections[collectionID], nil
 	}
 
-	id, err := bucket.getCollectionID(name.scope, name.collection)
+	id, err := bucket.getCollectionID(name.Scope, name.Collection)
 	if err == nil {
 		return bucket._initCollection(name, id), nil
 	} else if err == sql.ErrNoRows {
-		return bucket._createCollection(name)
+		if orCreate {
+			return bucket._createCollection(name)
+		} else {
+			return nil, sgbucket.MissingError{Key: name.String()}
+		}
 	} else {
 		return nil, err
 	}
 }
 
-func (bucket *Bucket) dropCollection(name DataStoreName) error {
-	if name.isDefault() {
+func (bucket *Bucket) dropCollection(name sgbucket.DataStoreNameImpl) error {
+	if name.IsDefault() {
 		return errors.New("default collection cannot be dropped")
 	}
 
 	bucket.lock.Lock()
 	defer bucket.lock.Unlock()
 
-	_, err := bucket.db.Exec(`DELETE FROM collections WHERE scope=? AND name=?`, name.scope, name.collection)
+	_, err := bucket.db.Exec(`DELETE FROM collections WHERE scope=? AND name=?`, name.ScopeName(), name.CollectionName())
 	if err != nil {
 		return err
 	}
@@ -404,7 +412,7 @@ func (bucket *Bucket) dropCollection(name DataStoreName) error {
 	return nil
 }
 
-func (bucket *Bucket) _initCollection(name DataStoreName, id CollectionID) *Collection {
+func (bucket *Bucket) _initCollection(name sgbucket.DataStoreNameImpl, id CollectionID) *Collection {
 	collection := newCollection(bucket, name, id, bucket.db)
 	bucket.collections[id] = collection
 	bucket.collectionIDs[name] = id

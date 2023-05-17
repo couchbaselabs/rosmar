@@ -11,27 +11,29 @@ import (
 	sgbucket "github.com/couchbase/sg-bucket"
 )
 
+//TODO: Use prepared statements for performance (sql.Stmt)
+
 // A collection within a Bucket.
 // Implements sgbucket interfaces DataStore, DataStoreName
 type Collection struct {
-	DataStoreName // Fully qualified name (scope and collection)
-	bucket        *Bucket
-	db            *sql.DB
-	id            CollectionID // Unique collectionID
-	mutex         sync.Mutex
-	feeds         []*dcpFeed
-	viewCache     map[viewKey]*rosmarView
+	sgbucket.DataStoreNameImpl // Fully qualified name (scope and collection)
+	bucket                     *Bucket
+	db                         *sql.DB
+	id                         CollectionID // Unique collectionID
+	mutex                      sync.Mutex
+	feeds                      []*dcpFeed
+	viewCache                  map[viewKey]*rosmarView
 }
 
 type CollectionID uint32
 type CAS = uint64
 
-func newCollection(bucket *Bucket, name DataStoreName, id CollectionID, db *sql.DB) *Collection {
+func newCollection(bucket *Bucket, name sgbucket.DataStoreNameImpl, id CollectionID, db *sql.DB) *Collection {
 	return &Collection{
-		bucket:        bucket,
-		db:            db,
-		DataStoreName: name,
-		id:            id,
+		bucket:            bucket,
+		db:                db,
+		DataStoreNameImpl: name,
+		id:                id,
 	}
 }
 
@@ -44,7 +46,11 @@ func (c *Collection) close() {
 //////// Interface DataStore
 
 func (c *Collection) GetName() string {
-	return c.bucket.name + "." + c.DataStoreName.String()
+	return c.bucket.name + "." + c.DataStoreNameImpl.String()
+}
+
+func (c *Collection) GetCollectionID() uint32 {
+	return uint32(c.id)
 }
 
 //////// Interface KVStore
@@ -83,6 +89,9 @@ func (c *Collection) AddRaw(key string, exp uint32, val []byte) (added bool, err
 }
 
 func (c *Collection) add(key string, exp uint32, val []byte, isJSON bool) (added bool, err error) {
+	if len(val) > MaxDocSize {
+		return false, &sgbucket.DocTooBigErr{}
+	}
 	var casOut CAS
 	err = c.withNewCas(func(txn *sql.Tx, newCas CAS) error {
 		result, err := txn.Exec(
@@ -115,6 +124,10 @@ func (c *Collection) SetRaw(key string, exp uint32, opts *sgbucket.UpsertOptions
 }
 
 func (c *Collection) set(key string, exp uint32, opts *sgbucket.UpsertOptions, val []byte, isJSON bool) (err error) {
+	if len(val) > MaxDocSize {
+		err = &sgbucket.DocTooBigErr{}
+		return
+	}
 	var casOut CAS
 	err = c.withNewCas(func(txn *sql.Tx, newCas CAS) error {
 		_, err := txn.Exec(
@@ -154,7 +167,7 @@ func (c *Collection) Touch(key string, exp uint32) (cas CAS, err error) {
 func (c *Collection) Add(key string, exp uint32, val any) (added bool, err error) {
 	raw, err := encodeAsRaw(val, true)
 	if err == nil {
-		added, err = c.AddRaw(key, exp, raw)
+		added, err = c.add(key, exp, raw, true)
 	}
 	return
 }
@@ -174,6 +187,9 @@ func (c *Collection) WriteCas(key string, flags int, exp uint32, cas CAS, val an
 	if err != nil {
 		return 0, err
 	}
+	if len(raw) > MaxDocSize {
+		return 0, &sgbucket.DocTooBigErr{}
+	}
 	if raw == nil {
 		isJSON = false
 	}
@@ -184,6 +200,7 @@ func (c *Collection) WriteCas(key string, flags int, exp uint32, cas CAS, val an
 			sql = `UPDATE documents SET value=value || $1, cas=$2, exp=$6, isJSON=$7
 					 WHERE collection=$3 AND key=$4 AND cas=$5`
 		} else if (opt&sgbucket.AddOnly) != 0 || cas == 0 {
+			// Insert but fall back to Update if the doc is a tombstone
 			sql = `INSERT INTO documents (collection, key, value, cas, isJSON) VALUES($3,$4,$1,$2,$7)
 				ON CONFLICT(collection,key) DO UPDATE SET value=$1, cas=$2, exp=$6, isJSON=$7
 											WHERE value IS NULL`
@@ -199,7 +216,11 @@ func (c *Collection) WriteCas(key string, flags int, exp uint32, cas CAS, val an
 			if nRows, _ := result.RowsAffected(); nRows > 0 {
 				casOut = newCas
 			} else if exists, err2 := c.Exists(key); exists && err2 == nil {
-				err = CasMismatchErr{cas}
+				if opt&sgbucket.AddOnly != 0 {
+					err = sgbucket.ErrKeyExists
+				} else {
+					err = sgbucket.CasMismatchErr{Expected: cas, Actual: 0}
+				}
 			} else if err2 == nil {
 				err = sgbucket.MissingError{Key: key}
 			} else {
@@ -253,7 +274,7 @@ func (c *Collection) Update(key string, exp uint32, callback sgbucket.UpdateFunc
 		var delete bool
 		raw, _, delete, err = callback(raw)
 		if err != nil {
-			if err == ErrCasFailureShouldRetry {
+			if err == sgbucket.ErrCasFailureShouldRetry {
 				continue // Callback wants us to retry
 			} else {
 				return cas, err
@@ -266,7 +287,7 @@ func (c *Collection) Update(key string, exp uint32, callback sgbucket.UpdateFunc
 		casOut, err = c.WriteCas(key, 0, 0, cas, raw, sgbucket.Raw)
 		if err == nil {
 			break
-		} else if _, ok := err.(CasMismatchErr); !ok {
+		} else if _, ok := err.(sgbucket.CasMismatchErr); !ok {
 			return 0, err // fatal error
 		}
 	}
@@ -542,5 +563,5 @@ var (
 	// Enforce interface conformance:
 	_ sgbucket.DataStore     = &Collection{}
 	_ sgbucket.DataStoreName = &Collection{}
-	// _ sgbucket.ViewStore     = &Collection{}
+	_ sgbucket.ViewStore     = &Collection{}
 )
