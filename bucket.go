@@ -2,6 +2,7 @@ package rosmar
 
 import (
 	"database/sql"
+	_ "embed"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -26,59 +27,15 @@ type Bucket struct {
 	db            *sql.DB                                     // SQLite database handle
 }
 
-const kSchema = `
-CREATE TABLE bucket (
-	name 		text not null,
-	uuid 		text not null,
-	lastCas 	integer not null );
-
-CREATE TABLE collections (
-	id 			integer primary key autoincrement,
-	scope 		text not null,
-	name 		text not null,
-	lastCas 	integer default 0,
-	UNIQUE (scope, name) );
-
-CREATE TABLE documents (
-	id 			integer primary key autoincrement,
-	collection 	integer references collections(id) on delete cascade,
-	key 		text not null,
-	cas 		integer not null,
-	exp 		integer,
-	xattrs 		blob,
-	userXattrs  blob,
-	isJSON 		integer default true,
-	value 		blob,
-	UNIQUE (collection, key) );
-CREATE INDEX docs_cas ON documents (collection, cas);
-
-CREATE TABLE views (
-	id 			integer primary key autoincrement,
-	collection 	integer references collections(id) on delete cascade,
-	designDoc 	text not null,
-	name 		text not null,
-	mapFn 		text not null,
-	reduceFn 	text,
-	lastCas 	integer default 0,
-	UNIQUE (collection, designDoc, name) );
-
-CREATE TABLE mapped (
-	view		integer references views(id) on delete cascade,
-	doc			integer references documents(id) on delete cascade,
-	key			text not null,
-	value		text not null );
-	CREATE INDEX mapped_doc ON mapped (view, doc);
-
-INSERT INTO bucket (name, uuid, lastCas) VALUES ($1, $2, 0);
-INSERT INTO COLLECTIONS (scope, name) VALUES ($3, $4);
-`
-
 const kMaxOpenConnections = 8
 
 const kNumVbuckets = 32
 
 // URL to open, to create an in-memory database with no file
 const InMemoryURL = ":memory:"
+
+//go:embed schema.sql
+var kSchema string
 
 func encodeDBURL(urlStr string) (*url.URL, error) {
 	if urlStr == InMemoryURL {
