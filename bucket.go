@@ -46,6 +46,7 @@ CREATE TABLE documents (
 	cas 		integer not null,
 	exp 		integer,
 	xattrs 		blob,
+	userXattrs  blob,
 	isJSON 		integer default true,
 	value 		blob,
 	UNIQUE (collection, key) );
@@ -240,12 +241,12 @@ func (bucket *Bucket) IsSupported(feature sgbucket.BucketStoreFeature) bool {
 	case sgbucket.BucketStoreFeatureCollections:
 		return true
 	case sgbucket.BucketStoreFeatureSubdocOperations:
-		return false
+		return true
 	case sgbucket.BucketStoreFeatureXattrs:
-		return false
-	case sgbucket.BucketStoreFeatureN1ql:
-		return false
+		return true
 	case sgbucket.BucketStoreFeatureCrc32cMacroExpansion:
+		return true
+	case sgbucket.BucketStoreFeatureN1ql:
 		return false
 	default:
 		return false

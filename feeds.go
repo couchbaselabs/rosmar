@@ -42,7 +42,7 @@ func (bucket *Bucket) StartDCPFeed(
 	doneChans := map[*Collection]chan struct{}{}
 	for _, collection := range requestedCollections {
 		// Not bothering to remove scopes from args for the single collection feeds
-		// here because it's ignored by WalrusBucket's StartDCPFeed
+		// here because it's ignored by RosmarBucket's StartDCPFeed
 		collectionID := collection.id
 		collectionAwareCallback := func(event sgbucket.FeedEvent) bool {
 			event.CollectionID = uint32(collectionID)
@@ -54,7 +54,7 @@ func (bucket *Bucket) StartDCPFeed(
 		argsCopy := args
 		argsCopy.DoneChan = doneChans[collection]
 
-		// Ignoring error is safe because WalrusBucket doesn't have error scenarios for StartDCPFeed
+		// Ignoring error is safe because RosmarBucket doesn't have error scenarios for StartDCPFeed
 		_ = collection.StartDCPFeed(argsCopy, collectionAwareCallback, dbStats)
 	}
 
@@ -123,11 +123,11 @@ func (c *Collection) enqueueBackfillEvents(startCas uint64, keysOnly bool, q *ev
 		return err
 	}
 	for rows.Next() {
-		var doc document
+		var doc event
 		if err := rows.Scan(&doc.key, &doc.value, &doc.isJSON, &doc.cas); err != nil {
 			return err
 		}
-		q.push(doc.makeEvent(sgbucket.FeedOpMutation))
+		q.push(doc.asFeedEvent())
 	}
 	return rows.Close()
 }
@@ -149,10 +149,6 @@ func (c *Collection) postEvent(event *sgbucket.FeedEvent) {
 			}
 		}
 	}
-}
-
-func (c *Collection) postDocEvent(doc *document, op sgbucket.FeedOpcode) {
-	c.postEvent(doc.makeEvent(op))
 }
 
 // stops all feeds. Caller MUST hold the bucket's lock.
@@ -193,25 +189,38 @@ func (feed *dcpFeed) close() {
 	feed.events.close()
 }
 
-func (doc *document) makeEvent(opcode sgbucket.FeedOpcode) *sgbucket.FeedEvent {
-	event := sgbucket.FeedEvent{
-		Opcode:   opcode,
-		Key:      []byte(doc.key),
-		Cas:      doc.cas,
-		DataType: ifelse(doc.isJSON, sgbucket.FeedDataTypeJSON, sgbucket.FeedDataTypeRaw),
+//////// EVENTS
+
+type event struct {
+	collection    CollectionID     // Collection ID
+	key           string           // Doc ID
+	value         []byte           // Raw data content, or nil if deleted
+	isDeletion    bool             // True if it's a deletion event
+	isJSON        bool             // Is the data a JSON document?
+	changedXattrs []sgbucket.Xattr // Extended attributes that changed
+	cas           CAS              // Sequence in collection
+	// exp        uint32           // Expiration time
+}
+
+func (e *event) asFeedEvent() *sgbucket.FeedEvent {
+	feedEvent := sgbucket.FeedEvent{
+		Opcode:   ifelse(e.isDeletion, sgbucket.FeedOpDeletion, sgbucket.FeedOpMutation),
+		Key:      []byte(e.key),
+		Value:    e.value,
+		Cas:      e.cas,
+		DataType: ifelse(e.isJSON, sgbucket.FeedDataTypeJSON, sgbucket.FeedDataTypeRaw),
 		// VbNo:     uint16(sgbucket.VBHash(doc.key, kNumVbuckets)),
 	}
-	if len(doc.xattrs) > 0 {
-		var xattrList []sgbucket.Xattr
-		for k, v := range doc.xattrs {
-			xattrList = append(xattrList, sgbucket.Xattr{Name: k, Value: v})
-		}
-		event.Value = sgbucket.EncodeValueWithXattrs(doc.value, xattrList...)
-		event.DataType |= sgbucket.FeedDataTypeXattr
-	} else {
-		event.Value = doc.value
+	if len(e.changedXattrs) > 0 {
+		feedEvent.Value = sgbucket.EncodeValueWithXattrs(e.value, e.changedXattrs...)
+		feedEvent.DataType |= sgbucket.FeedDataTypeXattr
 	}
-	return &event
+	return &feedEvent
+}
+
+func (c *Collection) postDocEvent(e *event) {
+	e.collection = c.id
+	c.postEvent(e.asFeedEvent())
 }
 
 var (

@@ -12,7 +12,9 @@ import (
 )
 
 func init() {
-	Logging = LevelInfo
+	if Logging == LevelNone {
+		Logging = LevelInfo
+	}
 }
 
 const testBucketFilename = "rosmar_test"

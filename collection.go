@@ -13,6 +13,8 @@ import (
 
 //TODO: Use prepared statements for performance (sql.Stmt)
 
+var MaxDocSize int = 20 * 1024 * 1024
+
 // A collection within a Bucket.
 // Implements sgbucket interfaces DataStore, DataStoreName
 type Collection struct {
@@ -27,6 +29,13 @@ type Collection struct {
 
 type CollectionID uint32
 type CAS = uint64
+
+// common interface of sql.DB, sql.Tx
+type Queryable interface {
+	Exec(query string, args ...any) (sql.Result, error)
+	Query(query string, args ...any) (*sql.Rows, error)
+	QueryRow(query string, args ...any) *sql.Row
+}
 
 func newCollection(bucket *Bucket, name sgbucket.DataStoreNameImpl, id CollectionID, db *sql.DB) *Collection {
 	return &Collection{
@@ -58,7 +67,11 @@ func (c *Collection) GetCollectionID() uint32 {
 //// Raw:
 
 func (c *Collection) Exists(key string) (exists bool, err error) {
-	row := c.db.QueryRow(`SELECT 1 FROM documents
+	return c.exists(c.db, key)
+}
+
+func (c *Collection) exists(q Queryable, key string) (exists bool, err error) {
+	row := q.QueryRow(`SELECT 1 FROM documents
 							WHERE collection=? AND key=? AND value NOT NULL`, c.id, key)
 	var i int
 	err = row.Scan(&i)
@@ -70,7 +83,11 @@ func (c *Collection) Exists(key string) (exists bool, err error) {
 }
 
 func (c *Collection) GetRaw(key string) (val []byte, cas CAS, err error) {
-	row := c.db.QueryRow("SELECT value, cas FROM documents WHERE collection=? AND key=?", c.id, key)
+	return c.getRaw(c.db, key)
+}
+
+func (c *Collection) getRaw(q Queryable, key string) (val []byte, cas CAS, err error) {
+	row := q.QueryRow("SELECT value, cas FROM documents WHERE collection=? AND key=?", c.id, key)
 	if err = row.Scan(&val, &cas); err != nil {
 		err = remapError(err, key)
 	} else if val == nil {
@@ -93,29 +110,26 @@ func (c *Collection) add(key string, exp uint32, val []byte, isJSON bool) (added
 		return false, &sgbucket.DocTooBigErr{}
 	}
 	var casOut CAS
-	err = c.withNewCas(func(txn *sql.Tx, newCas CAS) error {
+	err = c.withNewCas(func(txn *sql.Tx, newCas CAS) (e *event, err error) {
 		result, err := txn.Exec(
 			`INSERT INTO documents (collection,key,value,cas,exp,isJSON) VALUES (?,?,?,?,?,?)
 				ON CONFLICT(collection,key) DO UPDATE SET value=$3, cas=$4, exp=$5, isJSON=$6
 				WHERE value IS NULL`,
 			c.id, key, val, newCas, exp, isJSON)
 		if err != nil {
-			return err
+			return
 		}
 		casOut = newCas
 		n, _ := result.RowsAffected()
 		added = (n > 0)
-		return err
-	})
-
-	if added {
-		c.postDocEvent(&document{
+		e = &event{
 			key:    key,
 			value:  val,
 			cas:    casOut,
 			isJSON: isJSON,
-		}, sgbucket.FeedOpMutation)
-	}
+		}
+		return
+	})
 	return
 }
 
@@ -128,30 +142,28 @@ func (c *Collection) set(key string, exp uint32, opts *sgbucket.UpsertOptions, v
 		err = &sgbucket.DocTooBigErr{}
 		return
 	}
-	var casOut CAS
-	err = c.withNewCas(func(txn *sql.Tx, newCas CAS) error {
+	return c.withNewCas(func(txn *sql.Tx, newCas CAS) (*event, error) {
 		_, err := txn.Exec(
 			`INSERT INTO documents (collection,key,value,cas,exp,isJSON) VALUES ($1,$2,$3,$4,$5,$6)
 				ON CONFLICT(collection,key) DO UPDATE SET value=$3, cas=$4, exp=$5, isJSON=$6`,
 			c.id, key, val, newCas, exp, isJSON)
-		casOut = newCas
-		return err
-	})
-	if err == nil {
-		c.postDocEvent(&document{
+		return &event{
 			key:    key,
 			value:  val,
-			cas:    casOut,
+			cas:    newCas,
 			isJSON: isJSON,
-		}, sgbucket.FeedOpMutation)
-	}
-	return err
+		}, err
+	})
 }
 
 // Non-Raw:
 
 func (c *Collection) Get(key string, outVal any) (cas CAS, err error) {
-	raw, cas, err := c.GetRaw(key)
+	return c.get(c.db, key, outVal)
+}
+
+func (c *Collection) get(q Queryable, key string, outVal any) (cas CAS, err error) {
+	raw, cas, err := c.getRaw(q, key)
 	if err == nil {
 		err = decodeRaw(raw, outVal)
 	}
@@ -194,7 +206,7 @@ func (c *Collection) WriteCas(key string, flags int, exp uint32, cas CAS, val an
 		isJSON = false
 	}
 
-	err = c.withNewCas(func(txn *sql.Tx, newCas CAS) error {
+	err = c.withNewCas(func(txn *sql.Tx, newCas CAS) (*event, error) {
 		var sql string
 		if (opt & sgbucket.Append) != 0 {
 			sql = `UPDATE documents SET value=value || $1, cas=$2, exp=$6, isJSON=$7
@@ -215,7 +227,14 @@ func (c *Collection) WriteCas(key string, flags int, exp uint32, cas CAS, val an
 		if err == nil {
 			if nRows, _ := result.RowsAffected(); nRows > 0 {
 				casOut = newCas
-			} else if exists, err2 := c.Exists(key); exists && err2 == nil {
+				return &event{
+					key:        key,
+					value:      raw,
+					isDeletion: (raw == nil),
+					cas:        newCas,
+					isJSON:     isJSON,
+				}, nil
+			} else if exists, err2 := c.exists(txn, key); exists && err2 == nil {
 				if opt&sgbucket.AddOnly != 0 {
 					err = sgbucket.ErrKeyExists
 				} else {
@@ -227,36 +246,25 @@ func (c *Collection) WriteCas(key string, flags int, exp uint32, cas CAS, val an
 				err = err2
 			}
 		}
-		return err
+		return nil, err
 	})
-
-	if err == nil {
-		c.postDocEvent(&document{
-			key:    key,
-			value:  raw,
-			cas:    casOut,
-			isJSON: isJSON,
-		}, ifelse(raw != nil, sgbucket.FeedOpMutation, sgbucket.FeedOpDeletion))
-	}
 	return
 }
 
 func (c *Collection) Delete(key string) (err error) {
-	var casOut CAS
-	err = c.withNewCas(func(txn *sql.Tx, newCas CAS) error {
-		_, err := txn.Exec(
+	return c.withNewCas(func(txn *sql.Tx, newCas CAS) (e *event, err error) {
+		_, err = txn.Exec(
 			`UPDATE documents SET value=null, cas=$1, isJSON=0 WHERE collection=$2 AND key=$3`,
 			newCas, c.id, key)
-		casOut = newCas
-		return err
+		if err == nil {
+			e = &event{
+				key:        key,
+				cas:        newCas,
+				isDeletion: true,
+			}
+		}
+		return
 	})
-	if err == nil {
-		c.postDocEvent(&document{
-			key: key,
-			cas: casOut,
-		}, sgbucket.FeedOpDeletion)
-	}
-	return
 }
 
 func (c *Collection) Remove(key string, cas CAS) (casOut CAS, err error) {
@@ -294,77 +302,40 @@ func (c *Collection) Update(key string, exp uint32, callback sgbucket.UpdateFunc
 	return casOut, err
 }
 
-func (c *Collection) Incr(key string, amt, def uint64, exp uint32) (result uint64, err error) {
-	var casOut CAS
-	err = c.withNewCas(func(txn *sql.Tx, newCas CAS) error {
-		result, err := txn.Exec(
+func (c *Collection) Incr(key string, amt, deflt uint64, exp uint32) (result uint64, err error) {
+	err = c.withNewCas(func(txn *sql.Tx, newCas CAS) (*event, error) {
+		r, err := txn.Exec(
 			`UPDATE documents SET value = ifnull(value,$1) + $2, cas=$3, isJSON=0
 				WHERE collection=$4 AND key=$5`,
-			def, amt, newCas, c.id, key)
-		if err == nil {
-			if n, _ := result.RowsAffected(); n == 0 {
-				raw, _ := encodeAsRaw(def, true)
-				_, err = txn.Exec(
-					`INSERT INTO documents (collection,key,value,cas,exp,isJSON) VALUES ($1,$2,$3,$4,$5,0)
-						ON CONFLICT(collection,key) DO UPDATE SET value=$3, cas=$4, exp=$5, isJSON=0`,
-					c.id, key, raw, newCas, exp)
-			}
+			deflt, amt, newCas, c.id, key)
+		if err != nil {
+			return nil, err
 		}
-		casOut = newCas
-		return err
-	})
-	if err == nil {
-		_, err = c.Get(key, &result)
-		c.postDocEvent(&document{
+		if n, _ := r.RowsAffected(); n > 0 {
+			// Get the result after the UPDATE:
+			_, err = c.get(txn, key, &result)
+		} else {
+			raw, _ := encodeAsRaw(deflt, true)
+			_, err = txn.Exec(
+				`INSERT INTO documents (collection,key,value,cas,exp,isJSON) VALUES ($1,$2,$3,$4,$5,0)
+						ON CONFLICT(collection,key) DO UPDATE SET value=$3, cas=$4, exp=$5, isJSON=0`,
+				c.id, key, raw, newCas, exp)
+			result = deflt
+		}
+		if err != nil {
+			return nil, err
+		}
+		return &event{
 			key:   key,
 			value: []byte(strconv.FormatUint(result, 10)),
-			cas:   casOut,
-		}, sgbucket.FeedOpDeletion)
-	}
+			cas:   newCas,
+		}, nil
+	})
 	return
 }
 
 func (c *Collection) GetExpiry(key string) (expiry uint32, err error) {
 	return 0, nil
-}
-
-//////// Interface XattrStore
-
-func (c *Collection) WriteCasWithXattr(key string, xattrKey string, exp uint32, cas CAS, opts *sgbucket.MutateInOptions, outVal any, xv any) (casOut CAS, err error) {
-	err = ErrUNIMPLEMENTED
-	return
-}
-func (c *Collection) WriteWithXattr(key string, xattrKey string, exp uint32, cas CAS, opts *sgbucket.MutateInOptions, value []byte, xattrValue []byte, isDelete bool, deleteBody bool) (casOut CAS, err error) {
-	err = ErrUNIMPLEMENTED
-	return
-}
-func (c *Collection) SetXattr(key string, xattrKey string, xv []byte) (casOut CAS, err error) {
-	err = ErrUNIMPLEMENTED
-	return
-}
-func (c *Collection) RemoveXattr(key string, xattrKey string, cas CAS) (err error) {
-	err = ErrUNIMPLEMENTED
-	return
-}
-func (c *Collection) DeleteXattrs(key string, xattrKeys ...string) (err error) {
-	err = ErrUNIMPLEMENTED
-	return
-}
-func (c *Collection) GetXattr(key string, xattrKey string, xv any) (casOut CAS, err error) {
-	err = ErrUNIMPLEMENTED
-	return
-}
-func (c *Collection) GetWithXattr(key string, xattrKey string, userXattrKey string, outVal any, xv any, uxv any) (cas CAS, err error) {
-	err = ErrUNIMPLEMENTED
-	return
-}
-func (c *Collection) DeleteWithXattr(key string, xattrKey string) (err error) {
-	err = ErrUNIMPLEMENTED
-	return
-}
-func (c *Collection) WriteUpdateWithXattr(key string, xattrKey string, userXattrKey string, exp uint32, opts *sgbucket.MutateInOptions, previous *sgbucket.BucketDocument, callback sgbucket.WriteUpdateWithXattrFunc) (casOut CAS, err error) {
-	err = ErrUNIMPLEMENTED
-	return
 }
 
 //////// Interface SubdocStore
@@ -450,14 +421,7 @@ func (c *Collection) IsError(err error, errorType sgbucket.DataStoreErrorType) b
 //////// Interface BucketStoreFeatureIsSupported
 
 func (c *Collection) IsSupported(feature sgbucket.BucketStoreFeature) bool {
-	switch feature {
-	case sgbucket.BucketStoreFeatureCollections:
-		return true
-	case sgbucket.BucketStoreFeatureSubdocOperations:
-		return true
-	default:
-		return false
-	}
+	return c.bucket.IsSupported(feature)
 }
 
 //////// Utilities:
@@ -513,18 +477,23 @@ func (c *Collection) inTransaction(fn func(txn *sql.Tx) error) error {
 	return err
 }
 
-func (c *Collection) withNewCas(fn func(txn *sql.Tx, newCas CAS) error) error {
-	return c.inTransaction(func(txn *sql.Tx) error {
+func (c *Collection) withNewCas(fn func(txn *sql.Tx, newCas CAS) (*event, error)) error {
+	var e *event
+	err := c.inTransaction(func(txn *sql.Tx) error {
 		newCas, err := c.bucket.getLastCas(txn)
 		if err == nil {
 			newCas++
-			err = fn(txn, newCas)
+			e, err = fn(txn, newCas)
 			if err == nil {
 				err = c.setLastCas(txn, newCas)
 			}
 		}
 		return err
 	})
+	if err == nil {
+		c.postDocEvent(e)
+	}
+	return err
 }
 
 func encodeAsRaw(val interface{}, isJSON bool) (data []byte, err error) {

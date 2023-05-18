@@ -136,7 +136,7 @@ func TestWriteSubDoc(t *testing.T) {
 	require.True(t, coll.IsSupported(sgbucket.BucketStoreFeatureSubdocOperations))
 
 	rawJson := []byte(`{
-        "walrus":{
+        "rosmar":{
             "foo":"lol",
             "bar":"baz"}
         }`)
@@ -151,21 +151,21 @@ func TestWriteSubDoc(t *testing.T) {
 	// update json
 	rawJson = []byte(`"was here"`)
 	// test update using incorrect cas value
-	cas, err = coll.WriteSubDoc("key", "walrus", 10, rawJson)
+	cas, err = coll.WriteSubDoc("key", "rosmar", 10, rawJson)
 	assert.Error(t, err)
 
 	// test update using correct cas value
-	cas, err = coll.WriteSubDoc("key", "walrus", cas, rawJson)
+	cas, err = coll.WriteSubDoc("key", "rosmar", cas, rawJson)
 	assert.NoError(t, err)
 	assert.Equal(t, CAS(2), cas)
 
 	cas, err = coll.Get("key", &fullDoc)
 	assert.NoError(t, err)
 	assert.Equal(t, CAS(2), cas)
-	assert.EqualValues(t, map[string]any{"walrus": "was here"}, fullDoc)
+	assert.EqualValues(t, map[string]any{"rosmar": "was here"}, fullDoc)
 
 	// test update using 0 cas value
-	cas, err = coll.WriteSubDoc("key", "walrus", 0, rawJson)
+	cas, err = coll.WriteSubDoc("key", "rosmar", 0, rawJson)
 	assert.NoError(t, err)
 	assert.Equal(t, CAS(3), cas)
 }
