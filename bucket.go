@@ -19,73 +19,27 @@ import (
 // Rosmar implementation of a collection-aware bucket.
 // Implements sgbucket interfaces BucketStore, DynamicDataStoreBucket, DeletableStore
 type Bucket struct {
-	url           string                                      // Filesystem path or other URL
-	name          string                                      // bucket name
-	collectionIDs map[sgbucket.DataStoreNameImpl]CollectionID // collectionID by scope and collection name
-	collections   map[CollectionID]*Collection                // Collection by collectionID
-	lock          sync.Mutex                                  // mutex for synchronized access to Bucket
-	db            *sql.DB                                     // SQLite database handle
+	url         string                                     // Filesystem path or other URL
+	collections map[sgbucket.DataStoreNameImpl]*Collection // Collections
+	lock        sync.Mutex                                 // mutex for synchronized access to Bucket
+	db          *sql.DB                                    // SQLite database handle
 }
-
-const kMaxOpenConnections = 8
-
-const kNumVbuckets = 32
 
 // URL to open, to create an in-memory database with no file
 const InMemoryURL = ":memory:"
 
+// Maximum number of SQLite connections to open.
+const kMaxOpenConnections = 8
+
+// Number of vbuckets I pretend to have.
+const kNumVbuckets = 32
+
 //go:embed schema.sql
 var kSchema string
 
-func encodeDBURL(urlStr string) (*url.URL, error) {
-	if urlStr == InMemoryURL {
-		return &url.URL{
-			Scheme:   "file",
-			Path:     "/",
-			OmitHost: true,
-			RawQuery: "mode=memory",
-		}, nil
-	}
-	u, err := url.Parse(urlStr)
-	if err != nil {
-		return nil, err
-	}
-	if u.Scheme != "" && u.Scheme != "file" {
-		return nil, fmt.Errorf("rosmar requires file: URLs")
-	} else if u.User != nil || u.Host != "" || u.RawQuery != "" || u.Fragment != "" {
-		return nil, fmt.Errorf("rosmar URL may not have user, host or query")
-	}
-	u.Scheme = "file"
-	u.OmitHost = true
-	return u, nil
-}
-
-func deleteBucketPath(urlStr string) error {
-	if urlStr == InMemoryURL {
-		return nil
-	}
-	u, err := url.Parse(urlStr)
-	if err != nil {
-		return err
-	}
-	if u.Query().Get("mode") == "memory" {
-		return nil
-	}
-	info("Deleting db at path %s", u.Path)
-	err = os.Remove(u.Path)
-	_ = os.Remove(urlStr + "_wal")
-	_ = os.Remove(urlStr + "_shm")
-	if errors.Is(err, fs.ErrNotExist) {
-		err = nil
-	}
-	return err
-}
-
-// Value to use as the URL in NewBucket to create a new in-memory database.
-//const MemoryBucketURL = ":memory:"
-
+// Creates a new bucket.
 func NewBucket(urlStr, bucketName string) (*Bucket, error) {
-	bucket, err := openBucket(urlStr, bucketName, false)
+	bucket, err := openBucket(urlStr, false)
 	if err != nil {
 		return nil, err
 	}
@@ -101,8 +55,9 @@ func NewBucket(urlStr, bucketName string) (*Bucket, error) {
 	return bucket, nil
 }
 
-func GetBucket(urlStr, bucketName string) (bucket *Bucket, err error) {
-	if bucket, err = openBucket(urlStr, bucketName, true); err == nil {
+// Opens an existing bucket.
+func GetBucket(urlStr string) (bucket *Bucket, err error) {
+	if bucket, err = openBucket(urlStr, true); err == nil {
 		// sql.Open() doesn't really open the db; run a query to test the connection:
 		if _, err = bucket.getCollectionID(sgbucket.DefaultScope, sgbucket.DefaultCollection); err != nil {
 			bucket = nil
@@ -111,7 +66,29 @@ func GetBucket(urlStr, bucketName string) (bucket *Bucket, err error) {
 	return
 }
 
-func openBucket(urlStr string, bucketName string, exists bool) (*Bucket, error) {
+func DeleteBucket(urlStr string) error {
+	if urlStr == InMemoryURL {
+		return nil
+	}
+	u, err := url.Parse(urlStr)
+	if err != nil {
+		return err
+	} else if u.Scheme != "" && u.Scheme != "file" && u.Scheme != "rosmar" {
+		return fmt.Errorf("not a rosmar: or file: URL")
+	} else if u.Query().Get("mode") == "memory" {
+		return nil
+	}
+	info("Deleting db at path %s", u.Path)
+	err = os.Remove(u.Path)
+	_ = os.Remove(urlStr + "_wal")
+	_ = os.Remove(urlStr + "_shm")
+	if errors.Is(err, fs.ErrNotExist) {
+		err = nil
+	}
+	return err
+}
+
+func openBucket(urlStr string, exists bool) (*Bucket, error) {
 	u, err := encodeDBURL(urlStr)
 	if err != nil {
 		return nil, err
@@ -140,26 +117,48 @@ func openBucket(urlStr string, bucketName string, exists bool) (*Bucket, error) 
 	db.SetMaxOpenConns(ifelse(inMemory, 1, kMaxOpenConnections))
 
 	bucket := &Bucket{
-		url:           urlStr,
-		name:          bucketName,
-		db:            db,
-		collections:   make(map[CollectionID]*Collection),
-		collectionIDs: make(map[sgbucket.DataStoreNameImpl]CollectionID),
+		url:         urlStr,
+		db:          db,
+		collections: make(map[sgbucket.DataStoreNameImpl]*Collection),
 	}
 	return bucket, nil
 }
 
-func (bucket *Bucket) GetName() string {
-	return bucket.name
+func encodeDBURL(urlStr string) (*url.URL, error) {
+	if urlStr == InMemoryURL {
+		return &url.URL{
+			Scheme:   "file",
+			Path:     "/",
+			OmitHost: true,
+			RawQuery: "mode=memory",
+		}, nil
+	}
+	u, err := url.Parse(urlStr)
+	if err != nil {
+		return nil, err
+	}
+	if u.Scheme != "" && u.Scheme != "file" && u.Scheme != "rosmar" {
+		return nil, fmt.Errorf("rosmar requires rosmar: or file: URLs")
+	} else if u.User != nil || u.Host != "" || u.RawQuery != "" || u.Fragment != "" {
+		return nil, fmt.Errorf("rosmar URL may not have user, host or query")
+	}
+	u.Scheme = "file"
+	u.OmitHost = true
+	return u, nil
 }
 
 func (bucket *Bucket) GetURL() string {
 	return bucket.url
 }
 
+func (bucket *Bucket) GetName() string {
+	var name string
+	row := bucket.db.QueryRow(`SELECT name FROM bucket;`)
+	_ = row.Scan(&name)
+	return name
+}
+
 func (bucket *Bucket) UUID() (string, error) {
-	bucket.lock.Lock()
-	defer bucket.lock.Unlock()
 	var uuid string
 	row := bucket.db.QueryRow(`SELECT uuid FROM bucket;`)
 	err := row.Scan(&uuid)
@@ -176,7 +175,6 @@ func (bucket *Bucket) Close() {
 		bucket.db.Close()
 		bucket.db = nil
 		bucket.collections = nil
-		bucket.collectionIDs = nil
 	}
 }
 
@@ -187,7 +185,7 @@ func (bucket *Bucket) CloseAndDelete() error {
 	defer bucket.lock.Unlock()
 	var err error
 	if bucket.url != "" {
-		err = deleteBucketPath(bucket.url)
+		err = DeleteBucket(bucket.url)
 		bucket.url = ""
 	}
 	return err
@@ -278,9 +276,6 @@ func (bucket *Bucket) DropDataStore(name sgbucket.DataStoreName) error {
 }
 
 func (bucket *Bucket) ListDataStores() ([]sgbucket.DataStoreName, error) {
-	bucket.lock.Lock()
-	defer bucket.lock.Unlock()
-
 	rows, err := bucket.db.Query(`SELECT id, scope, name FROM collections ORDER BY id`)
 	if err != nil {
 		return nil, err
@@ -324,6 +319,12 @@ func (bucket *Bucket) _createCollection(name sgbucket.DataStoreNameImpl) (*Colle
 	return bucket._initCollection(name, CollectionID(collectionID)), nil
 }
 
+func (bucket *Bucket) _initCollection(name sgbucket.DataStoreNameImpl, id CollectionID) *Collection {
+	collection := newCollection(bucket, name, id, bucket.db)
+	bucket.collections[name] = collection
+	return collection
+}
+
 func (bucket *Bucket) getCollection(name sgbucket.DataStoreNameImpl) (*Collection, error) {
 	return bucket.getOrCreateCollection(name, false)
 }
@@ -332,8 +333,8 @@ func (bucket *Bucket) getOrCreateCollection(name sgbucket.DataStoreNameImpl, orC
 	bucket.lock.Lock()
 	defer bucket.lock.Unlock()
 
-	if collectionID, ok := bucket.collectionIDs[name]; ok {
-		return bucket.collections[collectionID], nil
+	if collection, ok := bucket.collections[name]; ok {
+		return collection, nil
 	}
 
 	id, err := bucket.getCollectionID(name.Scope, name.Collection)
@@ -363,18 +364,8 @@ func (bucket *Bucket) dropCollection(name sgbucket.DataStoreNameImpl) error {
 		return err
 	}
 
-	if collectionID, ok := bucket.collectionIDs[name]; ok {
-		delete(bucket.collections, collectionID)
-		delete(bucket.collectionIDs, name)
-	}
+	delete(bucket.collections, name)
 	return nil
-}
-
-func (bucket *Bucket) _initCollection(name sgbucket.DataStoreNameImpl, id CollectionID) *Collection {
-	collection := newCollection(bucket, name, id, bucket.db)
-	bucket.collections[id] = collection
-	bucket.collectionIDs[name] = id
-	return collection
 }
 
 var (

@@ -46,7 +46,7 @@ func TestNewBucket(t *testing.T) {
 }
 
 func TestGetMissingBucket(t *testing.T) {
-	bucket, err := GetBucket(testBucketPath(t), testBucketName)
+	bucket, err := GetBucket(testBucketPath(t))
 	assert.Error(t, err)
 	assert.Nil(t, bucket)
 }
@@ -60,10 +60,10 @@ func TestNewBucketInMemory(t *testing.T) {
 	assert.NoError(t, err)
 
 	// This should fail:
-	_, err = GetBucket(InMemoryURL, "Rosmar")
+	_, err = GetBucket(InMemoryURL)
 	assert.Error(t, err)
 
-	assert.NoError(t, deleteBucketPath(InMemoryURL))
+	assert.NoError(t, DeleteBucket(InMemoryURL))
 }
 
 var defaultCollection = dsName("_default", "_default")
@@ -175,7 +175,7 @@ func TestGetPersistentMultiCollectionBucket(t *testing.T) {
 	huddle.Close()
 
 	// Reopen persisted collection bucket
-	loadedHuddle, loadedErr := GetBucket(huddleURL, testBucketName)
+	loadedHuddle, loadedErr := GetBucket(huddleURL)
 	assert.NoError(t, loadedErr)
 
 	// validate contents
@@ -205,7 +205,7 @@ func TestGetPersistentMultiCollectionBucket(t *testing.T) {
 	loadedHuddle.Close()
 
 	// Reopen persisted collection bucket again to ensure dropped collection is not present
-	reloadedHuddle, reloadedErr := GetBucket(huddleURL, testBucketName)
+	reloadedHuddle, reloadedErr := GetBucket(huddleURL)
 	assert.NoError(t, reloadedErr)
 
 	// reopen dropped collection, verify that previous data is not present

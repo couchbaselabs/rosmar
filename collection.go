@@ -55,7 +55,7 @@ func (c *Collection) close() {
 //////// Interface DataStore
 
 func (c *Collection) GetName() string {
-	return c.bucket.name + "." + c.DataStoreNameImpl.String()
+	return c.bucket.GetName() + "." + c.DataStoreNameImpl.String()
 }
 
 func (c *Collection) GetCollectionID() uint32 {
@@ -209,10 +209,11 @@ func (c *Collection) WriteCas(key string, flags int, exp uint32, cas CAS, val an
 	err = c.withNewCas(func(txn *sql.Tx, newCas CAS) (*event, error) {
 		var sql string
 		if (opt & sgbucket.Append) != 0 {
+			// Append:
 			sql = `UPDATE documents SET value=value || $1, cas=$2, exp=$6, isJSON=$7
 					 WHERE collection=$3 AND key=$4 AND cas=$5`
 		} else if (opt&sgbucket.AddOnly) != 0 || cas == 0 {
-			// Insert but fall back to Update if the doc is a tombstone
+			// Insert, but fall back to Update if the doc is a tombstone
 			sql = `INSERT INTO documents (collection, key, value, cas, isJSON) VALUES($3,$4,$1,$2,$7)
 				ON CONFLICT(collection,key) DO UPDATE SET value=$1, cas=$2, exp=$6, isJSON=$7
 											WHERE value IS NULL`
@@ -220,6 +221,7 @@ func (c *Collection) WriteCas(key string, flags int, exp uint32, cas CAS, val an
 				sql += ` AND cas=$5`
 			}
 		} else {
+			// Regular write:
 			sql = `UPDATE documents SET value=$1, cas=$2, exp=$6, isJSON=$7
 					 WHERE collection=$3 AND key=$4 AND cas=$5`
 		}
@@ -460,6 +462,7 @@ func (c *Collection) setLastCas(txn *sql.Tx, cas CAS) (err error) {
 	return
 }
 
+// Runs a function within a SQLite transaction.
 func (c *Collection) inTransaction(fn func(txn *sql.Tx) error) error {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
@@ -477,6 +480,8 @@ func (c *Collection) inTransaction(fn func(txn *sql.Tx) error) error {
 	return err
 }
 
+// Runs a function within a SQLite transaction, passing it a new CAS to assign to the
+// document being modified. The function returns an event to be posted.
 func (c *Collection) withNewCas(fn func(txn *sql.Tx, newCas CAS) (*event, error)) error {
 	var e *event
 	err := c.inTransaction(func(txn *sql.Tx) error {
@@ -496,6 +501,9 @@ func (c *Collection) withNewCas(fn func(txn *sql.Tx, newCas CAS) (*event, error)
 	return err
 }
 
+// Encodes an arbitrary value to raw bytes to be stored in a document.
+// If `isJSON` is true, the value will be marshaled to JSON, or used as-is if it's a
+// byte array or pointer to one. Otherwise it must be a byte array.
 func encodeAsRaw(val interface{}, isJSON bool) (data []byte, err error) {
 	if val != nil {
 		if isJSON {
@@ -519,6 +527,8 @@ func encodeAsRaw(val interface{}, isJSON bool) (data []byte, err error) {
 	return
 }
 
+// Unmarshals a document's raw value to a return value.
+// If the return value is a pointer to []byte it will receive the raw value.
 func decodeRaw(raw []byte, rv any) error {
 	if bytesPtr, ok := rv.(*[]byte); ok {
 		*bytesPtr = raw

@@ -28,7 +28,7 @@ func (c *Collection) GetDDocs() (ddocs map[string]sgbucket.DesignDoc, err error)
 		ddoc.Views[vName] = sgbucket.ViewDef{Map: mapFn, Reduce: reduceFn}
 		ddocs[ddocName] = ddoc
 	}
-	return ddocs, err
+	return ddocs, rows.Close()
 }
 
 func (c *Collection) GetDDoc(designDoc string) (ddoc sgbucket.DesignDoc, err error) {

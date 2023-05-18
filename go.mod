@@ -1,4 +1,4 @@
-module github.com/snej/rosmar
+module github.com/couchbaselabs/rosmar
 
 go 1.19
 
