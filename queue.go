@@ -18,13 +18,18 @@ func (q *queue[T]) init() {
 }
 
 // Pushes a value into the queue. (Never blocks: the queue has no size limit.)
-func (q *queue[T]) push(value T) {
+// Returns false if the queue has been closed.
+func (q *queue[T]) push(value T) (ok bool) {
 	q.cond.L.Lock()
-	q.list.PushFront(value)
-	if q.list.Len() == 1 {
-		q.cond.Signal()
+	if q.list != nil {
+		q.list.PushFront(value)
+		if q.list.Len() == 1 {
+			q.cond.Signal()
+		}
+		ok = true
 	}
 	q.cond.L.Unlock()
+	return ok
 }
 
 // Removes the last/oldest value from the queue; if the queue is empty, blocks.

@@ -8,25 +8,35 @@ import (
 	"io/fs"
 	"net/url"
 	"os"
+	"strings"
 	"sync"
+	"time"
 
 	sgbucket "github.com/couchbase/sg-bucket"
 	"github.com/google/uuid"
 
 	_ "modernc.org/sqlite"
+	sqlite3 "modernc.org/sqlite/lib"
 )
 
 // Rosmar implementation of a collection-aware bucket.
 // Implements sgbucket interfaces BucketStore, DynamicDataStoreBucket, DeletableStore
 type Bucket struct {
 	url         string                                     // Filesystem path or other URL
+	name        string                                     // Bucket name
 	collections map[sgbucket.DataStoreNameImpl]*Collection // Collections
-	lock        sync.Mutex                                 // mutex for synchronized access to Bucket
+	mutex       sync.Mutex                                 // mutex for synchronized access to Bucket
 	db          *sql.DB                                    // SQLite database handle
 }
 
+// Scheme of Rosmar URLs
+const URLScheme = "rosmar"
+
 // URL to open, to create an in-memory database with no file
-const InMemoryURL = ":memory:"
+const InMemoryURL = "rosmar:/?mode=memory"
+
+// Filename used for persistent databases
+const kDBFilename = "rosmar.sqlite3"
 
 // Maximum number of SQLite connections to open.
 const kMaxOpenConnections = 8
@@ -39,29 +49,30 @@ var kSchema string
 
 // Creates a new bucket.
 func NewBucket(urlStr, bucketName string) (*Bucket, error) {
-	bucket, err := openBucket(urlStr, false)
+	bucket, _, err := openBucket(urlStr, false)
 	if err != nil {
 		return nil, err
 	}
-
-	uuid := uuid.New().String()
-	_, err = bucket.db.Exec(kSchema, bucketName, uuid, sgbucket.DefaultScope, sgbucket.DefaultCollection)
-	if err != nil {
-		_ = bucket.CloseAndDelete()
-		panic("Rosmar SQL schema is invalid: " + err.Error())
-		//return nil, err
+	if err = bucket.initializeSchema(bucketName); err != nil {
+		bucket = nil
 	}
-
-	return bucket, nil
+	return bucket, err
 }
 
 // Opens an existing bucket.
-func GetBucket(urlStr string) (bucket *Bucket, err error) {
-	if bucket, err = openBucket(urlStr, true); err == nil {
-		// sql.Open() doesn't really open the db; run a query to test the connection:
-		if _, err = bucket.getCollectionID(sgbucket.DefaultScope, sgbucket.DefaultCollection); err != nil {
-			bucket = nil
-		}
+func GetBucket(urlStr string, bucketName string) (bucket *Bucket, err error) {
+	bucket, inMemory, err := openBucket(urlStr, true)
+	if err != nil {
+		return
+	}
+	if inMemory {
+		err = bucket.initializeSchema(bucketName)
+	} else {
+		row := bucket.db.QueryRow(`SELECT name FROM bucket`)
+		err = row.Scan(&bucket.name)
+	}
+	if err != nil {
+		bucket = nil
 	}
 	return
 }
@@ -73,55 +84,80 @@ func DeleteBucket(urlStr string) error {
 	u, err := url.Parse(urlStr)
 	if err != nil {
 		return err
-	} else if u.Scheme != "" && u.Scheme != "file" && u.Scheme != "rosmar" {
+	} else if u.Scheme != "" && u.Scheme != "file" && u.Scheme != URLScheme {
 		return fmt.Errorf("not a rosmar: or file: URL")
 	} else if u.Query().Get("mode") == "memory" {
 		return nil
 	}
+	u = u.JoinPath(kDBFilename)
 	info("Deleting db at path %s", u.Path)
 	err = os.Remove(u.Path)
-	_ = os.Remove(urlStr + "_wal")
-	_ = os.Remove(urlStr + "_shm")
 	if errors.Is(err, fs.ErrNotExist) {
 		err = nil
+	}
+	if err == nil {
+		_ = os.Remove(urlStr + "_wal")
+		_ = os.Remove(urlStr + "_shm")
 	}
 	return err
 }
 
-func openBucket(urlStr string, exists bool) (*Bucket, error) {
+func openBucket(urlStr string, mustExist bool) (bucket *Bucket, inMemory bool, err error) {
 	u, err := encodeDBURL(urlStr)
 	if err != nil {
-		return nil, err
+		return
 	}
 	urlStr = u.String()
 
 	query := u.Query()
-	inMemory := query.Get("mode") == "memory"
-	if inMemory {
-		if exists {
-			return nil, fmt.Errorf("in-memory db must be created as new")
-		}
-	} else {
-		query.Set("mode", ifelse(exists, "rw", "rwc"))
+	inMemory = query.Get("mode") == "memory"
+	if !inMemory {
+		u = u.JoinPath(kDBFilename)
+		query.Set("mode", ifelse(mustExist, "rw", "rwc"))
 	}
 	query.Add("_pragma", "busy_timeout=10000")
 	query.Add("_pragma", "journal_mode=WAL")
 	u.RawQuery = query.Encode()
-	debug("Opening %s", u)
+	u.Scheme = "file"
+	info("Opening Rosmar db %s", u)
 
 	db, err := sql.Open("sqlite", u.String())
 	if err != nil {
-		return nil, err
+		return
 	}
 	// An in-memory db cannot have multiple connections
 	db.SetMaxOpenConns(ifelse(inMemory, 1, kMaxOpenConnections))
 
-	bucket := &Bucket{
+	// A simple query to see if the db is actually available:
+	var vers int
+	if err = db.QueryRow(`pragma user_version`).Scan(&vers); err != nil {
+		if msg, ok := sqliteErrMessage(err); ok {
+			// Work around an incorrect error message in the Go-sqlite library
+			// https://gitlab.com/cznic/sqlite/-/issues/147
+			if strings.Contains(err.Error(), "out of memory") {
+				err = fmt.Errorf("%s", msg)
+			}
+		}
+		err = remapError(err)
+	}
+
+	bucket = &Bucket{
 		url:         urlStr,
 		db:          db,
 		collections: make(map[sgbucket.DataStoreNameImpl]*Collection),
 	}
-	return bucket, nil
+	return
+}
+
+func (bucket *Bucket) initializeSchema(bucketName string) (err error) {
+	uuid := uuid.New().String()
+	_, err = bucket.db.Exec(kSchema, bucketName, uuid, sgbucket.DefaultScope, sgbucket.DefaultCollection)
+	if err != nil {
+		_ = bucket.CloseAndDelete()
+		panic("Rosmar SQL schema is invalid: " + err.Error())
+	}
+	bucket.name = bucketName
+	return
 }
 
 func encodeDBURL(urlStr string) (*url.URL, error) {
@@ -137,26 +173,62 @@ func encodeDBURL(urlStr string) (*url.URL, error) {
 	if err != nil {
 		return nil, err
 	}
-	if u.Scheme != "" && u.Scheme != "file" && u.Scheme != "rosmar" {
+	if u.Scheme != "" && u.Scheme != "file" && u.Scheme != URLScheme {
 		return nil, fmt.Errorf("rosmar requires rosmar: or file: URLs")
-	} else if u.User != nil || u.Host != "" || u.RawQuery != "" || u.Fragment != "" {
-		return nil, fmt.Errorf("rosmar URL may not have user, host or query")
+	} else if u.User != nil || u.Host != "" || u.Fragment != "" {
+		return nil, fmt.Errorf("rosmar URL may not have user, host or fragment")
+	} else if u.RawQuery != "" && u.RawQuery != "mode=memory" {
+		return nil, fmt.Errorf("unsupported query in rosmar URL")
 	}
-	u.Scheme = "file"
+
+	u.Scheme = "rosmar"
 	u.OmitHost = true
 	return u, nil
 }
 
-func (bucket *Bucket) GetURL() string {
-	return bucket.url
+// Runs a function within a SQLite transaction.
+func (bucket *Bucket) inTransaction(fn func(txn *sql.Tx) error) error {
+	// SQLite allows only a single writer, so use a mutex to avoid BUSY and LOCKED errors.
+	bucket.mutex.Lock()
+	defer bucket.mutex.Unlock()
+
+	var err error
+	for attempt := 0; attempt < 10; attempt++ {
+		if attempt > 0 {
+			warn("\tinTransaction: %s; retrying (#%d) ...", err, attempt+1)
+			time.Sleep(time.Duration((10 * attempt * attempt) * int(time.Millisecond)))
+		}
+
+		var txn *sql.Tx
+		txn, err = bucket.db.Begin()
+		if err != nil {
+			break
+		}
+
+		err = fn(txn)
+
+		if err == nil {
+			err = txn.Commit()
+		}
+
+		if err != nil {
+			txn.Rollback()
+			if sqliteErrCode(err) == sqlite3.SQLITE_BUSY {
+				continue // retry
+			} else {
+				logError("\tinTransaction: ROLLBACK with error %T %v", err, err)
+			}
+		} else if attempt > 0 {
+			warn("\tinTransaction: COMMIT successful on attempt #%d", attempt+1)
+		}
+		break
+	}
+	return remapError(err)
 }
 
-func (bucket *Bucket) GetName() string {
-	var name string
-	row := bucket.db.QueryRow(`SELECT name FROM bucket;`)
-	_ = row.Scan(&name)
-	return name
-}
+func (bucket *Bucket) GetURL() string { return bucket.url }
+
+func (bucket *Bucket) GetName() string { return bucket.name }
 
 func (bucket *Bucket) UUID() (string, error) {
 	var uuid string
@@ -166,8 +238,9 @@ func (bucket *Bucket) UUID() (string, error) {
 }
 
 func (bucket *Bucket) Close() {
-	bucket.lock.Lock()
-	defer bucket.lock.Unlock()
+	debug("Close(bucket %s)", bucket.GetName())
+	bucket.mutex.Lock()
+	defer bucket.mutex.Unlock()
 	for _, c := range bucket.collections {
 		c.close()
 	}
@@ -181,8 +254,8 @@ func (bucket *Bucket) Close() {
 func (bucket *Bucket) CloseAndDelete() error {
 	bucket.Close()
 
-	bucket.lock.Lock()
-	defer bucket.lock.Unlock()
+	bucket.mutex.Lock()
+	defer bucket.mutex.Unlock()
 	var err error
 	if bucket.url != "" {
 		err = DeleteBucket(bucket.url)
@@ -196,7 +269,7 @@ func (bucket *Bucket) IsSupported(feature sgbucket.BucketStoreFeature) bool {
 	case sgbucket.BucketStoreFeatureCollections:
 		return true
 	case sgbucket.BucketStoreFeatureSubdocOperations:
-		return true
+		return false //true
 	case sgbucket.BucketStoreFeatureXattrs:
 		return true
 	case sgbucket.BucketStoreFeatureCrc32cMacroExpansion:
@@ -237,28 +310,34 @@ func validateName(name sgbucket.DataStoreName) (sgbucket.DataStoreNameImpl, erro
 }
 
 func (bucket *Bucket) DefaultDataStore() sgbucket.DataStore {
+	debug("DefaultDataStore()")
 	collection, err := bucket.getOrCreateCollection(defaultDataStoreName, true)
 	if err != nil {
-		warn("Unable to retrieve DefaultDataStore for rosmar Bucket: %v", err)
+		warn("DefaultDataStore() ->  %v", err)
 		return nil
 	}
 	return collection
 }
 
 func (bucket *Bucket) NamedDataStore(name sgbucket.DataStoreName) (sgbucket.DataStore, error) {
+	debug("NamedDataStore(%q)", name)
 	sc, err := validateName(name)
 	if err != nil {
-		return nil, fmt.Errorf("attempting to create/update database with a scope/collection that is %w", err)
+		warn("NamedDataStore(%q) -> %v", name, err)
+		return nil, err
 	}
 
 	collection, err := bucket.getOrCreateCollection(sc, true)
 	if err != nil {
-		return nil, fmt.Errorf("unable to retrieve NamedDataStore for rosmar Bucket: %v", err)
+		err = fmt.Errorf("unable to retrieve NamedDataStore for rosmar Bucket: %v", err)
+		warn("NamedDataStore(%q) -> %v", name, err)
+		return nil, err
 	}
 	return collection, nil
 }
 
 func (bucket *Bucket) CreateDataStore(name sgbucket.DataStoreName) error {
+	debug("CreateDataStore(%q)", name)
 	sc, err := validateName(name)
 	if err != nil {
 		return err
@@ -268,6 +347,7 @@ func (bucket *Bucket) CreateDataStore(name sgbucket.DataStoreName) error {
 }
 
 func (bucket *Bucket) DropDataStore(name sgbucket.DataStoreName) error {
+	debug("DropDataStore(%q)", name)
 	sc, err := validateName(name)
 	if err != nil {
 		return err
@@ -276,6 +356,7 @@ func (bucket *Bucket) DropDataStore(name sgbucket.DataStoreName) error {
 }
 
 func (bucket *Bucket) ListDataStores() ([]sgbucket.DataStoreName, error) {
+	debug("ListDataStores()")
 	rows, err := bucket.db.Query(`SELECT id, scope, name FROM collections ORDER BY id`)
 	if err != nil {
 		return nil, err
@@ -289,6 +370,7 @@ func (bucket *Bucket) ListDataStores() ([]sgbucket.DataStoreName, error) {
 		}
 		result = append(result, sgbucket.DataStoreNameImpl{Scope: scope, Collection: name})
 	}
+	debug("ListDataStores() -> %v", result)
 	return result, rows.Close()
 }
 
@@ -301,12 +383,13 @@ func (bucket *Bucket) getCollectionID(scope, collection string) (id CollectionID
 }
 
 func (bucket *Bucket) createCollection(name sgbucket.DataStoreNameImpl) (*Collection, error) {
-	bucket.lock.Lock()
-	defer bucket.lock.Unlock()
+	bucket.mutex.Lock()
+	defer bucket.mutex.Unlock()
 
 	return bucket._createCollection(name)
 }
 
+// caller must hold bucket mutex
 func (bucket *Bucket) _createCollection(name sgbucket.DataStoreNameImpl) (*Collection, error) {
 	result, err := bucket.db.Exec(`INSERT INTO collections (scope, name) VALUES (?, ?)`, name.Scope, name.Collection)
 	if err != nil {
@@ -330,8 +413,8 @@ func (bucket *Bucket) getCollection(name sgbucket.DataStoreNameImpl) (*Collectio
 }
 
 func (bucket *Bucket) getOrCreateCollection(name sgbucket.DataStoreNameImpl, orCreate bool) (*Collection, error) {
-	bucket.lock.Lock()
-	defer bucket.lock.Unlock()
+	bucket.mutex.Lock()
+	defer bucket.mutex.Unlock()
 
 	if collection, ok := bucket.collections[name]; ok {
 		return collection, nil
@@ -356,15 +439,18 @@ func (bucket *Bucket) dropCollection(name sgbucket.DataStoreNameImpl) error {
 		return errors.New("default collection cannot be dropped")
 	}
 
-	bucket.lock.Lock()
-	defer bucket.lock.Unlock()
+	bucket.mutex.Lock()
+	defer bucket.mutex.Unlock()
+
+	if c := bucket.collections[name]; c != nil {
+		c.close()
+		delete(bucket.collections, name)
+	}
 
 	_, err := bucket.db.Exec(`DELETE FROM collections WHERE scope=? AND name=?`, name.ScopeName(), name.CollectionName())
 	if err != nil {
 		return err
 	}
-
-	delete(bucket.collections, name)
 	return nil
 }
 

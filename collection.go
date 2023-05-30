@@ -21,7 +21,7 @@ type Collection struct {
 	sgbucket.DataStoreNameImpl // Fully qualified name (scope and collection)
 	bucket                     *Bucket
 	db                         *sql.DB
-	id                         CollectionID // Unique collectionID
+	id                         CollectionID // Row ID
 	mutex                      sync.Mutex
 	feeds                      []*dcpFeed
 	viewCache                  map[viewKey]*rosmarView
@@ -31,7 +31,7 @@ type CollectionID uint32
 type CAS = uint64
 
 // common interface of sql.DB, sql.Tx
-type Queryable interface {
+type queryable interface {
 	Exec(query string, args ...any) (sql.Result, error)
 	Query(query string, args ...any) (*sql.Rows, error)
 	QueryRow(query string, args ...any) *sql.Row
@@ -50,6 +50,7 @@ func (c *Collection) close() {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
 	c.stopFeeds()
+	c.db = nil
 }
 
 //////// Interface DataStore
@@ -58,8 +59,9 @@ func (c *Collection) GetName() string {
 	return c.bucket.GetName() + "." + c.DataStoreNameImpl.String()
 }
 
+// The collection's ID.
 func (c *Collection) GetCollectionID() uint32 {
-	return uint32(c.id)
+	return uint32(c.id) - 1 // SG expects that the default collection has id 0, so subtract 1
 }
 
 //////// Interface KVStore
@@ -70,7 +72,7 @@ func (c *Collection) Exists(key string) (exists bool, err error) {
 	return c.exists(c.db, key)
 }
 
-func (c *Collection) exists(q Queryable, key string) (exists bool, err error) {
+func (c *Collection) exists(q queryable, key string) (exists bool, err error) {
 	row := q.QueryRow(`SELECT 1 FROM documents
 							WHERE collection=? AND key=? AND value NOT NULL`, c.id, key)
 	var i int
@@ -83,13 +85,14 @@ func (c *Collection) exists(q Queryable, key string) (exists bool, err error) {
 }
 
 func (c *Collection) GetRaw(key string) (val []byte, cas CAS, err error) {
+	debug("rosmar.GetRaw(%q)", key)
 	return c.getRaw(c.db, key)
 }
 
-func (c *Collection) getRaw(q Queryable, key string) (val []byte, cas CAS, err error) {
+func (c *Collection) getRaw(q queryable, key string) (val []byte, cas CAS, err error) {
 	row := q.QueryRow("SELECT value, cas FROM documents WHERE collection=? AND key=?", c.id, key)
 	if err = row.Scan(&val, &cas); err != nil {
-		err = remapError(err, key)
+		err = remapKeyError(err, key)
 	} else if val == nil {
 		err = sgbucket.MissingError{Key: key}
 	}
@@ -97,12 +100,14 @@ func (c *Collection) getRaw(q Queryable, key string) (val []byte, cas CAS, err e
 }
 
 func (c *Collection) GetAndTouchRaw(key string, exp uint32) (val []byte, cas CAS, err error) {
+	debug("rosmar.GetAndTouchRaw(%q)", key)
 	// Until rosmar supports expiry, the exp value is ignored
 	return c.GetRaw(key)
 }
 
 func (c *Collection) AddRaw(key string, exp uint32, val []byte) (added bool, err error) {
-	return c.add(key, exp, val, false)
+	debug("rosmar.AddRaw(%q, %d, ...)", key, exp)
+	return c.add(key, exp, val, looksLikeJSON(val))
 }
 
 func (c *Collection) add(key string, exp uint32, val []byte, isJSON bool) (added bool, err error) {
@@ -122,18 +127,21 @@ func (c *Collection) add(key string, exp uint32, val []byte, isJSON bool) (added
 		casOut = newCas
 		n, _ := result.RowsAffected()
 		added = (n > 0)
+
 		e = &event{
 			key:    key,
 			value:  val,
 			cas:    casOut,
 			isJSON: isJSON,
 		}
+		e.xattrs, err = c.getRawXattrs(txn, key) // needed for the DCP event
 		return
 	})
 	return
 }
 
 func (c *Collection) SetRaw(key string, exp uint32, opts *sgbucket.UpsertOptions, val []byte) (err error) {
+	debug("rosmar.SetRaw(%q, %d, ...)", key, exp)
 	return c.set(key, exp, opts, val, false)
 }
 
@@ -147,11 +155,19 @@ func (c *Collection) set(key string, exp uint32, opts *sgbucket.UpsertOptions, v
 			`INSERT INTO documents (collection,key,value,cas,exp,isJSON) VALUES ($1,$2,$3,$4,$5,$6)
 				ON CONFLICT(collection,key) DO UPDATE SET value=$3, cas=$4, exp=$5, isJSON=$6`,
 			c.id, key, val, newCas, exp, isJSON)
+		if err != nil {
+			return nil, err
+		}
+		xattrs, err := c.getRawXattrs(txn, key) // needed for the DCP event
+		if err != nil {
+			return nil, err
+		}
 		return &event{
 			key:    key,
 			value:  val,
 			cas:    newCas,
 			isJSON: isJSON,
+			xattrs: xattrs,
 		}, err
 	})
 }
@@ -159,10 +175,11 @@ func (c *Collection) set(key string, exp uint32, opts *sgbucket.UpsertOptions, v
 // Non-Raw:
 
 func (c *Collection) Get(key string, outVal any) (cas CAS, err error) {
+	debug("rosmar.Get(%q)", key)
 	return c.get(c.db, key, outVal)
 }
 
-func (c *Collection) get(q Queryable, key string, outVal any) (cas CAS, err error) {
+func (c *Collection) get(q queryable, key string, outVal any) (cas CAS, err error) {
 	raw, cas, err := c.getRaw(q, key)
 	if err == nil {
 		err = decodeRaw(raw, outVal)
@@ -177,14 +194,17 @@ func (c *Collection) Touch(key string, exp uint32) (cas CAS, err error) {
 }
 
 func (c *Collection) Add(key string, exp uint32, val any) (added bool, err error) {
+	debug("rosmar.Add(%q, %v)", key, val)
 	raw, err := encodeAsRaw(val, true)
 	if err == nil {
 		added, err = c.add(key, exp, raw, true)
 	}
+	debug("\tadd -> %v, %v", added, err)
 	return
 }
 
 func (c *Collection) Set(key string, exp uint32, opts *sgbucket.UpsertOptions, val any) (err error) {
+	debug("rosmar.Set(%q, %v)", key, val)
 	raw, err := encodeAsRaw(val, true)
 	if err == nil {
 		err = c.set(key, exp, opts, raw, true)
@@ -199,6 +219,7 @@ func (c *Collection) WriteCas(key string, flags int, exp uint32, cas CAS, val an
 	if err != nil {
 		return 0, err
 	}
+	debug("rosmar.WriteCas(%q, cas=%x, opt=%v, val=%s)", key, cas, opt, raw)
 	if len(raw) > MaxDocSize {
 		return 0, &sgbucket.DocTooBigErr{}
 	}
@@ -223,20 +244,14 @@ func (c *Collection) WriteCas(key string, flags int, exp uint32, cas CAS, val an
 		} else {
 			// Regular write:
 			sql = `UPDATE documents SET value=$1, cas=$2, exp=$6, isJSON=$7
-					 WHERE collection=$3 AND key=$4 AND cas=$5`
+				   WHERE collection=$3 AND key=$4 AND cas=$5`
 		}
 		result, err := txn.Exec(sql, raw, newCas, c.id, key, cas, exp, isJSON)
-		if err == nil {
-			if nRows, _ := result.RowsAffected(); nRows > 0 {
-				casOut = newCas
-				return &event{
-					key:        key,
-					value:      raw,
-					isDeletion: (raw == nil),
-					cas:        newCas,
-					isJSON:     isJSON,
-				}, nil
-			} else if exists, err2 := c.exists(txn, key); exists && err2 == nil {
+		if err != nil {
+			return nil, err
+		}
+		if nRows, _ := result.RowsAffected(); nRows == 0 {
+			if exists, err2 := c.exists(txn, key); exists && err2 == nil {
 				if opt&sgbucket.AddOnly != 0 {
 					err = sgbucket.ErrKeyExists
 				} else {
@@ -247,37 +262,90 @@ func (c *Collection) WriteCas(key string, flags int, exp uint32, cas CAS, val an
 			} else {
 				err = err2
 			}
+			return nil, err
 		}
-		return nil, err
+
+		xattrs, err := c.getRawXattrs(txn, key) // needed for the DCP event
+		if err != nil {
+			return nil, err
+		}
+		casOut = newCas
+		return &event{
+			key:        key,
+			value:      raw,
+			isDeletion: (raw == nil),
+			cas:        newCas,
+			isJSON:     isJSON,
+			xattrs:     xattrs,
+		}, nil
 	})
 	return
 }
 
+func (c *Collection) Remove(key string, cas CAS) (casOut CAS, err error) {
+	return c.remove(key, &cas)
+}
+
 func (c *Collection) Delete(key string) (err error) {
-	return c.withNewCas(func(txn *sql.Tx, newCas CAS) (e *event, err error) {
+	debug("rosmar.Delete(%q)", key)
+	_, err = c.remove(key, nil)
+	return err
+}
+
+func (c *Collection) remove(key string, ifCas *CAS) (casOut CAS, err error) {
+	err = c.withNewCas(func(txn *sql.Tx, newCas CAS) (e *event, err error) {
+		// Get the doc, possibly checking cas:
+		var cas CAS
+		var rawXattrs []byte
+		row := txn.QueryRow(
+			`SELECT cas, xattrs FROM documents WHERE collection=$1 AND key=$2`,
+			c.id, key)
+		if err = row.Scan(&cas, &rawXattrs); err != nil {
+			return
+		} else if ifCas != nil && cas != *ifCas {
+			return nil, sgbucket.CasMismatchErr{Expected: *ifCas, Actual: cas}
+		}
+
+		// Deleting a doc removes user xattrs but not system ones:
+		if len(rawXattrs) > 0 {
+			var xattrs map[string]json.RawMessage
+			_ = json.Unmarshal(rawXattrs, &xattrs)
+			for k, _ := range xattrs {
+				if k == "" || k[0] != '_' {
+					delete(xattrs, k)
+				}
+			}
+			if len(xattrs) > 0 {
+				rawXattrs, _ = json.Marshal(xattrs)
+			} else {
+				rawXattrs = nil
+			}
+		}
+
+		// Now update, setting value=null, isJSON=false, and updating the xattrs:
 		_, err = txn.Exec(
-			`UPDATE documents SET value=null, cas=$1, isJSON=0 WHERE collection=$2 AND key=$3`,
-			newCas, c.id, key)
+			`UPDATE documents SET value=null, cas=$1, isJSON=0, xattrs=$2
+			 WHERE collection=$3 AND key=$4`,
+			newCas, rawXattrs, c.id, key)
 		if err == nil {
 			e = &event{
 				key:        key,
 				cas:        newCas,
 				isDeletion: true,
+				xattrs:     rawXattrs,
 			}
 		}
+		casOut = newCas
 		return
 	})
-}
-
-func (c *Collection) Remove(key string, cas CAS) (casOut CAS, err error) {
-	return c.WriteCas(key, 0, 0, cas, nil, sgbucket.Raw)
+	return
 }
 
 func (c *Collection) Update(key string, exp uint32, callback sgbucket.UpdateFunc) (casOut CAS, err error) {
 	for {
 		var raw []byte
 		var cas CAS
-		if raw, cas, err = c.GetRaw(key); err != nil {
+		if raw, cas, err = c.GetRaw(key); err != nil && !c.IsError(err, sgbucket.KeyNotFoundError) {
 			return
 		}
 
@@ -305,6 +373,7 @@ func (c *Collection) Update(key string, exp uint32, callback sgbucket.UpdateFunc
 }
 
 func (c *Collection) Incr(key string, amt, deflt uint64, exp uint32) (result uint64, err error) {
+	debug("INCR(%q, %d, %d)", key, amt, deflt)
 	err = c.withNewCas(func(txn *sql.Tx, newCas CAS) (*event, error) {
 		r, err := txn.Exec(
 			`UPDATE documents SET value = ifnull(value,$1) + $2, cas=$3, isJSON=0
@@ -333,6 +402,7 @@ func (c *Collection) Incr(key string, amt, deflt uint64, exp uint32) (result uin
 			cas:   newCas,
 		}, nil
 	})
+	debug("\tincr -> %d, %v", result, err)
 	return
 }
 
@@ -343,8 +413,7 @@ func (c *Collection) GetExpiry(key string) (expiry uint32, err error) {
 //////// Interface SubdocStore
 
 func (c *Collection) SubdocInsert(docID string, fieldPath string, cas CAS, value any) (err error) {
-	err = ErrUNIMPLEMENTED
-	return
+	return &ErrUnimplemented{reason: "Rosmar does not implement SubdocInsert"}
 }
 
 func (c *Collection) GetSubDocRaw(key string, subdocKey string) (value []byte, casOut uint64, err error) {
@@ -428,19 +497,6 @@ func (c *Collection) IsSupported(feature sgbucket.BucketStoreFeature) bool {
 
 //////// Utilities:
 
-type ErrUnimplemented struct{ reason string }
-
-func (err *ErrUnimplemented) Error() string { return err.reason }
-
-var ErrUNIMPLEMENTED = &ErrUnimplemented{reason: "Rosmar does not implement this method"}
-
-func remapError(err error, key string) error {
-	if err == sql.ErrNoRows {
-		err = sgbucket.MissingError{Key: key}
-	}
-	return err
-}
-
 // Returns the last CAS assigned to any doc in _any_ collection.
 func (bucket *Bucket) getLastCas(txn *sql.Tx) (cas CAS, err error) {
 	row := txn.QueryRow("SELECT lastCas FROM bucket")
@@ -462,29 +518,11 @@ func (c *Collection) setLastCas(txn *sql.Tx, cas CAS) (err error) {
 	return
 }
 
-// Runs a function within a SQLite transaction.
-func (c *Collection) inTransaction(fn func(txn *sql.Tx) error) error {
-	c.mutex.Lock()
-	defer c.mutex.Unlock()
-
-	txn, err := c.db.Begin()
-	if err != nil {
-		return err
-	}
-	err = fn(txn)
-	if err == nil {
-		err = txn.Commit()
-	} else {
-		txn.Rollback()
-	}
-	return err
-}
-
 // Runs a function within a SQLite transaction, passing it a new CAS to assign to the
 // document being modified. The function returns an event to be posted.
 func (c *Collection) withNewCas(fn func(txn *sql.Tx, newCas CAS) (*event, error)) error {
 	var e *event
-	err := c.inTransaction(func(txn *sql.Tx) error {
+	err := c.bucket.inTransaction(func(txn *sql.Tx) error {
 		newCas, err := c.bucket.getLastCas(txn)
 		if err == nil {
 			newCas++
@@ -499,43 +537,6 @@ func (c *Collection) withNewCas(fn func(txn *sql.Tx, newCas CAS) (*event, error)
 		c.postDocEvent(e)
 	}
 	return err
-}
-
-// Encodes an arbitrary value to raw bytes to be stored in a document.
-// If `isJSON` is true, the value will be marshaled to JSON, or used as-is if it's a
-// byte array or pointer to one. Otherwise it must be a byte array.
-func encodeAsRaw(val interface{}, isJSON bool) (data []byte, err error) {
-	if val != nil {
-		if isJSON {
-			// Check for already marshalled JSON
-			switch typedVal := val.(type) {
-			case []byte:
-				data = typedVal
-			case *[]byte:
-				data = *typedVal
-			default:
-				data, err = json.Marshal(val)
-			}
-		} else {
-			if typedVal, ok := val.([]byte); ok {
-				data = typedVal
-			} else {
-				err = fmt.Errorf("raw value must be []byte")
-			}
-		}
-	}
-	return
-}
-
-// Unmarshals a document's raw value to a return value.
-// If the return value is a pointer to []byte it will receive the raw value.
-func decodeRaw(raw []byte, rv any) error {
-	if bytesPtr, ok := rv.(*[]byte); ok {
-		*bytesPtr = raw
-		return nil
-	} else {
-		return json.Unmarshal(raw, rv)
-	}
 }
 
 var (

@@ -17,11 +17,13 @@ func init() {
 	}
 }
 
-const testBucketFilename = "rosmar_test"
+const testBucketDirName = "rosmar_test"
 const testBucketName = "RosmarTest"
 
 func testBucketPath(t *testing.T) string {
-	return fmt.Sprintf("%s%c%s", t.TempDir(), os.PathSeparator, testBucketFilename)
+	dir := fmt.Sprintf("%s%c%s", t.TempDir(), os.PathSeparator, testBucketDirName)
+	os.Mkdir(dir, 0700)
+	return dir
 }
 
 func makeTestBucket(t *testing.T) *Bucket {
@@ -42,16 +44,20 @@ func dsName(scope string, coll string) sgbucket.DataStoreName {
 func TestNewBucket(t *testing.T) {
 	bucket := makeTestBucket(t)
 	assert.Equal(t, testBucketName, bucket.GetName())
-	assert.Contains(t, bucket.GetURL(), testBucketFilename)
+	assert.Contains(t, bucket.GetURL(), testBucketDirName)
 }
 
 func TestGetMissingBucket(t *testing.T) {
-	bucket, err := GetBucket(testBucketPath(t))
-	assert.Error(t, err)
+	path := testBucketPath(t)
+	require.NoError(t, DeleteBucket(path))
+	bucket, err := GetBucket(path, "Rosmar")
+	assert.ErrorContains(t, err, "Unable to open the database file")
 	assert.Nil(t, bucket)
 }
 
 func TestNewBucketInMemory(t *testing.T) {
+	assert.NoError(t, DeleteBucket(InMemoryURL))
+
 	bucket, err := NewBucket(InMemoryURL, "Rosmar")
 	require.NoError(t, err)
 	require.NotNil(t, bucket)
@@ -59,11 +65,10 @@ func TestNewBucketInMemory(t *testing.T) {
 	err = bucket.CloseAndDelete()
 	assert.NoError(t, err)
 
-	// This should fail:
-	_, err = GetBucket(InMemoryURL)
-	assert.Error(t, err)
-
-	assert.NoError(t, DeleteBucket(InMemoryURL))
+	bucket, err = GetBucket(InMemoryURL, "Rosmar")
+	require.NoError(t, err)
+	require.NotNil(t, bucket)
+	bucket.Close()
 }
 
 var defaultCollection = dsName("_default", "_default")
@@ -175,7 +180,7 @@ func TestGetPersistentMultiCollectionBucket(t *testing.T) {
 	huddle.Close()
 
 	// Reopen persisted collection bucket
-	loadedHuddle, loadedErr := GetBucket(huddleURL)
+	loadedHuddle, loadedErr := GetBucket(huddleURL, "bucket")
 	assert.NoError(t, loadedErr)
 
 	// validate contents
@@ -205,7 +210,7 @@ func TestGetPersistentMultiCollectionBucket(t *testing.T) {
 	loadedHuddle.Close()
 
 	// Reopen persisted collection bucket again to ensure dropped collection is not present
-	reloadedHuddle, reloadedErr := GetBucket(huddleURL)
+	reloadedHuddle, reloadedErr := GetBucket(huddleURL, "bucket")
 	assert.NoError(t, reloadedErr)
 
 	// reopen dropped collection, verify that previous data is not present

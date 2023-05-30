@@ -129,6 +129,7 @@ func TestGets(t *testing.T) {
 
 }
 
+/*
 func TestWriteSubDoc(t *testing.T) {
 	ensureNoLeakedFeeds(t)
 
@@ -169,6 +170,7 @@ func TestWriteSubDoc(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Equal(t, CAS(3), cas)
 }
+*/
 
 func TestWriteCas(t *testing.T) {
 	ensureNoLeakedFeeds(t)

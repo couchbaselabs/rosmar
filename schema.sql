@@ -16,22 +16,26 @@ CREATE TABLE documents (
 	key 		text not null,
 	cas 		integer not null,
 	exp 		integer,
-	xattrs 		blob,
-	userXattrs  blob,
+	xattrs 		blob, /*JSON*/
 	isJSON 		integer default true,
 	value 		blob,
 	UNIQUE (collection, key) );
 CREATE INDEX docs_cas ON documents (collection, cas);
 
-CREATE TABLE views (
+CREATE TABLE designDocs (
 	id 			integer primary key autoincrement,
 	collection 	integer references collections(id) on delete cascade,
-	designDoc 	text not null,      /* name of design doc */
+	name		text not null,
+	UNIQUE(collection, name) );
+
+CREATE TABLE views (
+	id 			integer primary key autoincrement,
+	designDoc 	integer references designDocs(id) on delete cascade,
 	name 		text not null,      /* name of view */
 	mapFn 		text not null,
 	reduceFn 	text,
 	lastCas 	integer default 0,  /* highest CAS value that's indexed */
-	UNIQUE (collection, designDoc, name) );
+	UNIQUE (designDoc, name) );
 
 /* This table stores view indexes: key/value pairs emitted by map functions. */
 CREATE TABLE mapped (

@@ -3,6 +3,7 @@ package rosmar
 import (
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"time"
 
 	sgbucket "github.com/couchbase/sg-bucket"
@@ -10,6 +11,7 @@ import (
 
 // A single view stored in a Bucket.
 type rosmarView struct {
+	fullName       string
 	id             int64                   // Database primary key (views.id)
 	mapFnSource    string                  // Map function source code
 	reduceFnSource string                  // Reduce function (if any)
@@ -27,21 +29,28 @@ func (vn *viewKey) String() string { return vn.designDoc + "/" + vn.name }
 const kMapFnTimeout = 5 * time.Second
 
 func (c *Collection) View(designDoc string, viewName string, params map[string]interface{}) (result sgbucket.ViewResult, err error) {
-	staleOK := true
-	if params != nil {
-		if staleParam, found := params["stale"].(bool); found {
-			staleOK = staleParam
-		}
-	}
+	debug("View(%q, %q, %+v)", designDoc, viewName, params)
 	// Look up the view and its index:
 	view, upToDate, err := c.findView(designDoc, viewName)
 	if err != nil {
 		return result, err
 	}
 	// Update the view index if it's out of date:
-	if !upToDate && !staleOK {
-		if err = c.updateView(view); err != nil {
-			return
+	if !upToDate {
+		var staleVal any
+		if params != nil {
+			staleVal = params["stale"]
+		}
+		if staleVal == "updateAfter" {
+			go func() {
+				debug("\t{updating view in background...}")
+				c.updateView(view)
+				debug("\t{...done updating view in background}")
+			}()
+		} else if staleVal != true && staleVal != "ok" {
+			if err = c.updateView(view); err != nil {
+				return
+			}
 		}
 	}
 	// Fetch the view index:
@@ -50,6 +59,7 @@ func (c *Collection) View(designDoc string, viewName string, params map[string]i
 	}
 	// Filter and reduce:
 	err = result.Process(params, c, view.reduceFnSource)
+	debug("\tView --> %d rows", result.TotalRows)
 	return
 }
 
@@ -68,7 +78,7 @@ func (c *Collection) ViewCustom(designDoc string, viewName string, params map[st
 }
 
 func (c *Collection) GetStatsVbSeqno(maxVbno uint16, useAbsHighSeqNo bool) (uuids map[uint16]uint64, highSeqnos map[uint16]uint64, err error) {
-	err = ErrUNIMPLEMENTED
+	err = &ErrUnimplemented{reason: "Rosmar does not implement GetStatsVbSeqno"}
 	return
 }
 
@@ -80,10 +90,13 @@ func (c *Collection) findView(designDoc string, viewName string) (view *rosmarVi
 	defer c.mutex.Unlock()
 
 	key := viewKey{designDoc, viewName}
-	row := c.db.QueryRow(`SELECT id, mapFn, reduceFn, lastCas FROM views
-		 					WHERE collection=$1 AND designDoc=$2 AND name=$3`,
+	row := c.db.QueryRow(`SELECT views.id, views.mapFn, views.reduceFn, views.lastCas
+							FROM views JOIN designDocs ON views.designDoc=designDocs.id
+		 					WHERE designDocs.collection=$1 AND designDocs.name=$2 AND views.name=$3`,
 		c.id, designDoc, viewName)
-	view = &rosmarView{}
+	view = &rosmarView{
+		fullName: fmt.Sprintf("%s/%s/%s", c, designDoc, viewName),
+	}
 	err = row.Scan(&view.id, &view.mapFnSource, &view.reduceFnSource, &view.lastCas)
 	if err != nil {
 		if err == sql.ErrNoRows {
@@ -126,14 +139,14 @@ func (c *Collection) updateView(view *rosmarView) error {
 		view.mapFunction = sgbucket.NewJSMapFunction(view.mapFnSource, kMapFnTimeout)
 	}
 
-	return c.inTransaction(func(txn *sql.Tx) error {
+	return c.bucket.inTransaction(func(txn *sql.Tx) error {
 		var latestCas CAS
 		row := txn.QueryRow("SELECT lastCas FROM collections WHERE id=$1", c.id)
 		err := row.Scan(&latestCas)
 		if err != nil {
 			return err
 		}
-		info("\t... updating index to seq %d (from %d)", latestCas, view.lastCas)
+		info("\t... updating view %s index to seq %d (from %d)", view.fullName, latestCas, view.lastCas)
 
 		// First delete all obsolete index rows, i.e. those whose source doc has been
 		// updated since view.lastCas:
@@ -147,8 +160,9 @@ func (c *Collection) updateView(view *rosmarView) error {
 		//TODO: Parallelize the below: SELECT -> mapFunction -> INSERT
 
 		// Now iterate over all those updated docs:
-		rows, err := txn.Query(`SELECT id, key, value, cas, isJSON FROM documents
-							    WHERE collection=$1 AND cas > $2 AND value NOT NULL`,
+		rows, err := txn.Query(`SELECT id, key, value, cas, isJSON, xattrs FROM documents
+							    WHERE collection=$1 AND cas > $2
+									AND (value NOT NULL OR xattrs NOT NULL)`,
 			c.id, view.lastCas)
 		if err != nil {
 			return err
@@ -157,16 +171,35 @@ func (c *Collection) updateView(view *rosmarView) error {
 			// Read the document from the query row:
 			var input sgbucket.JSMapFunctionInput
 			var doc_id int
+			var value []byte
 			var isJSON bool
-			if err = rows.Scan(&doc_id, &input.DocID, &input.Doc, &input.VbSeq, &isJSON); err != nil {
+			var rawXattrs []byte
+			if err = rows.Scan(&doc_id, &input.DocID, &value, &input.VbSeq, &isJSON, &rawXattrs); err != nil {
 				return err
 			}
 			input.VbNo = sgbucket.VBHash(input.DocID, kNumVbuckets)
-			if !isJSON {
-				input.Doc = "{}" // ignore body of non-JSON docs
+
+			if isJSON && value != nil {
+				input.Doc = string(value)
+			} else {
+				input.Doc = "{}"
+			}
+
+			if len(rawXattrs) > 0 {
+				var semiParsed semiParsedXattrs
+				err = json.Unmarshal(rawXattrs, &semiParsed)
+				if err != nil {
+					logError("Error unmarshaling xattrs: %s", err)
+				} else {
+					input.Xattrs = make(map[string][]byte, len(semiParsed))
+					for key, val := range semiParsed {
+						input.Xattrs[key] = val
+					}
+				}
 			}
 
 			// Call the map function:
+			//debug("\tMAP %v", input)
 			viewRows, err := view.mapFunction.CallFunction(&input)
 			if err != nil {
 				logError("Error running map function on doc %q: %s", input.DocID, err)
@@ -181,7 +214,7 @@ func (c *Collection) updateView(view *rosmarView) error {
 				} else if value, err = json.Marshal(viewRow.Value); err != nil {
 					return err
 				}
-				debug("EMIT %s , %s  (doc=%s or %d; CAS %d)", key, value, input.DocID, doc_id, input.VbSeq)
+				//debug("\tEMIT %s , %s  (doc %d %q; CAS %d)", key, value, doc_id, input.DocID, input.VbSeq)
 				_, err = txn.Exec(`INSERT INTO mapped (view,doc,key,value)
 									VALUES ($1, $2, $3, $4)`,
 					view.id, doc_id, key, value)
@@ -207,25 +240,36 @@ func (c *Collection) updateView(view *rosmarView) error {
 // They are sorted, but not filtered or reduced.
 // TODO: Do the sorting/filtering in the query. Will require SQLite being able to collate mapped.key (custom encoding or custom collator fn)
 func (c *Collection) getViewRows(view *rosmarView, params map[string]interface{}) (result sgbucket.ViewResult, err error) {
-	rows, err := c.db.Query(`SELECT documents.key, mapped.key, mapped.value
-				FROM mapped INNER JOIN documents ON mapped.doc=documents.id
-				WHERE mapped.view=$1`, view.id)
+	debug("querying view %s", view.fullName)
+	includeDocs := false
+	if params != nil {
+		includeDocs, _ = params["include_docs"].(bool)
+	}
+	sql := `SELECT documents.key, mapped.key, mapped.value, `
+	sql += ifelse(includeDocs, `documents.value`, `null`)
+	sql += ` FROM mapped INNER JOIN documents ON mapped.doc=documents.id
+			WHERE mapped.view=$1`
+	rows, err := c.db.Query(sql, view.id)
 	if err != nil {
 		return
 	}
 	for rows.Next() {
 		var viewRow sgbucket.ViewRow
-		var jsonKey, jsonValue []byte
-		if err = rows.Scan(&viewRow.ID, &jsonKey, &jsonValue); err != nil {
+		var jsonKey, jsonValue, jsonDoc []byte
+		if err = rows.Scan(&viewRow.ID, &jsonKey, &jsonValue, &jsonDoc); err != nil {
 			return
 		} else if err = json.Unmarshal(jsonKey, &viewRow.Key); err != nil {
 			return
 		} else if err = json.Unmarshal(jsonValue, &viewRow.Value); err != nil {
 			return
 		}
-		// TODO: Populate viewRow.Doc (when?)
+		if includeDocs {
+			if err = json.Unmarshal(jsonDoc, &viewRow.Doc); err != nil {
+				return
+			}
+		}
 		result.Rows = append(result.Rows, &viewRow)
-		trace("QUERY found %+v", viewRow)
+		//debug("\tQUERY found %+v", viewRow)
 	}
 	err = rows.Close()
 	result.Sort()

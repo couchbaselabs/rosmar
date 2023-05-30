@@ -1,9 +1,11 @@
 package rosmar
 
 import (
+	"encoding/json"
 	"expvar"
 	"fmt"
 	"sync/atomic"
+	"time"
 
 	sgbucket "github.com/couchbase/sg-bucket"
 )
@@ -21,6 +23,7 @@ func (bucket *Bucket) StartDCPFeed(
 	callback sgbucket.FeedEventCallbackFunc,
 	dbStats *expvar.Map,
 ) error {
+	debug("StartDCPFeed(bucket=%s, args=%+v)", bucket.GetName(), args)
 	// If no scopes are specified, return feed for the default collection, if it exists
 	if args.Scopes == nil || len(args.Scopes) == 0 {
 		return bucket.DefaultDataStore().(*Collection).StartDCPFeed(args, callback, dbStats)
@@ -43,9 +46,9 @@ func (bucket *Bucket) StartDCPFeed(
 	for _, collection := range requestedCollections {
 		// Not bothering to remove scopes from args for the single collection feeds
 		// here because it's ignored by RosmarBucket's StartDCPFeed
-		collectionID := collection.id
+		collectionID := collection.GetCollectionID()
 		collectionAwareCallback := func(event sgbucket.FeedEvent) bool {
-			event.CollectionID = uint32(collectionID)
+			event.CollectionID = collectionID
 			return callback(event)
 		}
 
@@ -63,6 +66,7 @@ func (bucket *Bucket) StartDCPFeed(
 		for _, collection := range requestedCollections {
 			<-doneChans[collection]
 		}
+		debug("FEED closing doneChan")
 		if doneChan != nil {
 			close(doneChan)
 		}
@@ -85,6 +89,7 @@ func (c *Collection) StartDCPFeed(
 	callback sgbucket.FeedEventCallbackFunc,
 	dbStats *expvar.Map,
 ) error {
+	debug("StartDCPFeed(collection=%s, args=%+v)", c, args)
 	feed := &dcpFeed{
 		collection: c,
 		args:       args,
@@ -122,12 +127,12 @@ func (c *Collection) enqueueBackfillEvents(startCas uint64, keysOnly bool, q *ev
 	if err != nil {
 		return err
 	}
+	e := event{collectionID: c.GetCollectionID()}
 	for rows.Next() {
-		var doc event
-		if err := rows.Scan(&doc.key, &doc.value, &doc.isJSON, &doc.cas); err != nil {
+		if err := rows.Scan(&e.key, &e.value, &e.isJSON, &e.cas); err != nil {
 			return err
 		}
-		q.push(doc.asFeedEvent())
+		q.push(e.asFeedEvent())
 	}
 	return rows.Close()
 }
@@ -136,16 +141,18 @@ func (c *Collection) postEvent(event *sgbucket.FeedEvent) {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
 
-	info("%s: postEvent(%v, %q, type=%d, flags=0x%x)", c.DataStoreNameImpl, event.Opcode, event.Key, event.DataType, event.Flags)
-	var eventNoValue sgbucket.FeedEvent = *event // copies the struct
-	eventNoValue.Value = nil
+	if len(c.feeds) > 0 {
+		info("%s: postEvent(op=%v, %q, cas=%x, type=%d, flags=0x%x)", c.DataStoreNameImpl, event.Opcode, event.Key, event.Cas, event.DataType, event.Flags)
+		var eventNoValue sgbucket.FeedEvent = *event // copies the struct
+		eventNoValue.Value = nil
 
-	for _, feed := range c.feeds {
-		if feed != nil {
-			if feed.args.KeysOnly {
-				feed.events.push(&eventNoValue)
-			} else {
-				feed.events.push(event)
+		for _, feed := range c.feeds {
+			if feed != nil {
+				if feed.args.KeysOnly {
+					feed.events.push(&eventNoValue)
+				} else {
+					feed.events.push(event)
+				}
 			}
 		}
 	}
@@ -173,9 +180,19 @@ type dcpFeed struct {
 func (feed *dcpFeed) run() {
 	atomic.AddInt32(&activeFeedCount, 1)
 	defer atomic.AddInt32(&activeFeedCount, -1)
+
+	if feed.args.Terminator != nil {
+		go func() {
+			_ = <-feed.args.Terminator
+			debug("FEED %s terminator closed", feed.collection)
+			feed.events.close()
+		}()
+	}
+
 	if feed.args.DoneChan != nil {
 		defer close(feed.args.DoneChan)
 	}
+
 	for {
 		if event := feed.events.pull(); event != nil {
 			feed.callback(*event)
@@ -183,6 +200,7 @@ func (feed *dcpFeed) run() {
 			break
 		}
 	}
+	debug("FEED %s stopping", feed.collection)
 }
 
 func (feed *dcpFeed) close() {
@@ -192,34 +210,42 @@ func (feed *dcpFeed) close() {
 //////// EVENTS
 
 type event struct {
-	collection    CollectionID     // Collection ID
-	key           string           // Doc ID
-	value         []byte           // Raw data content, or nil if deleted
-	isDeletion    bool             // True if it's a deletion event
-	isJSON        bool             // Is the data a JSON document?
-	changedXattrs []sgbucket.Xattr // Extended attributes that changed
-	cas           CAS              // Sequence in collection
+	collectionID uint32 // Public collection ID (not the same as Collection.id)
+	key          string // Doc ID
+	value        []byte // Raw data content, or nil if deleted
+	isDeletion   bool   // True if it's a deletion event
+	isJSON       bool   // Is the data a JSON document?
+	xattrs       []byte // Extended attributes
+	cas          CAS    // Sequence in collection
 	// exp        uint32           // Expiration time
 }
 
 func (e *event) asFeedEvent() *sgbucket.FeedEvent {
 	feedEvent := sgbucket.FeedEvent{
-		Opcode:   ifelse(e.isDeletion, sgbucket.FeedOpDeletion, sgbucket.FeedOpMutation),
-		Key:      []byte(e.key),
-		Value:    e.value,
-		Cas:      e.cas,
-		DataType: ifelse(e.isJSON, sgbucket.FeedDataTypeJSON, sgbucket.FeedDataTypeRaw),
+		Opcode:       ifelse(e.isDeletion, sgbucket.FeedOpDeletion, sgbucket.FeedOpMutation),
+		CollectionID: e.collectionID,
+		Key:          []byte(e.key),
+		Value:        e.value,
+		Cas:          e.cas,
+		DataType:     ifelse(e.isJSON, sgbucket.FeedDataTypeJSON, sgbucket.FeedDataTypeRaw),
 		// VbNo:     uint16(sgbucket.VBHash(doc.key, kNumVbuckets)),
+		TimeReceived: time.Now(),
 	}
-	if len(e.changedXattrs) > 0 {
-		feedEvent.Value = sgbucket.EncodeValueWithXattrs(e.value, e.changedXattrs...)
+	if len(e.xattrs) > 0 {
+		var xattrMap map[string]json.RawMessage
+		_ = json.Unmarshal(e.xattrs, &xattrMap)
+		var xattrs []sgbucket.Xattr
+		for k, v := range xattrMap {
+			xattrs = append(xattrs, sgbucket.Xattr{Name: k, Value: v})
+		}
+		feedEvent.Value = sgbucket.EncodeValueWithXattrs(e.value, xattrs...)
 		feedEvent.DataType |= sgbucket.FeedDataTypeXattr
 	}
 	return &feedEvent
 }
 
 func (c *Collection) postDocEvent(e *event) {
-	e.collection = c.id
+	e.collectionID = c.GetCollectionID()
 	c.postEvent(e.asFeedEvent())
 }
 

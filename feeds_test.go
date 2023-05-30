@@ -26,7 +26,12 @@ func TestBackfill(t *testing.T) {
 		return true
 	}
 
-	err := bucket.StartDCPFeed(sgbucket.FeedArguments{Backfill: 0, Dump: true}, callback, nil)
+	args := sgbucket.FeedArguments{
+		Backfill: 0,
+		Dump:     true,
+		DoneChan: make(chan struct{}),
+	}
+	err := bucket.StartDCPFeed(args, callback, nil)
 	assert.NoError(t, err, "StartDCPFeed failed")
 
 	event := <-events
@@ -43,8 +48,8 @@ func TestBackfill(t *testing.T) {
 	event = <-events
 	assert.Equal(t, sgbucket.FeedOpEndBackfill, event.Opcode)
 
-	// event, ok := <-events
-	// assert.False(t, ok)
+	_, ok := <-args.DoneChan
+	assert.False(t, ok)
 }
 
 func TestMutations(t *testing.T) {
@@ -62,7 +67,11 @@ func TestMutations(t *testing.T) {
 		return true
 	}
 
-	err := bucket.StartDCPFeed(sgbucket.FeedArguments{Backfill: sgbucket.FeedNoBackfill}, callback, nil)
+	args := sgbucket.FeedArguments{
+		Backfill: sgbucket.FeedNoBackfill,
+		DoneChan: make(chan struct{}),
+	}
+	err := bucket.StartDCPFeed(args, callback, nil)
 	assert.NoError(t, err, "StartTapFeed failed")
 
 	addToCollection(t, c, "delta", 0, "D")
@@ -74,10 +83,23 @@ func TestMutations(t *testing.T) {
 		require.NoError(t, err)
 	}()
 
-	assert.Equal(t, sgbucket.FeedEvent{Opcode: sgbucket.FeedOpMutation, Key: []byte("delta"), Value: []byte(`"D"`), Cas: 4, DataType: sgbucket.FeedDataTypeJSON}, <-events)
-	assert.Equal(t, sgbucket.FeedEvent{Opcode: sgbucket.FeedOpMutation, Key: []byte("eskimo"), Value: []byte(`"E"`), Cas: 5, DataType: sgbucket.FeedDataTypeJSON}, <-events)
-	assert.Equal(t, sgbucket.FeedEvent{Opcode: sgbucket.FeedOpMutation, Key: []byte("fahrvergnügen"), Value: []byte(`"F"`), Cas: 6, DataType: sgbucket.FeedDataTypeJSON}, <-events)
-	assert.Equal(t, sgbucket.FeedEvent{Opcode: sgbucket.FeedOpDeletion, Key: []byte("eskimo"), Cas: 7, DataType: sgbucket.FeedDataTypeRaw}, <-events)
+	e := <-events
+	e.TimeReceived = time.Time{}
+	assert.Equal(t, sgbucket.FeedEvent{Opcode: sgbucket.FeedOpMutation, Key: []byte("delta"), Value: []byte(`"D"`), Cas: 4, DataType: sgbucket.FeedDataTypeJSON}, e)
+	e = <-events
+	e.TimeReceived = time.Time{}
+	assert.Equal(t, sgbucket.FeedEvent{Opcode: sgbucket.FeedOpMutation, Key: []byte("eskimo"), Value: []byte(`"E"`), Cas: 5, DataType: sgbucket.FeedDataTypeJSON}, e)
+	e = <-events
+	e.TimeReceived = time.Time{}
+	assert.Equal(t, sgbucket.FeedEvent{Opcode: sgbucket.FeedOpMutation, Key: []byte("fahrvergnügen"), Value: []byte(`"F"`), Cas: 6, DataType: sgbucket.FeedDataTypeJSON}, e)
+	e = <-events
+	e.TimeReceived = time.Time{}
+	assert.Equal(t, sgbucket.FeedEvent{Opcode: sgbucket.FeedOpDeletion, Key: []byte("eskimo"), Cas: 7, DataType: sgbucket.FeedDataTypeRaw}, e)
+
+	bucket.Close()
+
+	_, ok := <-args.DoneChan
+	assert.False(t, ok)
 }
 
 func TestCollectionMutations(t *testing.T) {

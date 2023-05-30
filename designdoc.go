@@ -8,15 +8,22 @@ import (
 )
 
 func (c *Collection) GetDDocs() (ddocs map[string]sgbucket.DesignDoc, err error) {
+	debug("GetDDocs()")
+	return c.getDDocs(c.db)
+}
+
+func (c *Collection) getDDocs(q queryable) (ddocs map[string]sgbucket.DesignDoc, err error) {
 	var rows *sql.Rows
-	rows, err = c.db.Query(`SELECT designDoc, name, mapFn, reduceFn FROM views
-							 WHERE collection=$1`, c.id)
+	rows, err = q.Query(`SELECT designDocs.name, views.name, views.mapFn, views.reduceFn
+						 FROM views RIGHT JOIN designDocs ON views.designDoc=designDocs.id
+						 WHERE designDocs.collection=$1`, c.id)
 	if err != nil {
 		return
 	}
 	ddocs = map[string]sgbucket.DesignDoc{}
 	for rows.Next() {
-		var ddocName, vName, mapFn, reduceFn string
+		var ddocName string
+		var vName, mapFn, reduceFn sql.NullString
 		if err = rows.Scan(&ddocName, &vName, &mapFn, &reduceFn); err != nil {
 			return
 		}
@@ -25,14 +32,21 @@ func (c *Collection) GetDDocs() (ddocs map[string]sgbucket.DesignDoc, err error)
 			ddoc.Language = "javascript"
 			ddoc.Views = sgbucket.ViewMap{}
 		}
-		ddoc.Views[vName] = sgbucket.ViewDef{Map: mapFn, Reduce: reduceFn}
+		if vName.Valid {
+			ddoc.Views[vName.String] = sgbucket.ViewDef{Map: mapFn.String, Reduce: reduceFn.String}
+		}
 		ddocs[ddocName] = ddoc
 	}
 	return ddocs, rows.Close()
 }
 
 func (c *Collection) GetDDoc(designDoc string) (ddoc sgbucket.DesignDoc, err error) {
-	ddocs, err := c.GetDDocs()
+	debug("GetDDoc(%q)", designDoc)
+	return c.getDDoc(c.db, designDoc)
+}
+
+func (c *Collection) getDDoc(q queryable, designDoc string) (ddoc sgbucket.DesignDoc, err error) {
+	ddocs, err := c.getDDocs(q)
 	if err != nil {
 		return
 	}
@@ -44,21 +58,28 @@ func (c *Collection) GetDDoc(designDoc string) (ddoc sgbucket.DesignDoc, err err
 }
 
 func (c *Collection) PutDDoc(designDoc string, ddoc *sgbucket.DesignDoc) error {
-	return c.inTransaction(func(txn *sql.Tx) error {
-		if existing, err := c.GetDDoc(designDoc); err == nil {
+	debug("PutDDoc(%q, %d views)", designDoc, len(ddoc.Views))
+	return c.bucket.inTransaction(func(txn *sql.Tx) error {
+		if existing, err := c.getDDoc(txn, designDoc); err == nil {
 			if reflect.DeepEqual(ddoc, &existing) {
 				return nil // unchanged
 			}
 		}
-		_, err := txn.Exec(`DELETE FROM views WHERE collection=$1 AND designDoc=$2`,
+		_, err := txn.Exec(`DELETE FROM designDocs WHERE collection=$1 AND name=$2`,
 			c.id, designDoc)
 		if err != nil {
 			return err
 		}
+		result, err := txn.Exec(`INSERT INTO designDocs (collection,name) VALUES ($1,$2)`,
+			c.id, designDoc)
+		if err != nil {
+			return err
+		}
+		ddocID, _ := result.LastInsertId()
 		for name, view := range ddoc.Views {
-			_, err := txn.Exec(`INSERT INTO views (collection,designDoc,name,mapFn,reduceFn)
-							VALUES($1, $2, $3, $4, $5)`,
-				c.id, designDoc, name, view.Map, view.Reduce)
+			_, err := txn.Exec(`INSERT INTO views (designDoc,name,mapFn,reduceFn)
+							VALUES($1, $2, $3, $4)`,
+				ddocID, name, view.Map, view.Reduce)
 			if err != nil {
 				return err
 			}
@@ -75,8 +96,9 @@ func (c *Collection) PutDDoc(designDoc string, ddoc *sgbucket.DesignDoc) error {
 }
 
 func (c *Collection) DeleteDDoc(designDoc string) error {
-	return c.inTransaction(func(txn *sql.Tx) error {
-		result, err := txn.Exec(`DELETE FROM views WHERE collection=$1 AND designDoc=$2`,
+	debug("DeleteDDoc(%q)", designDoc)
+	return c.bucket.inTransaction(func(txn *sql.Tx) error {
+		result, err := txn.Exec(`DELETE FROM designDocs WHERE collection=$1 AND name=$2`,
 			c.id, designDoc)
 		if err == nil {
 			if n, err2 := result.RowsAffected(); n == 0 && err2 == nil {
