@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"testing"
+	"time"
 
 	sgbucket "github.com/couchbase/sg-bucket"
 	"github.com/stretchr/testify/assert"
@@ -240,4 +241,39 @@ func TestGetPersistentMultiCollectionBucket(t *testing.T) {
 	require.Error(t, err)
 	require.True(t, errors.As(err, &sgbucket.MissingError{}))
 	require.NoError(t, postDeleteHuddle.CloseAndDelete())
+}
+
+func TestExpiration(t *testing.T) {
+	bucket := makeTestBucket(t)
+	c := bucket.DefaultDataStore()
+
+	exp, err := bucket.NextExpiration()
+	if assert.NoError(t, err) {
+		assert.Equal(t, Exp(0), exp)
+	}
+
+	exp2 := Exp(time.Now().Add(-5 * time.Second).Unix())
+	exp4 := Exp(time.Now().Add(5 * time.Second).Unix())
+
+	c.AddRaw("k1", 0, []byte("v1"))
+	c.AddRaw("k2", exp2, []byte("v2"))
+	c.AddRaw("k3", 0, []byte("v3"))
+	c.AddRaw("k4", exp4, []byte("v4"))
+
+	exp, err = bucket.NextExpiration()
+	require.NoError(t, err)
+	assert.Equal(t, exp2, exp)
+
+	n, err := bucket.ExpireDocuments()
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), n)
+
+	_, _, err = c.GetRaw("k1")
+	assert.NoError(t, err)
+	_, _, err = c.GetRaw("k2")
+	assert.Error(t, err)
+	_, _, err = c.GetRaw("k3")
+	assert.NoError(t, err)
+	_, _, err = c.GetRaw("k4")
+	assert.NoError(t, err)
 }

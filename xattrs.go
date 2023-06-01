@@ -37,7 +37,7 @@ func (c *Collection) SetXattr(
 	xv []byte,
 ) (casOut CAS, err error) {
 	debug("SetXattr")
-	return c.writeWithXattr(key, nil, sgbucket.Xattr{xattrKey, xv}, nil, false, false, false)
+	return c.writeWithXattr(key, nil, sgbucket.Xattr{Name: xattrKey, Value: xv}, nil, 0, false, false, false)
 }
 
 // Remove a single xattr.
@@ -47,7 +47,7 @@ func (c *Collection) RemoveXattr(
 	cas CAS,
 ) error {
 	debug("RemoveXattr")
-	_, err := c.writeWithXattr(key, nil, sgbucket.Xattr{xattrKey, nil}, &cas, false, false, false)
+	_, err := c.writeWithXattr(key, nil, sgbucket.Xattr{Name: xattrKey, Value: nil}, &cas, 0, false, false, false)
 	return err
 }
 
@@ -83,13 +83,13 @@ func (c *Collection) WriteUserXattr(key string, xattrKey string, xattrVal interf
 	if xattrData, err := encodeAsRaw(xattrVal, true); err != nil {
 		return 0, err
 	} else {
-		return c.writeWithXattr(key, nil, sgbucket.Xattr{xattrKey, xattrData}, nil, false, false, true)
+		return c.writeWithXattr(key, nil, sgbucket.Xattr{Name: xattrKey, Value: xattrData}, nil, 0, false, false, true)
 	}
 }
 
 func (c *Collection) DeleteUserXattr(key string, xattrKey string) (CAS, error) {
 	debug("DeleteUserXattr(%q, %q)", key, xattrKey)
-	return c.writeWithXattr(key, nil, sgbucket.Xattr{xattrKey, nil}, nil, false, false, true)
+	return c.writeWithXattr(key, nil, sgbucket.Xattr{Name: xattrKey, Value: nil}, nil, 0, false, false, true)
 
 }
 
@@ -125,7 +125,7 @@ func (c *Collection) GetWithXattr(
 func (c *Collection) WriteWithXattr(
 	key string,
 	xattrKey string,
-	exp uint32,
+	exp Exp,
 	cas CAS,
 	opts *sgbucket.MutateInOptions,
 	value []byte,
@@ -133,8 +133,8 @@ func (c *Collection) WriteWithXattr(
 	isDelete bool,
 	deleteBody bool,
 ) (casOut CAS, err error) {
-	debug("WriteWithXattr(%q, %q, cas=%d, isDelete=%v, deleteBody=%v ...)", key, xattrKey, cas, isDelete, deleteBody)
-	casOut, err = c.writeWithXattr(key, value, sgbucket.Xattr{xattrKey, xattrValue}, &cas, isDelete, deleteBody, false)
+	debug("WriteWithXattr(%q, %q, cas=%d, exp=%d, isDelete=%v, deleteBody=%v ...)", key, xattrKey, cas, exp, isDelete, deleteBody)
+	casOut, err = c.writeWithXattr(key, value, sgbucket.Xattr{Name: xattrKey, Value: xattrValue}, &cas, exp, isDelete, deleteBody, false)
 	debug("\tWriteWithXattr--> %d, %v", casOut, err)
 	return
 }
@@ -143,20 +143,21 @@ func (c *Collection) WriteWithXattr(
 func (c *Collection) WriteCasWithXattr(
 	key string,
 	xattrKey string,
-	exp uint32,
+	exp Exp,
 	cas CAS,
 	opts *sgbucket.MutateInOptions,
 	v interface{},
 	xv interface{},
-) (CAS, error) {
-	debug("WriteCasWithXattr(%q, %q, ...)", key, xattrKey)
-	if value, err := encodeAsRaw(v, true); err != nil {
-		return 0, err
-	} else if xattrValue, err := encodeAsRaw(xv, true); err != nil {
-		return 0, err
-	} else {
-		return c.WriteWithXattr(key, xattrKey, exp, cas, opts, value, xattrValue, false, false)
+) (casOut CAS, err error) {
+	debug("WriteCasWithXattr(%q, %q, cas=%d, exp=%d ...)", key, xattrKey, cas, exp)
+	var value, xattrValue []byte
+	if value, err = encodeAsRaw(v, true); err == nil {
+		if xattrValue, err = encodeAsRaw(xv, true); err == nil {
+			casOut, err = c.writeWithXattr(key, value, sgbucket.Xattr{Name: xattrKey, Value: xattrValue}, &cas, exp, false, false, false)
+		}
 	}
+	debug("\tWriteCasWithXattr--> %d, %v", casOut, err)
+	return
 }
 
 // WriteUpdateWithXattr retrieves the existing doc from the c, invokes the callback to update
@@ -167,12 +168,12 @@ func (c *Collection) WriteUpdateWithXattr(
 	key string,
 	xattrKey string,
 	userXattrKey string,
-	exp uint32,
+	exp Exp,
 	opts *sgbucket.MutateInOptions,
 	previous *sgbucket.BucketDocument,
 	callback sgbucket.WriteUpdateWithXattrFunc,
 ) (casOut CAS, err error) {
-	debug("WriteUpdateWithXattr(%q, %q, %q, ...)", key, xattrKey, userXattrKey)
+	debug("WriteUpdateWithXattr(%q, %q, %q, exp=%d, ...)", key, xattrKey, userXattrKey, exp)
 	for {
 		if previous == nil {
 			// Get current doc if no previous doc was provided:
@@ -184,9 +185,9 @@ func (c *Collection) WriteUpdateWithXattr(
 				}
 			}
 			previous = &prevDoc
-			debug("\tgot doc %+v", *previous)
+			debug("\tread BucketDocument{Body: %q, Xattr: %q, UserXattr: %q, Cas: %d}", previous.Body, previous.Xattr, previous.UserXattr, previous.Cas)
 		} else {
-			debug("\tprevious = %+v", *previous)
+			debug("\tprevious = BucketDocument{Body: %q, Xattr: %q, UserXattr: %q, Cas: %d}", previous.Body, previous.Xattr, previous.UserXattr, previous.Cas)
 		}
 
 		// Invoke the callback:
@@ -271,7 +272,8 @@ func (c *Collection) getRawWithXattr(key string, xattrKey string, userXattrKey s
 	} else if userXattrPath, err = xattrKeyToPath(userXattrKey); err != nil {
 		return
 	}
-	row := c.db.QueryRow(`SELECT value, cas, xattrs -> $1, xattrs -> $2 FROM documents WHERE collection=$3 AND key=$4`, xattrPath, userXattrPath, c.id, key)
+	row := c.db().QueryRow(`SELECT value, cas, xattrs -> $1, xattrs -> $2 FROM documents
+							WHERE collection=$3 AND key=$4`, xattrPath, userXattrPath, c.id, key)
 	var xattr, userXattr []byte
 	err = row.Scan(&rawDoc.Body, &rawDoc.Cas, &xattr, &userXattr)
 	if err != nil {
@@ -295,12 +297,16 @@ func (c *Collection) writeWithXattr(
 	val []byte, // document body; nil means no change
 	xattr sgbucket.Xattr, // xattr; nil value means delete
 	ifCas *CAS, // if non-nil, must match current CAS; 0 for insert
+	exp Exp, // expiration
 	isDelete bool, // if true, doc must be a tombstone
 	deleteBody bool, // if true, delete the doc body
 	xattrIsUser bool, // true if this is a user xattr
 ) (casOut CAS, err error) {
 	err = c.withNewCas(func(txn *sql.Tx, newCas CAS) (*event, error) {
-		e := &event{key: key}
+		e := &event{
+			key: key,
+			exp: exp,
+		}
 		row := txn.QueryRow(`SELECT value, isJSON, cas, xattrs FROM documents WHERE collection=$1 AND key=$2`,
 			c.id, key)
 		casOut = newCas
@@ -310,15 +316,19 @@ func (c *Collection) writeWithXattr(
 			return nil, remapKeyError(err, key)
 		}
 
-		if ifCas != nil && *ifCas != e.cas && e.value != nil {
-			return nil, sgbucket.CasMismatchErr{*ifCas, e.cas}
+		if ifCas != nil && *ifCas != e.cas {
+			return nil, sgbucket.CasMismatchErr{Expected: *ifCas, Actual: e.cas}
 		}
+
+		var xattrs semiParsedXattrs
+		json.Unmarshal(rawXattrs, &xattrs)
 
 		// Update the body:
 		if deleteBody {
 			e.value = nil
 			e.isJSON = false
 			e.isDeletion = true
+			removeUserXattrs(xattrs)
 			debug("\t\tSet doc %q body -> nil", key)
 		} else if val != nil {
 			e.value = val
@@ -330,8 +340,6 @@ func (c *Collection) writeWithXattr(
 			}
 		}
 
-		var xattrs map[string]any
-		json.Unmarshal(rawXattrs, &xattrs)
 		if xattr.Value != nil {
 			var parsedXattr any
 			if err := json.Unmarshal(xattr.Value, &parsedXattr); err != nil {
@@ -344,9 +352,9 @@ func (c *Collection) writeWithXattr(
 				xattr.Value, _ = json.Marshal(parsedXattr)
 			}
 			if xattrs == nil {
-				xattrs = map[string]any{}
+				xattrs = semiParsedXattrs{}
 			}
-			xattrs[xattr.Name] = parsedXattr
+			xattrs[xattr.Name] = json.RawMessage(xattr.Value)
 			if true { //Logging >= LevelTrace {
 				debug("\t\tSet doc %q xattr %q = %s", key, xattr.Name, xattr.Value)
 			} else {
@@ -368,12 +376,12 @@ func (c *Collection) writeWithXattr(
 
 		e.xattrs = rawXattrs
 		e.cas = newCas
-		_, err = txn.Exec(`INSERT INTO documents(collection,key,value,isJSON,cas,xattrs)
-							VALUES ($5,$6,$1,$2,$3,$4)
+		_, err = txn.Exec(`INSERT INTO documents(collection,key,value,isJSON,cas,exp,xattrs)
+							VALUES ($5,$6,$1,$2,$3,$7,$4)
 							ON CONFLICT (collection,key) DO
-								UPDATE SET value=$1, isJSON=$2, cas=$3, xattrs=$4
+								UPDATE SET value=$1, isJSON=$2, cas=$3, exp=$7, xattrs=$4
 								WHERE collection=$5 AND key=$6`,
-			e.value, e.isJSON, e.cas, rawXattrs, c.id, key)
+			e.value, e.isJSON, e.cas, rawXattrs, c.id, key, exp)
 		return e, err
 	})
 	return
@@ -392,9 +400,9 @@ func xattrKeyToPath(xattrKey string) (path string, err error) {
 	return
 }
 
-func processXattrs(rawXattrs []byte, fn func(xattrs map[string]json.RawMessage)) []byte {
+func processXattrs(rawXattrs []byte, fn func(xattrs semiParsedXattrs)) []byte {
 	if len(rawXattrs) > 0 {
-		var xattrs map[string]json.RawMessage
+		var xattrs semiParsedXattrs
 		_ = json.Unmarshal(rawXattrs, &xattrs)
 		fn(xattrs)
 		if len(xattrs) > 0 {
@@ -408,7 +416,7 @@ func processXattrs(rawXattrs []byte, fn func(xattrs map[string]json.RawMessage))
 
 // Removes Xattrs from the raw JSON form.
 func removeXattrs(rawXattrs []byte, xattrKeys ...string) (rawResult []byte) {
-	rawResult = processXattrs(rawXattrs, func(xattrs map[string]json.RawMessage) {
+	rawResult = processXattrs(rawXattrs, func(xattrs semiParsedXattrs) {
 		for _, key := range xattrKeys {
 			delete(xattrs, key)
 		}
@@ -416,14 +424,12 @@ func removeXattrs(rawXattrs []byte, xattrKeys ...string) (rawResult []byte) {
 	return
 }
 
-func removeUserXattrs(rawXattrs []byte) []byte {
-	return processXattrs(rawXattrs, func(xattrs map[string]json.RawMessage) {
-		for k, _ := range xattrs {
-			if k == "" || k[0] != '_' {
-				delete(xattrs, k)
-			}
+func removeUserXattrs(xattrs semiParsedXattrs) {
+	for k, _ := range xattrs {
+		if k == "" || k[0] != '_' {
+			delete(xattrs, k)
 		}
-	})
+	}
 }
 
 // Sets JSON properties "cas" to the given `cas`, and "value_crc" to CRC checksum of `docValue`.

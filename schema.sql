@@ -15,12 +15,13 @@ CREATE TABLE documents (
 	collection 	integer references collections(id) on delete cascade,
 	key 		text not null,
 	cas 		integer not null,
-	exp 		integer,
+	exp 		integer default 0,
 	xattrs 		blob, /*JSON*/
 	isJSON 		integer default true,
 	value 		blob,
 	UNIQUE (collection, key) );
 CREATE INDEX docs_cas ON documents (collection, cas);
+CREATE INDEX docs_exp ON documents (collection, exp) WHERE exp > 0;
 
 CREATE TABLE designDocs (
 	id 			integer primary key autoincrement,

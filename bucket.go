@@ -22,18 +22,22 @@ import (
 // Rosmar implementation of a collection-aware bucket.
 // Implements sgbucket interfaces BucketStore, DynamicDataStoreBucket, DeletableStore
 type Bucket struct {
-	url         string                                     // Filesystem path or other URL
-	name        string                                     // Bucket name
-	collections map[sgbucket.DataStoreNameImpl]*Collection // Collections
-	mutex       sync.Mutex                                 // mutex for synchronized access to Bucket
-	db          *sql.DB                                    // SQLite database handle
+	url         string         // Filesystem path or other URL
+	name        string         // Bucket name
+	collections collectionsMap // Collections, indexed by DataStoreName
+	mutex       sync.Mutex     // mutex for synchronized access to Bucket
+	_db         *sql.DB        // SQLite database handle
 }
+
+type collectionsMap = map[sgbucket.DataStoreNameImpl]*Collection
 
 // Scheme of Rosmar URLs
 const URLScheme = "rosmar"
 
 // URL to open, to create an in-memory database with no file
 const InMemoryURL = "rosmar:/?mode=memory"
+
+var ErrBucketClosed = fmt.Errorf("this Rosmar bucket has been closed")
 
 // Filename used for persistent databases
 const kDBFilename = "rosmar.sqlite3"
@@ -68,7 +72,7 @@ func GetBucket(urlStr string, bucketName string) (bucket *Bucket, err error) {
 	if inMemory {
 		err = bucket.initializeSchema(bucketName)
 	} else {
-		row := bucket.db.QueryRow(`SELECT name FROM bucket`)
+		row := bucket.db().QueryRow(`SELECT name FROM bucket`)
 		err = row.Scan(&bucket.name)
 	}
 	if err != nil {
@@ -143,7 +147,7 @@ func openBucket(urlStr string, mustExist bool) (bucket *Bucket, inMemory bool, e
 
 	bucket = &Bucket{
 		url:         urlStr,
-		db:          db,
+		_db:         db,
 		collections: make(map[sgbucket.DataStoreNameImpl]*Collection),
 	}
 	return
@@ -151,7 +155,7 @@ func openBucket(urlStr string, mustExist bool) (bucket *Bucket, inMemory bool, e
 
 func (bucket *Bucket) initializeSchema(bucketName string) (err error) {
 	uuid := uuid.New().String()
-	_, err = bucket.db.Exec(kSchema, bucketName, uuid, sgbucket.DefaultScope, sgbucket.DefaultCollection)
+	_, err = bucket.db().Exec(kSchema, bucketName, uuid, sgbucket.DefaultScope, sgbucket.DefaultCollection)
 	if err != nil {
 		_ = bucket.CloseAndDelete()
 		panic("Rosmar SQL schema is invalid: " + err.Error())
@@ -186,11 +190,23 @@ func encodeDBURL(urlStr string) (*url.URL, error) {
 	return u, nil
 }
 
+func (bucket *Bucket) db() queryable {
+	if db := bucket._db; db != nil {
+		return db
+	} else {
+		return closedDB{}
+	}
+}
+
 // Runs a function within a SQLite transaction.
 func (bucket *Bucket) inTransaction(fn func(txn *sql.Tx) error) error {
 	// SQLite allows only a single writer, so use a mutex to avoid BUSY and LOCKED errors.
 	bucket.mutex.Lock()
 	defer bucket.mutex.Unlock()
+
+	if bucket._db == nil {
+		return ErrBucketClosed
+	}
 
 	var err error
 	for attempt := 0; attempt < 10; attempt++ {
@@ -200,7 +216,7 @@ func (bucket *Bucket) inTransaction(fn func(txn *sql.Tx) error) error {
 		}
 
 		var txn *sql.Tx
-		txn, err = bucket.db.Begin()
+		txn, err = bucket._db.Begin()
 		if err != nil {
 			break
 		}
@@ -226,13 +242,39 @@ func (bucket *Bucket) inTransaction(fn func(txn *sql.Tx) error) error {
 	return remapError(err)
 }
 
+// Returns the earliest expiration time of any document, or 0 if none.
+func (bucket *Bucket) NextExpiration() (exp Exp, err error) {
+	var expVal sql.NullInt64
+	err = bucket.db().QueryRow(`SELECT min(exp) FROM documents WHERE exp > 0`).Scan(&expVal)
+	if expVal.Valid {
+		exp = Exp(expVal.Int64)
+	}
+	return
+}
+
+// Deletes any expired documents.
+func (bucket *Bucket) ExpireDocuments() (count int64, err error) {
+	err = bucket.inTransaction(func(txn *sql.Tx) error {
+		result, err := txn.Exec(`DELETE FROM documents WHERE exp > 0 AND exp < $1`,
+			time.Now().Unix())
+		if err == nil {
+			count, err = result.RowsAffected()
+			debug("ExpireDocuments: purged %d docs", count)
+		}
+		return err
+	})
+	return
+}
+
+//////// Interface BucketStore
+
 func (bucket *Bucket) GetURL() string { return bucket.url }
 
 func (bucket *Bucket) GetName() string { return bucket.name }
 
 func (bucket *Bucket) UUID() (string, error) {
 	var uuid string
-	row := bucket.db.QueryRow(`SELECT uuid FROM bucket;`)
+	row := bucket.db().QueryRow(`SELECT uuid FROM bucket;`)
 	err := row.Scan(&uuid)
 	return uuid, err
 }
@@ -241,12 +283,13 @@ func (bucket *Bucket) Close() {
 	debug("Close(bucket %s)", bucket.GetName())
 	bucket.mutex.Lock()
 	defer bucket.mutex.Unlock()
+
 	for _, c := range bucket.collections {
 		c.close()
 	}
-	if bucket.db != nil {
-		bucket.db.Close()
-		bucket.db = nil
+	if bucket._db != nil {
+		bucket._db.Close()
+		bucket._db = nil
 		bucket.collections = nil
 	}
 }
@@ -357,7 +400,7 @@ func (bucket *Bucket) DropDataStore(name sgbucket.DataStoreName) error {
 
 func (bucket *Bucket) ListDataStores() ([]sgbucket.DataStoreName, error) {
 	debug("ListDataStores()")
-	rows, err := bucket.db.Query(`SELECT id, scope, name FROM collections ORDER BY id`)
+	rows, err := bucket.db().Query(`SELECT id, scope, name FROM collections ORDER BY id`)
 	if err != nil {
 		return nil, err
 	}
@@ -377,7 +420,7 @@ func (bucket *Bucket) ListDataStores() ([]sgbucket.DataStoreName, error) {
 //////// COLLECTIONS:
 
 func (bucket *Bucket) getCollectionID(scope, collection string) (id CollectionID, err error) {
-	row := bucket.db.QueryRow(`SELECT id FROM collections WHERE scope=$1 AND name=$2`, scope, collection)
+	row := bucket.db().QueryRow(`SELECT id FROM collections WHERE scope=$1 AND name=$2`, scope, collection)
 	err = row.Scan(&id)
 	return
 }
@@ -391,7 +434,7 @@ func (bucket *Bucket) createCollection(name sgbucket.DataStoreNameImpl) (*Collec
 
 // caller must hold bucket mutex
 func (bucket *Bucket) _createCollection(name sgbucket.DataStoreNameImpl) (*Collection, error) {
-	result, err := bucket.db.Exec(`INSERT INTO collections (scope, name) VALUES (?, ?)`, name.Scope, name.Collection)
+	result, err := bucket.db().Exec(`INSERT INTO collections (scope, name) VALUES (?, ?)`, name.Scope, name.Collection)
 	if err != nil {
 		return nil, err
 	}
@@ -403,7 +446,7 @@ func (bucket *Bucket) _createCollection(name sgbucket.DataStoreNameImpl) (*Colle
 }
 
 func (bucket *Bucket) _initCollection(name sgbucket.DataStoreNameImpl, id CollectionID) *Collection {
-	collection := newCollection(bucket, name, id, bucket.db)
+	collection := newCollection(bucket, name, id)
 	bucket.collections[name] = collection
 	return collection
 }
@@ -447,7 +490,7 @@ func (bucket *Bucket) dropCollection(name sgbucket.DataStoreNameImpl) error {
 		delete(bucket.collections, name)
 	}
 
-	_, err := bucket.db.Exec(`DELETE FROM collections WHERE scope=? AND name=?`, name.ScopeName(), name.CollectionName())
+	_, err := bucket.db().Exec(`DELETE FROM collections WHERE scope=? AND name=?`, name.ScopeName(), name.CollectionName())
 	if err != nil {
 		return err
 	}

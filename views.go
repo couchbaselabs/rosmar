@@ -90,7 +90,7 @@ func (c *Collection) findView(designDoc string, viewName string) (view *rosmarVi
 	defer c.mutex.Unlock()
 
 	key := viewKey{designDoc, viewName}
-	row := c.db.QueryRow(`SELECT views.id, views.mapFn, views.reduceFn, views.lastCas
+	row := c.db().QueryRow(`SELECT views.id, views.mapFn, views.reduceFn, views.lastCas
 							FROM views JOIN designDocs ON views.designDoc=designDocs.id
 		 					WHERE designDocs.collection=$1 AND designDocs.name=$2 AND views.name=$3`,
 		c.id, designDoc, viewName)
@@ -249,7 +249,7 @@ func (c *Collection) getViewRows(view *rosmarView, params map[string]interface{}
 	sql += ifelse(includeDocs, `documents.value`, `null`)
 	sql += ` FROM mapped INNER JOIN documents ON mapped.doc=documents.id
 			WHERE mapped.view=$1`
-	rows, err := c.db.Query(sql, view.id)
+	rows, err := c.db().Query(sql, view.id)
 	if err != nil {
 		return
 	}

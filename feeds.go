@@ -123,7 +123,7 @@ func (c *Collection) enqueueBackfillEvents(startCas uint64, keysOnly bool, q *ev
 						WHERE collection=$1 AND cas >= $2 AND value NOT NULL
 						ORDER BY cas`,
 		ifelse(keysOnly, `null`, `value`))
-	rows, err := c.db.Query(sql, c.id, startCas)
+	rows, err := c.db().Query(sql, c.id, startCas)
 	if err != nil {
 		return err
 	}
@@ -217,7 +217,7 @@ type event struct {
 	isJSON       bool   // Is the data a JSON document?
 	xattrs       []byte // Extended attributes
 	cas          CAS    // Sequence in collection
-	// exp        uint32           // Expiration time
+	exp          Exp    // Expiration time
 }
 
 func (e *event) asFeedEvent() *sgbucket.FeedEvent {
@@ -227,6 +227,7 @@ func (e *event) asFeedEvent() *sgbucket.FeedEvent {
 		Key:          []byte(e.key),
 		Value:        e.value,
 		Cas:          e.cas,
+		Expiry:       e.exp,
 		DataType:     ifelse(e.isJSON, sgbucket.FeedDataTypeJSON, sgbucket.FeedDataTypeRaw),
 		// VbNo:     uint16(sgbucket.VBHash(doc.key, kNumVbuckets)),
 		TimeReceived: time.Now(),

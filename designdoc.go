@@ -9,7 +9,7 @@ import (
 
 func (c *Collection) GetDDocs() (ddocs map[string]sgbucket.DesignDoc, err error) {
 	debug("GetDDocs()")
-	return c.getDDocs(c.db)
+	return c.getDDocs(c.db())
 }
 
 func (c *Collection) getDDocs(q queryable) (ddocs map[string]sgbucket.DesignDoc, err error) {
@@ -42,7 +42,7 @@ func (c *Collection) getDDocs(q queryable) (ddocs map[string]sgbucket.DesignDoc,
 
 func (c *Collection) GetDDoc(designDoc string) (ddoc sgbucket.DesignDoc, err error) {
 	debug("GetDDoc(%q)", designDoc)
-	return c.getDDoc(c.db, designDoc)
+	return c.getDDoc(c.db(), designDoc)
 }
 
 func (c *Collection) getDDoc(q queryable, designDoc string) (ddoc sgbucket.DesignDoc, err error) {
