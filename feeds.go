@@ -120,7 +120,7 @@ func (c *Collection) StartDCPFeed(
 
 func (c *Collection) enqueueBackfillEvents(startCas uint64, keysOnly bool, q *eventQueue) error {
 	sql := fmt.Sprintf(`SELECT key, %s, isJSON, cas FROM documents
-						WHERE collection=$1 AND cas >= $2 AND value NOT NULL
+						WHERE collection=?1 AND cas >= ?2 AND value NOT NULL
 						ORDER BY cas`,
 		ifelse(keysOnly, `null`, `value`))
 	rows, err := c.db().Query(sql, c.id, startCas)

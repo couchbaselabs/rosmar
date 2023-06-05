@@ -92,7 +92,7 @@ func (c *Collection) findView(designDoc string, viewName string) (view *rosmarVi
 	key := viewKey{designDoc, viewName}
 	row := c.db().QueryRow(`SELECT views.id, views.mapFn, views.reduceFn, views.lastCas
 							FROM views JOIN designDocs ON views.designDoc=designDocs.id
-		 					WHERE designDocs.collection=$1 AND designDocs.name=$2 AND views.name=$3`,
+		 					WHERE designDocs.collection=?1 AND designDocs.name=?2 AND views.name=?3`,
 		c.id, designDoc, viewName)
 	view = &rosmarView{
 		fullName: fmt.Sprintf("%s/%s/%s", c, designDoc, viewName),
@@ -141,7 +141,7 @@ func (c *Collection) updateView(view *rosmarView) error {
 
 	return c.bucket.inTransaction(func(txn *sql.Tx) error {
 		var latestCas CAS
-		row := txn.QueryRow("SELECT lastCas FROM collections WHERE id=$1", c.id)
+		row := txn.QueryRow("SELECT lastCas FROM collections WHERE id=?1", c.id)
 		err := row.Scan(&latestCas)
 		if err != nil {
 			return err
@@ -150,8 +150,8 @@ func (c *Collection) updateView(view *rosmarView) error {
 
 		// First delete all obsolete index rows, i.e. those whose source doc has been
 		// updated since view.lastCas:
-		_, err = txn.Exec(`DELETE FROM mapped WHERE view=$1 AND doc IN
-						(SELECT id FROM documents WHERE collection=$2 AND cas > $3)`,
+		_, err = txn.Exec(`DELETE FROM mapped WHERE view=?1 AND doc IN
+						(SELECT id FROM documents WHERE collection=?2 AND cas > ?3)`,
 			view.id, c.id, view.lastCas)
 		if err != nil {
 			return err
@@ -161,7 +161,7 @@ func (c *Collection) updateView(view *rosmarView) error {
 
 		// Now iterate over all those updated docs:
 		rows, err := txn.Query(`SELECT id, key, value, cas, isJSON, xattrs FROM documents
-							    WHERE collection=$1 AND cas > $2
+							    WHERE collection=?1 AND cas > ?2
 									AND (value NOT NULL OR xattrs NOT NULL)`,
 			c.id, view.lastCas)
 		if err != nil {
@@ -216,7 +216,7 @@ func (c *Collection) updateView(view *rosmarView) error {
 				}
 				//debug("\tEMIT %s , %s  (doc %d %q; CAS %d)", key, value, doc_id, input.DocID, input.VbSeq)
 				_, err = txn.Exec(`INSERT INTO mapped (view,doc,key,value)
-									VALUES ($1, $2, $3, $4)`,
+									VALUES (?1, ?2, ?3, ?4)`,
 					view.id, doc_id, key, value)
 				if err != nil {
 					return err
@@ -227,7 +227,7 @@ func (c *Collection) updateView(view *rosmarView) error {
 			return err
 		}
 
-		_, err = txn.Exec(`UPDATE views SET lastCas=$1 WHERE id=$2`, latestCas, view.id)
+		_, err = txn.Exec(`UPDATE views SET lastCas=?1 WHERE id=?2`, latestCas, view.id)
 
 		if err == nil {
 			view.lastCas = latestCas
@@ -248,7 +248,7 @@ func (c *Collection) getViewRows(view *rosmarView, params map[string]interface{}
 	sql := `SELECT documents.key, mapped.key, mapped.value, `
 	sql += ifelse(includeDocs, `documents.value`, `null`)
 	sql += ` FROM mapped INNER JOIN documents ON mapped.doc=documents.id
-			WHERE mapped.view=$1`
+			WHERE mapped.view=?1`
 	rows, err := c.db().Query(sql, view.id)
 	if err != nil {
 		return

@@ -52,7 +52,7 @@ func TestGetMissingBucket(t *testing.T) {
 	path := testBucketPath(t)
 	require.NoError(t, DeleteBucket(path))
 	bucket, err := GetBucket(path, "Rosmar")
-	assert.ErrorContains(t, err, "Unable to open the database file")
+	assert.ErrorContains(t, err, "unable to open database file: no such file or directory")
 	assert.Nil(t, bucket)
 }
 

@@ -6,7 +6,7 @@ import (
 	"fmt"
 
 	sgbucket "github.com/couchbase/sg-bucket"
-	"modernc.org/sqlite"
+	sqlite3 "github.com/mattn/go-sqlite3"
 )
 
 type ErrUnimplemented struct{ reason string }
@@ -30,8 +30,8 @@ func remapKeyError(err error, key string) error {
 
 // Tries to convert a SQL[ite] error into a sgbucket one, or at least wrap it in a DatabaseError.
 func remapError(err error) error {
-	if sqliteErr, ok := err.(*sqlite.Error); ok {
-		logError("SQLite error: %v (code %d)", err, sqliteErr.Code()) //TEMP
+	if sqliteErr, ok := err.(sqlite3.Error); ok {
+		logError("SQLite error: %v (code %d)", err, sqliteErr.Code) //TEMP
 		return &DatabaseError{original: err}
 	} else if err == sql.ErrConnDone || err == sql.ErrNoRows || err == sql.ErrTxDone {
 		logError("SQL error: %T %v", err, err) //TEMP
@@ -41,21 +41,12 @@ func remapError(err error) error {
 	}
 }
 
-// If the error is a SQLite error, returns its error code (`sqlite3.SQLITE_*`); else -1.
-func sqliteErrCode(err error) int {
-	if sqliteErr, ok := err.(*sqlite.Error); ok {
-		return sqliteErr.Code()
+// If the error is a SQLite error, returns its error code (`sqlite3.SQLITE_*`); else 0.
+func sqliteErrCode(err error) sqlite3.ErrNo {
+	if sqliteErr, ok := err.(*sqlite3.Error); ok {
+		return sqliteErr.Code
 	} else {
-		return -1
-	}
-}
-
-func sqliteErrMessage(err error) (string, bool) {
-	if code := sqliteErrCode(err); code > 0 {
-		str, ok := sqlite.ErrorCodeString[code]
-		return str, ok
-	} else {
-		return "", false
+		return 0
 	}
 }
 
@@ -114,3 +105,8 @@ func decodeRaw(raw []byte, rv any) error {
 		return err
 	}
 }
+
+var (
+	// Enforce interface conformance:
+	_ error = &DatabaseError{}
+)

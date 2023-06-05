@@ -99,7 +99,7 @@ func (c *Collection) GetAndTouchRaw(key string, exp Exp) (val []byte, cas CAS, e
 	err = c.withNewCas(func(txn *sql.Tx, newCas CAS) (e *event, err error) {
 		val, cas, err = c.getRaw(txn, key)
 		if err == nil {
-			_, err = txn.Exec(`UPDATE documents SET exp=$1 WHERE key=$2`, exp, key)
+			_, err = txn.Exec(`UPDATE documents SET exp=?1 WHERE key=?2`, exp, key)
 		}
 		return
 	})
@@ -118,8 +118,8 @@ func (c *Collection) add(key string, exp Exp, val []byte, isJSON bool) (added bo
 	var casOut CAS
 	err = c.withNewCas(func(txn *sql.Tx, newCas CAS) (e *event, err error) {
 		result, err := txn.Exec(
-			`INSERT INTO documents (collection,key,value,cas,exp,isJSON) VALUES (?,?,?,?,?,?)
-				ON CONFLICT(collection,key) DO UPDATE SET value=$3, cas=$4, exp=$5, isJSON=$6
+			`INSERT INTO documents (collection,key,value,cas,exp,isJSON) VALUES (?1,?2,?3,?4,?5,?6)
+				ON CONFLICT(collection,key) DO UPDATE SET value=?3, cas=?4, exp=?5, isJSON=?6
 				WHERE value IS NULL`,
 			c.id, key, val, newCas, exp, isJSON)
 		if err != nil {
@@ -153,10 +153,7 @@ func (c *Collection) set(key string, exp Exp, opts *sgbucket.UpsertOptions, val 
 		return
 	}
 	return c.withNewCas(func(txn *sql.Tx, newCas CAS) (*event, error) {
-		_, err := txn.Exec(
-			`INSERT INTO documents (collection,key,value,cas,exp,isJSON) VALUES ($1,$2,$3,$4,$5,$6)
-				ON CONFLICT(collection,key) DO UPDATE SET value=$3, cas=$4, exp=$5, isJSON=$6`,
-			c.id, key, val, newCas, exp, isJSON)
+		err = c._set(txn, key, exp, opts, val, isJSON, newCas)
 		if err != nil {
 			return nil, err
 		}
@@ -173,6 +170,14 @@ func (c *Collection) set(key string, exp Exp, opts *sgbucket.UpsertOptions, val 
 			xattrs: xattrs,
 		}, err
 	})
+}
+
+func (c *Collection) _set(txn *sql.Tx, key string, exp Exp, opts *sgbucket.UpsertOptions, val []byte, isJSON bool, newCas CAS) error {
+	_, err := txn.Exec(
+		`INSERT INTO documents (collection,key,value,cas,exp,isJSON) VALUES (?1,?2,?3,?4,?5,?6)
+			ON CONFLICT(collection,key) DO UPDATE SET value=?3, cas=?4, exp=?5, isJSON=?6`,
+		c.id, key, val, newCas, exp, isJSON)
+	return err
 }
 
 // Non-Raw:
@@ -240,20 +245,20 @@ func (c *Collection) WriteCas(key string, flags int, exp Exp, cas CAS, val any, 
 		var sql string
 		if (opt & sgbucket.Append) != 0 {
 			// Append:
-			sql = `UPDATE documents SET value=value || $1, cas=$2, exp=$6, isJSON=$7
-					 WHERE collection=$3 AND key=$4 AND cas=$5`
+			sql = `UPDATE documents SET value=value || ?1, cas=?2, exp=?6, isJSON=?7
+					 WHERE collection=?3 AND key=?4 AND cas=?5`
 		} else if (opt&sgbucket.AddOnly) != 0 || cas == 0 {
 			// Insert, but fall back to Update if the doc is a tombstone
-			sql = `INSERT INTO documents (collection, key, value, cas, exp, isJSON) VALUES($3,$4,$1,$2,$6,$7)
-				ON CONFLICT(collection,key) DO UPDATE SET value=$1, cas=$2, exp=$6, isJSON=$7
+			sql = `INSERT INTO documents (collection, key, value, cas, exp, isJSON) VALUES(?3,?4,?1,?2,?6,?7)
+				ON CONFLICT(collection,key) DO UPDATE SET value=?1, cas=?2, exp=?6, isJSON=?7
 											WHERE value IS NULL`
 			if cas != 0 {
-				sql += ` AND cas=$5`
+				sql += ` AND cas=?5`
 			}
 		} else {
 			// Regular write:
-			sql = `UPDATE documents SET value=$1, cas=$2, exp=$6, isJSON=$7
-				   WHERE collection=$3 AND key=$4 AND cas=$5`
+			sql = `UPDATE documents SET value=?1, cas=?2, exp=?6, isJSON=?7
+				   WHERE collection=?3 AND key=?4 AND cas=?5`
 		}
 		result, err := txn.Exec(sql, raw, newCas, c.id, key, cas, exp, isJSON)
 		if err != nil {
@@ -308,7 +313,7 @@ func (c *Collection) remove(key string, ifCas *CAS) (casOut CAS, err error) {
 		var cas CAS
 		var rawXattrs []byte
 		row := txn.QueryRow(
-			`SELECT cas, xattrs FROM documents WHERE collection=$1 AND key=$2`,
+			`SELECT cas, xattrs FROM documents WHERE collection=?1 AND key=?2`,
 			c.id, key)
 		if err = row.Scan(&cas, &rawXattrs); err != nil {
 			return
@@ -334,8 +339,8 @@ func (c *Collection) remove(key string, ifCas *CAS) (casOut CAS, err error) {
 
 		// Now update, setting value=null, isJSON=false, and updating the xattrs:
 		_, err = txn.Exec(
-			`UPDATE documents SET value=null, cas=$1, isJSON=0, xattrs=$2
-			 WHERE collection=$3 AND key=$4`,
+			`UPDATE documents SET value=null, cas=?1, isJSON=0, xattrs=?2
+			 WHERE collection=?3 AND key=?4`,
 			newCas, rawXattrs, c.id, key)
 		if err == nil {
 			e = &event{
@@ -385,30 +390,24 @@ func (c *Collection) Update(key string, exp Exp, callback sgbucket.UpdateFunc) (
 func (c *Collection) Incr(key string, amt, deflt uint64, exp Exp) (result uint64, err error) {
 	debug("INCR(%q, %d, %d)", key, amt, deflt)
 	err = c.withNewCas(func(txn *sql.Tx, newCas CAS) (*event, error) {
-		r, err := txn.Exec(
-			`UPDATE documents SET value = ifnull(value,$1) + $2, cas=$3, exp=$6, isJSON=0
-				WHERE collection=$4 AND key=$5`,
-			deflt, amt, newCas, c.id, key, exp)
-		if err != nil {
+		_, err = c.get(txn, key, &result)
+		if err == nil {
+			result += amt
+		} else if _, ok := err.(sgbucket.MissingError); ok {
+			result = deflt
+		} else {
 			return nil, err
 		}
-		if n, _ := r.RowsAffected(); n > 0 {
-			// Get the result after the UPDATE:
-			_, err = c.get(txn, key, &result)
-		} else {
-			// No rows updated, so the key doesn't exist. Create it:
-			raw, _ := encodeAsRaw(deflt, true)
-			_, err = txn.Exec(
-				`INSERT INTO documents (collection,key,value,cas,exp,isJSON) VALUES ($1,$2,$3,$4,$5,0)`,
-				c.id, key, raw, newCas, exp)
-			result = deflt
-		}
+
+		raw := []byte(strconv.FormatUint(result, 10))
+
+		err = c._set(txn, key, exp, nil, raw, true, newCas)
 		if err != nil {
 			return nil, err
 		}
 		return &event{
 			key:   key,
-			value: []byte(strconv.FormatUint(result, 10)),
+			value: raw,
 			cas:   newCas,
 			exp:   exp,
 		}, nil
@@ -513,15 +512,17 @@ func (bucket *Bucket) getLastCas(txn *sql.Tx) (cas CAS, err error) {
 
 // Returns the last CAS assigned to any doc in this collection.
 func (c *Collection) getLastCas() (cas CAS, err error) {
-	row := c.db().QueryRow("SELECT lastCas FROM collections WHERE id=$1", c.id)
+	row := c.db().QueryRow("SELECT lastCas FROM collections WHERE id=?1", c.id)
 	err = row.Scan(&cas)
 	return
 }
 
 // Updates the collection's and the bucket's lastCas.
 func (c *Collection) setLastCas(txn *sql.Tx, cas CAS) (err error) {
-	_, err = txn.Exec(`UPDATE bucket SET lastCas=$1;
-					   UPDATE collections SET lastCas=$1 WHERE id=$2`, cas, c.id)
+	_, err = txn.Exec(`UPDATE bucket SET lastCas=?1`, cas)
+	if err == nil {
+		_, err = txn.Exec(`UPDATE collections SET lastCas=?1 WHERE id=?2`, cas, c.id)
+	}
 	return
 }
 

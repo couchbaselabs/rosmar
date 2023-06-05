@@ -63,7 +63,7 @@ func (c *Collection) DeleteXattrs(
 			key: key,
 			cas: newCas,
 		}
-		row := txn.QueryRow(`SELECT value, xattrs FROM documents WHERE collection=$1 AND key=$2`, c.id, key)
+		row := txn.QueryRow(`SELECT value, xattrs FROM documents WHERE collection=?1 AND key=?2`, c.id, key)
 		var rawXattrs []byte
 		err := row.Scan(&e.value, &rawXattrs)
 		if err != nil {
@@ -71,7 +71,7 @@ func (c *Collection) DeleteXattrs(
 		}
 		rawXattrs = removeXattrs(rawXattrs, xattrKeys...)
 		e.xattrs = rawXattrs
-		_, err = txn.Exec(`UPDATE documents SET xattrs=$1, cas=$2 WHERE collection=$2 AND key=$3`, rawXattrs, newCas, c.id, key)
+		_, err = txn.Exec(`UPDATE documents SET xattrs=?1, cas=?2 WHERE collection=?2 AND key=?3`, rawXattrs, newCas, c.id, key)
 		return e, err
 	})
 }
@@ -232,7 +232,7 @@ func (c *Collection) DeleteWithXattr(
 			cas:        newCas,
 			isDeletion: true,
 		}
-		row := txn.QueryRow(`SELECT xattrs FROM documents WHERE collection=$1 AND key=$2`, c.id, key)
+		row := txn.QueryRow(`SELECT xattrs FROM documents WHERE collection=?1 AND key=?2`, c.id, key)
 		var rawXattrs []byte
 		err := row.Scan(&rawXattrs)
 		if err != nil {
@@ -241,7 +241,7 @@ func (c *Collection) DeleteWithXattr(
 		rawXattrs = removeXattrs(rawXattrs, xattrKey)
 		e.xattrs = rawXattrs
 
-		_, err = txn.Exec(`UPDATE documents SET value=null, xattrs=$1, cas=$2 WHERE collection=$3 AND key=$4`, rawXattrs, newCas, c.id, key)
+		_, err = txn.Exec(`UPDATE documents SET value=null, xattrs=?1, cas=?2 WHERE collection=?3 AND key=?4`, rawXattrs, newCas, c.id, key)
 		return e, err
 	})
 }
@@ -252,7 +252,7 @@ func (c *Collection) DeleteWithXattr(
 func (c *Collection) getRawXattrs(txn *sql.Tx, key string) ([]byte, error) {
 	var rawXattrs []byte
 	row := txn.QueryRow(
-		`SELECT xattrs FROM documents WHERE collection=$1 AND key=$2`, c.id, key)
+		`SELECT xattrs FROM documents WHERE collection=?1 AND key=?2`, c.id, key)
 	err := row.Scan(&rawXattrs)
 	return rawXattrs, err
 
@@ -272,8 +272,8 @@ func (c *Collection) getRawWithXattr(key string, xattrKey string, userXattrKey s
 	} else if userXattrPath, err = xattrKeyToPath(userXattrKey); err != nil {
 		return
 	}
-	row := c.db().QueryRow(`SELECT value, cas, xattrs -> $1, xattrs -> $2 FROM documents
-							WHERE collection=$3 AND key=$4`, xattrPath, userXattrPath, c.id, key)
+	row := c.db().QueryRow(`SELECT value, cas, xattrs -> ?1, xattrs -> ?2 FROM documents
+							WHERE collection=?3 AND key=?4`, xattrPath, userXattrPath, c.id, key)
 	var xattr, userXattr []byte
 	err = row.Scan(&rawDoc.Body, &rawDoc.Cas, &xattr, &userXattr)
 	if err != nil {
@@ -307,7 +307,7 @@ func (c *Collection) writeWithXattr(
 			key: key,
 			exp: exp,
 		}
-		row := txn.QueryRow(`SELECT value, isJSON, cas, xattrs FROM documents WHERE collection=$1 AND key=$2`,
+		row := txn.QueryRow(`SELECT value, isJSON, cas, xattrs FROM documents WHERE collection=?1 AND key=?2`,
 			c.id, key)
 		casOut = newCas
 		var rawXattrs []byte
@@ -377,10 +377,10 @@ func (c *Collection) writeWithXattr(
 		e.xattrs = rawXattrs
 		e.cas = newCas
 		_, err = txn.Exec(`INSERT INTO documents(collection,key,value,isJSON,cas,exp,xattrs)
-							VALUES ($5,$6,$1,$2,$3,$7,$4)
+							VALUES (?5,?6,?1,?2,?3,?7,?4)
 							ON CONFLICT (collection,key) DO
-								UPDATE SET value=$1, isJSON=$2, cas=$3, exp=$7, xattrs=$4
-								WHERE collection=$5 AND key=$6`,
+								UPDATE SET value=?1, isJSON=?2, cas=?3, exp=?7, xattrs=?4
+								WHERE collection=?5 AND key=?6`,
 			e.value, e.isJSON, e.cas, rawXattrs, c.id, key, exp)
 		return e, err
 	})

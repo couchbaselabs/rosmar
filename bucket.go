@@ -8,15 +8,12 @@ import (
 	"io/fs"
 	"net/url"
 	"os"
-	"strings"
 	"sync"
 	"time"
 
 	sgbucket "github.com/couchbase/sg-bucket"
 	"github.com/google/uuid"
-
-	_ "modernc.org/sqlite"
-	sqlite3 "modernc.org/sqlite/lib"
+	sqlite3 "github.com/mattn/go-sqlite3"
 )
 
 // Rosmar implementation of a collection-aware bucket.
@@ -67,7 +64,7 @@ func NewBucket(urlStr, bucketName string) (*Bucket, error) {
 func GetBucket(urlStr string, bucketName string) (bucket *Bucket, err error) {
 	bucket, inMemory, err := openBucket(urlStr, true)
 	if err != nil {
-		return
+		return nil, err
 	}
 	if inMemory {
 		err = bucket.initializeSchema(bucketName)
@@ -113,19 +110,20 @@ func openBucket(urlStr string, mustExist bool) (bucket *Bucket, inMemory bool, e
 	}
 	urlStr = u.String()
 
+	// See https://github.com/mattn/go-sqlite3#connection-string
 	query := u.Query()
 	inMemory = query.Get("mode") == "memory"
 	if !inMemory {
 		u = u.JoinPath(kDBFilename)
 		query.Set("mode", ifelse(mustExist, "rw", "rwc"))
 	}
-	query.Add("_pragma", "busy_timeout=10000")
-	query.Add("_pragma", "journal_mode=WAL")
+	query.Add("_busy_timeout", "10000")
+	query.Add("_journal_mode", "WAL")
 	u.RawQuery = query.Encode()
 	u.Scheme = "file"
 	info("Opening Rosmar db %s", u)
 
-	db, err := sql.Open("sqlite", u.String())
+	db, err := sql.Open("sqlite3", u.String())
 	if err != nil {
 		return
 	}
@@ -135,13 +133,6 @@ func openBucket(urlStr string, mustExist bool) (bucket *Bucket, inMemory bool, e
 	// A simple query to see if the db is actually available:
 	var vers int
 	if err = db.QueryRow(`pragma user_version`).Scan(&vers); err != nil {
-		if msg, ok := sqliteErrMessage(err); ok {
-			// Work around an incorrect error message in the Go-sqlite library
-			// https://gitlab.com/cznic/sqlite/-/issues/147
-			if strings.Contains(err.Error(), "out of memory") {
-				err = fmt.Errorf("%s", msg)
-			}
-		}
 		err = remapError(err)
 	}
 
@@ -229,7 +220,7 @@ func (bucket *Bucket) inTransaction(fn func(txn *sql.Tx) error) error {
 
 		if err != nil {
 			txn.Rollback()
-			if sqliteErrCode(err) == sqlite3.SQLITE_BUSY {
+			if sqliteErrCode(err) == sqlite3.ErrBusy {
 				continue // retry
 			} else {
 				logError("\tinTransaction: ROLLBACK with error %T %v", err, err)
@@ -255,7 +246,7 @@ func (bucket *Bucket) NextExpiration() (exp Exp, err error) {
 // Deletes any expired documents.
 func (bucket *Bucket) ExpireDocuments() (count int64, err error) {
 	err = bucket.inTransaction(func(txn *sql.Tx) error {
-		result, err := txn.Exec(`DELETE FROM documents WHERE exp > 0 AND exp < $1`,
+		result, err := txn.Exec(`DELETE FROM documents WHERE exp > 0 AND exp < ?1`,
 			time.Now().Unix())
 		if err == nil {
 			count, err = result.RowsAffected()
@@ -420,7 +411,7 @@ func (bucket *Bucket) ListDataStores() ([]sgbucket.DataStoreName, error) {
 //////// COLLECTIONS:
 
 func (bucket *Bucket) getCollectionID(scope, collection string) (id CollectionID, err error) {
-	row := bucket.db().QueryRow(`SELECT id FROM collections WHERE scope=$1 AND name=$2`, scope, collection)
+	row := bucket.db().QueryRow(`SELECT id FROM collections WHERE scope=?1 AND name=?2`, scope, collection)
 	err = row.Scan(&id)
 	return
 }

@@ -16,7 +16,7 @@ func (c *Collection) getDDocs(q queryable) (ddocs map[string]sgbucket.DesignDoc,
 	var rows *sql.Rows
 	rows, err = q.Query(`SELECT designDocs.name, views.name, views.mapFn, views.reduceFn
 						 FROM views RIGHT JOIN designDocs ON views.designDoc=designDocs.id
-						 WHERE designDocs.collection=$1`, c.id)
+						 WHERE designDocs.collection=?1`, c.id)
 	if err != nil {
 		return
 	}
@@ -65,12 +65,12 @@ func (c *Collection) PutDDoc(designDoc string, ddoc *sgbucket.DesignDoc) error {
 				return nil // unchanged
 			}
 		}
-		_, err := txn.Exec(`DELETE FROM designDocs WHERE collection=$1 AND name=$2`,
+		_, err := txn.Exec(`DELETE FROM designDocs WHERE collection=?1 AND name=?2`,
 			c.id, designDoc)
 		if err != nil {
 			return err
 		}
-		result, err := txn.Exec(`INSERT INTO designDocs (collection,name) VALUES ($1,$2)`,
+		result, err := txn.Exec(`INSERT INTO designDocs (collection,name) VALUES (?1,?2)`,
 			c.id, designDoc)
 		if err != nil {
 			return err
@@ -78,7 +78,7 @@ func (c *Collection) PutDDoc(designDoc string, ddoc *sgbucket.DesignDoc) error {
 		ddocID, _ := result.LastInsertId()
 		for name, view := range ddoc.Views {
 			_, err := txn.Exec(`INSERT INTO views (designDoc,name,mapFn,reduceFn)
-							VALUES($1, $2, $3, $4)`,
+							VALUES(?1, ?2, ?3, ?4)`,
 				ddocID, name, view.Map, view.Reduce)
 			if err != nil {
 				return err
@@ -98,7 +98,7 @@ func (c *Collection) PutDDoc(designDoc string, ddoc *sgbucket.DesignDoc) error {
 func (c *Collection) DeleteDDoc(designDoc string) error {
 	debug("DeleteDDoc(%q)", designDoc)
 	return c.bucket.inTransaction(func(txn *sql.Tx) error {
-		result, err := txn.Exec(`DELETE FROM designDocs WHERE collection=$1 AND name=$2`,
+		result, err := txn.Exec(`DELETE FROM designDocs WHERE collection=?1 AND name=?2`,
 			c.id, designDoc)
 		if err == nil {
 			if n, err2 := result.RowsAffected(); n == 0 && err2 == nil {
