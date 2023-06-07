@@ -21,9 +21,16 @@ func (db closedDB) Query(query string, args ...any) (*sql.Rows, error) {
 }
 
 func (db closedDB) QueryRow(query string, args ...any) *sql.Row {
-	// FIX! I can't return a sql.Row whose Scan() method will return ErrBucketClosed, because
-	// sql.Row is a struct with private fields and there's no way to create one.
-	panic("Attempt to use a closed Rosmar bucket")
+	return nil
+}
+
+// Wrapper around sql.Row.Scan() that handles a nil Row as returned by closedDB.
+func scan(row *sql.Row, vals ...any) error {
+	if row != nil {
+		return row.Scan(vals...)
+	} else {
+		return ErrBucketClosed
+	}
 }
 
 var (

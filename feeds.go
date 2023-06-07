@@ -23,7 +23,7 @@ func (bucket *Bucket) StartDCPFeed(
 	callback sgbucket.FeedEventCallbackFunc,
 	dbStats *expvar.Map,
 ) error {
-	debug("StartDCPFeed(bucket=%s, args=%+v)", bucket.GetName(), args)
+	trace("rosmar.StartDCPFeed(bucket=%s, args=%+v)", bucket.GetName(), args)
 	// If no scopes are specified, return feed for the default collection, if it exists
 	if args.Scopes == nil || len(args.Scopes) == 0 {
 		return bucket.DefaultDataStore().(*Collection).StartDCPFeed(args, callback, dbStats)
@@ -66,7 +66,7 @@ func (bucket *Bucket) StartDCPFeed(
 		for _, collection := range requestedCollections {
 			<-doneChans[collection]
 		}
-		debug("FEED closing doneChan")
+		trace("rosmar.FEED closing doneChan")
 		if doneChan != nil {
 			close(doneChan)
 		}
@@ -89,7 +89,7 @@ func (c *Collection) StartDCPFeed(
 	callback sgbucket.FeedEventCallbackFunc,
 	dbStats *expvar.Map,
 ) error {
-	debug("StartDCPFeed(collection=%s, args=%+v)", c, args)
+	trace("rosmar.StartDCPFeed(collection=%s, args=%+v)", c, args)
 	feed := &dcpFeed{
 		collection: c,
 		args:       args,

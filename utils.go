@@ -4,29 +4,28 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"hash/crc32"
 
 	sgbucket "github.com/couchbase/sg-bucket"
 	sqlite3 "github.com/mattn/go-sqlite3"
 )
 
+// Error returned from API calls on a closed Bucket.
+var ErrBucketClosed = fmt.Errorf("this Rosmar bucket has been closed")
+
+// An unimplemented feature
 type ErrUnimplemented struct{ reason string }
 
 func (err *ErrUnimplemented) Error() string { return err.reason }
 
+// Indicates a SQL database error that wasn't mapped to a more specific error value.
+// The underlying error is available via the Unwrap method.
 type DatabaseError struct {
 	original error
 }
 
 func (err *DatabaseError) Error() string { return "Rosmar database error: " + err.original.Error() }
 func (err *DatabaseError) Unwrap() error { return err.original }
-
-func remapKeyError(err error, key string) error {
-	if err == sql.ErrNoRows {
-		return sgbucket.MissingError{Key: key}
-	} else {
-		return remapError(err)
-	}
-}
 
 // Tries to convert a SQL[ite] error into a sgbucket one, or at least wrap it in a DatabaseError.
 func remapError(err error) error {
@@ -38,6 +37,15 @@ func remapError(err error) error {
 		return &DatabaseError{original: err}
 	} else {
 		return err
+	}
+}
+
+// Like remapError but takes a docID/key; converts sql.ErrNoRows to sgbucket.MissingError.
+func remapKeyError(err error, key string) error {
+	if err == sql.ErrNoRows {
+		return sgbucket.MissingError{Key: key}
+	} else {
+		return remapError(err)
 	}
 }
 
@@ -59,6 +67,7 @@ func ifelse[T any](cond bool, ifTrue T, ifFalse T) T {
 	}
 }
 
+// Quick and dirty heuristic to check whether a byte-string is a JSON object.
 func looksLikeJSON(data []byte) bool {
 	return len(data) >= 2 && data[0] == '{' && data[len(data)-1] == '}'
 }
@@ -106,7 +115,15 @@ func decodeRaw(raw []byte, rv any) error {
 	}
 }
 
+// Returns a CRC32c checksum formatted as a hex string.
+func encodedCRC32c(data []byte) string {
+	table := crc32.MakeTable(crc32.Castagnoli)
+	checksum := crc32.Checksum(data, table)
+	return fmt.Sprintf("0x%08x", checksum)
+}
+
 var (
 	// Enforce interface conformance:
+	_ error = &ErrUnimplemented{}
 	_ error = &DatabaseError{}
 )

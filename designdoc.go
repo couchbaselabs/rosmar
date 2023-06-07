@@ -8,7 +8,7 @@ import (
 )
 
 func (c *Collection) GetDDocs() (ddocs map[string]sgbucket.DesignDoc, err error) {
-	debug("GetDDocs()")
+	trace("rosmar.GetDDocs()")
 	return c.getDDocs(c.db())
 }
 
@@ -41,7 +41,7 @@ func (c *Collection) getDDocs(q queryable) (ddocs map[string]sgbucket.DesignDoc,
 }
 
 func (c *Collection) GetDDoc(designDoc string) (ddoc sgbucket.DesignDoc, err error) {
-	debug("GetDDoc(%q)", designDoc)
+	trace("rosmar.GetDDoc(%q)", designDoc)
 	return c.getDDoc(c.db(), designDoc)
 }
 
@@ -58,7 +58,7 @@ func (c *Collection) getDDoc(q queryable, designDoc string) (ddoc sgbucket.Desig
 }
 
 func (c *Collection) PutDDoc(designDoc string, ddoc *sgbucket.DesignDoc) error {
-	debug("PutDDoc(%q, %d views)", designDoc, len(ddoc.Views))
+	trace("rosmar.PutDDoc(%q, %d views)", designDoc, len(ddoc.Views))
 	return c.bucket.inTransaction(func(txn *sql.Tx) error {
 		if existing, err := c.getDDoc(txn, designDoc); err == nil {
 			if reflect.DeepEqual(ddoc, &existing) {
@@ -96,7 +96,7 @@ func (c *Collection) PutDDoc(designDoc string, ddoc *sgbucket.DesignDoc) error {
 }
 
 func (c *Collection) DeleteDDoc(designDoc string) error {
-	debug("DeleteDDoc(%q)", designDoc)
+	trace("rosmar.DeleteDDoc(%q)", designDoc)
 	return c.bucket.inTransaction(func(txn *sql.Tx) error {
 		result, err := txn.Exec(`DELETE FROM designDocs WHERE collection=?1 AND name=?2`,
 			c.id, designDoc)

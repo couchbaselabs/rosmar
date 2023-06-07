@@ -20,7 +20,7 @@ var MaxDocSize int = 20 * 1024 * 1024
 type Collection struct {
 	sgbucket.DataStoreNameImpl // Fully qualified name (scope and collection)
 	bucket                     *Bucket
-	id                         CollectionID // Row ID
+	id                         CollectionID // Row ID in collections table; public ID + 1
 	mutex                      sync.Mutex
 	feeds                      []*dcpFeed
 	viewCache                  map[viewKey]*rosmarView
@@ -54,7 +54,6 @@ func (c *Collection) GetName() string {
 	return c.bucket.GetName() + "." + c.DataStoreNameImpl.String()
 }
 
-// The collection's ID.
 func (c *Collection) GetCollectionID() uint32 {
 	return uint32(c.id) - 1 // SG expects that the default collection has id 0, so subtract 1
 }
@@ -71,7 +70,7 @@ func (c *Collection) exists(q queryable, key string) (exists bool, err error) {
 	row := q.QueryRow(`SELECT 1 FROM documents
 							WHERE collection=? AND key=? AND value NOT NULL`, c.id, key)
 	var i int
-	err = row.Scan(&i)
+	err = scan(row, &i)
 	exists = (err == nil)
 	if err == sql.ErrNoRows {
 		err = nil
@@ -80,13 +79,13 @@ func (c *Collection) exists(q queryable, key string) (exists bool, err error) {
 }
 
 func (c *Collection) GetRaw(key string) (val []byte, cas CAS, err error) {
-	debug("rosmar.GetRaw(%q)", key)
+	trace("rosmar.GetRaw(%q)", key)
 	return c.getRaw(c.db(), key)
 }
 
 func (c *Collection) getRaw(q queryable, key string) (val []byte, cas CAS, err error) {
 	row := q.QueryRow("SELECT value, cas FROM documents WHERE collection=? AND key=?", c.id, key)
-	if err = row.Scan(&val, &cas); err != nil {
+	if err = scan(row, &val, &cas); err != nil {
 		err = remapKeyError(err, key)
 	} else if val == nil {
 		err = sgbucket.MissingError{Key: key}
@@ -95,7 +94,7 @@ func (c *Collection) getRaw(q queryable, key string) (val []byte, cas CAS, err e
 }
 
 func (c *Collection) GetAndTouchRaw(key string, exp Exp) (val []byte, cas CAS, err error) {
-	debug("rosmar.GetAndTouchRaw(%q)", key)
+	trace("rosmar.GetAndTouchRaw(%q)", key)
 	err = c.withNewCas(func(txn *sql.Tx, newCas CAS) (e *event, err error) {
 		val, cas, err = c.getRaw(txn, key)
 		if err == nil {
@@ -107,7 +106,7 @@ func (c *Collection) GetAndTouchRaw(key string, exp Exp) (val []byte, cas CAS, e
 }
 
 func (c *Collection) AddRaw(key string, exp Exp, val []byte) (added bool, err error) {
-	debug("rosmar.AddRaw(%q, %d, ...)", key, exp)
+	trace("rosmar.AddRaw(%q, %d, ...)", key, exp)
 	return c.add(key, exp, val, looksLikeJSON(val))
 }
 
@@ -143,7 +142,7 @@ func (c *Collection) add(key string, exp Exp, val []byte, isJSON bool) (added bo
 }
 
 func (c *Collection) SetRaw(key string, exp Exp, opts *sgbucket.UpsertOptions, val []byte) (err error) {
-	debug("rosmar.SetRaw(%q, %d, ...)", key, exp)
+	trace("rosmar.SetRaw(%q, %d, ...)", key, exp)
 	return c.set(key, exp, opts, val, false)
 }
 
@@ -183,7 +182,7 @@ func (c *Collection) _set(txn *sql.Tx, key string, exp Exp, opts *sgbucket.Upser
 // Non-Raw:
 
 func (c *Collection) Get(key string, outVal any) (cas CAS, err error) {
-	debug("rosmar.Get(%q)", key)
+	trace("rosmar.Get(%q)", key)
 	return c.get(c.db(), key, outVal)
 }
 
@@ -197,7 +196,7 @@ func (c *Collection) get(q queryable, key string, outVal any) (cas CAS, err erro
 
 func (c *Collection) GetExpiry(key string) (exp Exp, err error) {
 	row := c.db().QueryRow("SELECT exp FROM documents WHERE collection=? AND key=?", c.id, key)
-	err = row.Scan(&exp)
+	err = scan(row, &exp)
 	err = remapKeyError(err, key)
 	return
 }
@@ -208,17 +207,17 @@ func (c *Collection) Touch(key string, exp Exp) (cas CAS, err error) {
 }
 
 func (c *Collection) Add(key string, exp Exp, val any) (added bool, err error) {
-	debug("rosmar.Add(%q, %v)", key, val)
+	trace("rosmar.Add(%q, %v)", key, val)
 	raw, err := encodeAsRaw(val, true)
 	if err == nil {
 		added, err = c.add(key, exp, raw, true)
 	}
-	debug("\tadd -> %v, %v", added, err)
+	trace("\tadd -> %v, %v", added, err)
 	return
 }
 
 func (c *Collection) Set(key string, exp Exp, opts *sgbucket.UpsertOptions, val any) (err error) {
-	debug("rosmar.Set(%q, %v)", key, val)
+	trace("rosmar.Set(%q, %v)", key, val)
 	raw, err := encodeAsRaw(val, true)
 	if err == nil {
 		err = c.set(key, exp, opts, raw, true)
@@ -233,7 +232,7 @@ func (c *Collection) WriteCas(key string, flags int, exp Exp, cas CAS, val any, 
 	if err != nil {
 		return 0, err
 	}
-	debug("rosmar.WriteCas(%q, cas=%x, opt=%v, val=%s)", key, cas, opt, raw)
+	trace("rosmar.WriteCas(%q, cas=%x, opt=%v, val=%s)", key, cas, opt, raw)
 	if len(raw) > MaxDocSize {
 		return 0, &sgbucket.DocTooBigErr{}
 	}
@@ -298,11 +297,12 @@ func (c *Collection) WriteCas(key string, flags int, exp Exp, cas CAS, val any, 
 }
 
 func (c *Collection) Remove(key string, cas CAS) (casOut CAS, err error) {
+	trace("rosmar.Remove(%q, %x)", key, cas)
 	return c.remove(key, &cas)
 }
 
 func (c *Collection) Delete(key string) (err error) {
-	debug("rosmar.Delete(%q)", key)
+	trace("rosmar.Delete(%q)", key)
 	_, err = c.remove(key, nil)
 	return err
 }
@@ -315,7 +315,7 @@ func (c *Collection) remove(key string, ifCas *CAS) (casOut CAS, err error) {
 		row := txn.QueryRow(
 			`SELECT cas, xattrs FROM documents WHERE collection=?1 AND key=?2`,
 			c.id, key)
-		if err = row.Scan(&cas, &rawXattrs); err != nil {
+		if err = scan(row, &cas, &rawXattrs); err != nil {
 			return
 		} else if ifCas != nil && cas != *ifCas {
 			return nil, sgbucket.CasMismatchErr{Expected: *ifCas, Actual: cas}
@@ -357,6 +357,7 @@ func (c *Collection) remove(key string, ifCas *CAS) (casOut CAS, err error) {
 }
 
 func (c *Collection) Update(key string, exp Exp, callback sgbucket.UpdateFunc) (casOut CAS, err error) {
+	trace("rosmar.Update(%q, %d, ...)", key, exp)
 	for {
 		var raw []byte
 		var cas CAS
@@ -388,7 +389,7 @@ func (c *Collection) Update(key string, exp Exp, callback sgbucket.UpdateFunc) (
 }
 
 func (c *Collection) Incr(key string, amt, deflt uint64, exp Exp) (result uint64, err error) {
-	debug("INCR(%q, %d, %d)", key, amt, deflt)
+	trace("rosmar.Incr(%q, %d, %d)", key, amt, deflt)
 	err = c.withNewCas(func(txn *sql.Tx, newCas CAS) (*event, error) {
 		_, err = c.get(txn, key, &result)
 		if err == nil {
@@ -412,17 +413,20 @@ func (c *Collection) Incr(key string, amt, deflt uint64, exp Exp) (result uint64
 			exp:   exp,
 		}, nil
 	})
-	debug("\tincr -> %d, %v", result, err)
+	trace("\tincr -> %d, %v", result, err)
 	return
 }
 
 //////// Interface SubdocStore
 
-func (c *Collection) SubdocInsert(docID string, fieldPath string, cas CAS, value any) (err error) {
+func (c *Collection) SubdocInsert(key string, subdocKey string, cas CAS, value any) (err error) {
+	trace("rosmar.SubdocInsert(%q, %q, %d)", key, subdocKey, cas)
 	return &ErrUnimplemented{reason: "Rosmar does not implement SubdocInsert"}
 }
 
 func (c *Collection) GetSubDocRaw(key string, subdocKey string) (value []byte, casOut uint64, err error) {
+	// TODO: Use SQLite JSON syntax to get the property
+	trace("rosmar.SubdocGetRaw(%q, %q)", key, subdocKey)
 	if subdocKeyNesting(subdocKey) {
 		err = &ErrUnimplemented{reason: "Rosmar does not support subdoc nesting"}
 		return
@@ -445,29 +449,42 @@ func (c *Collection) GetSubDocRaw(key string, subdocKey string) (value []byte, c
 }
 
 func (c *Collection) WriteSubDoc(key string, subdocKey string, cas CAS, value []byte) (casOut CAS, err error) {
+	// TODO: Use SQLite JSON syntax to update the property
+	trace("rosmar.WriteSubDoc(%q, %q, %d, %s)", key, subdocKey, cas, value)
 	if subdocKeyNesting(subdocKey) {
 		err = &ErrUnimplemented{reason: "Rosmar does not support subdoc nesting"}
 		return
 	}
 
-	// Get existing doc (if it exists) to change sub doc value in
-	fullDoc := make(map[string]interface{})
+	var subDocVal any
+	if len(value) > 0 {
+		if err = json.Unmarshal(value, &subDocVal); err != nil {
+			return
+		}
+	}
+
+	// Get doc (if it exists) to change sub doc value in
+	var fullDoc map[string]any
 	casOut, err = c.Get(key, &fullDoc)
-	if err != nil && c.IsError(err, sgbucket.KeyNotFoundError) {
+	if err != nil && !c.IsError(err, sgbucket.KeyNotFoundError) {
 		return 0, err
 	}
 	if cas != 0 && casOut != cas {
-		return 0, fmt.Errorf("error: cas mismatch: %d expected %d received. Unable to update document", cas, casOut)
+		err = sgbucket.CasMismatchErr{Expected: cas, Actual: casOut}
+		return 0, err
 	}
 
 	// Set new subdoc value
-	var subDocVal any
-	if err = json.Unmarshal(value, &subDocVal); err != nil {
-		return
+	if fullDoc == nil {
+		fullDoc = map[string]any{}
 	}
-	fullDoc[subdocKey] = subDocVal
+	if subDocVal != nil {
+		fullDoc[subdocKey] = subDocVal
+	} else {
+		delete(fullDoc, subdocKey)
+	}
 
-	// Write full doc body to collection
+	// Write full doc back to collection
 	casOut, err = c.WriteCas(key, 0, 0, casOut, fullDoc, 0)
 	if err != nil {
 		return 0, err
@@ -506,14 +523,14 @@ func (c *Collection) IsSupported(feature sgbucket.BucketStoreFeature) bool {
 // Returns the last CAS assigned to any doc in _any_ collection.
 func (bucket *Bucket) getLastCas(txn *sql.Tx) (cas CAS, err error) {
 	row := txn.QueryRow("SELECT lastCas FROM bucket")
-	err = row.Scan(&cas)
+	err = scan(row, &cas)
 	return
 }
 
 // Returns the last CAS assigned to any doc in this collection.
 func (c *Collection) getLastCas() (cas CAS, err error) {
 	row := c.db().QueryRow("SELECT lastCas FROM collections WHERE id=?1", c.id)
-	err = row.Scan(&cas)
+	err = scan(row, &cas)
 	return
 }
 

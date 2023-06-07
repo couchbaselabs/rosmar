@@ -56,6 +56,16 @@ func TestGetMissingBucket(t *testing.T) {
 	assert.Nil(t, bucket)
 }
 
+func TestCallClosedBucket(t *testing.T) {
+	bucket := makeTestBucket(t)
+	c := bucket.DefaultDataStore()
+	bucket.Close()
+	_, err := bucket.ListDataStores()
+	assert.ErrorContains(t, err, "bucket has been closed")
+	_, _, err = c.GetRaw("foo")
+	assert.ErrorContains(t, err, "bucket has been closed")
+}
+
 func TestNewBucketInMemory(t *testing.T) {
 	assert.NoError(t, DeleteBucket(InMemoryURL))
 

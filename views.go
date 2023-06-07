@@ -11,7 +11,7 @@ import (
 
 // A single view stored in a Bucket.
 type rosmarView struct {
-	fullName       string
+	fullName       string                  // "collection/designdoc/name"
 	id             int64                   // Database primary key (views.id)
 	mapFnSource    string                  // Map function source code
 	reduceFnSource string                  // Reduce function (if any)
@@ -28,8 +28,41 @@ func (vn *viewKey) String() string { return vn.designDoc + "/" + vn.name }
 
 const kMapFnTimeout = 5 * time.Second
 
-func (c *Collection) View(designDoc string, viewName string, jsonParams map[string]interface{}) (result sgbucket.ViewResult, err error) {
-	debug("View(%q, %q, %+v)", designDoc, viewName, jsonParams)
+//////// API:
+
+func (c *Collection) View(designDoc string, viewName string, params map[string]interface{}) (result sgbucket.ViewResult, err error) {
+	debug("View(%q, %q, %+v)", designDoc, viewName, params)
+	return c.view(designDoc, viewName, params)
+}
+
+func (c *Collection) ViewQuery(designDoc string, viewName string, params map[string]interface{}) (sgbucket.QueryResultIterator, error) {
+	debug("ViewQuery(%q, %q, %+v)", designDoc, viewName, params)
+	viewResult, err := c.view(designDoc, viewName, params)
+	return &viewResult, err
+}
+
+func (c *Collection) ViewCustom(designDoc string, viewName string, params map[string]interface{}, vres interface{}) error {
+	debug("ViewCustom(%q, %q, %+v)", designDoc, viewName, params)
+	result, err := c.view(designDoc, viewName, params)
+	if err != nil {
+		return err
+	}
+	marshaled, _ := json.Marshal(result)
+	return json.Unmarshal(marshaled, vres)
+}
+
+func (c *Collection) GetStatsVbSeqno(maxVbno uint16, useAbsHighSeqNo bool) (uuids map[uint16]uint64, highSeqnos map[uint16]uint64, err error) {
+	err = &ErrUnimplemented{reason: "Rosmar does not implement GetStatsVbSeqno"}
+	return
+}
+
+//////// IMPLEMENTATION:
+
+func (c *Collection) view(
+	designDoc string,
+	viewName string,
+	jsonParams map[string]interface{},
+) (result sgbucket.ViewResult, err error) {
 	params, err := sgbucket.ParseViewParams(jsonParams)
 	if err != nil {
 		return
@@ -67,27 +100,6 @@ func (c *Collection) View(designDoc string, viewName string, jsonParams map[stri
 	return
 }
 
-func (c *Collection) ViewQuery(designDoc string, viewName string, params map[string]interface{}) (sgbucket.QueryResultIterator, error) {
-	viewResult, err := c.View(designDoc, viewName, params)
-	return &viewResult, err
-}
-
-func (c *Collection) ViewCustom(designDoc string, viewName string, params map[string]interface{}, vres interface{}) error {
-	result, err := c.View(designDoc, viewName, params)
-	if err != nil {
-		return err
-	}
-	marshaled, _ := json.Marshal(result)
-	return json.Unmarshal(marshaled, vres)
-}
-
-func (c *Collection) GetStatsVbSeqno(maxVbno uint16, useAbsHighSeqNo bool) (uuids map[uint16]uint64, highSeqnos map[uint16]uint64, err error) {
-	err = &ErrUnimplemented{reason: "Rosmar does not implement GetStatsVbSeqno"}
-	return
-}
-
-//////// IMPLEMENTATION:
-
 // Returns an up-to-date `rosmarView` for a given view name.
 func (c *Collection) findView(designDoc string, viewName string) (view *rosmarView, upToDate bool, err error) {
 	c.mutex.Lock()
@@ -101,7 +113,7 @@ func (c *Collection) findView(designDoc string, viewName string) (view *rosmarVi
 	view = &rosmarView{
 		fullName: fmt.Sprintf("%s/%s/%s", c, designDoc, viewName),
 	}
-	err = row.Scan(&view.id, &view.mapFnSource, &view.reduceFnSource, &view.lastCas)
+	err = scan(row, &view.id, &view.mapFnSource, &view.reduceFnSource, &view.lastCas)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			err = sgbucket.MissingError{Key: key.String()}
@@ -146,7 +158,7 @@ func (c *Collection) updateView(view *rosmarView) error {
 	return c.bucket.inTransaction(func(txn *sql.Tx) error {
 		var latestCas CAS
 		row := txn.QueryRow("SELECT lastCas FROM collections WHERE id=?1", c.id)
-		err := row.Scan(&latestCas)
+		err := scan(row, &latestCas)
 		if err != nil {
 			return err
 		}
@@ -203,7 +215,7 @@ func (c *Collection) updateView(view *rosmarView) error {
 			}
 
 			// Call the map function:
-			//debug("\tMAP %v", input)
+			trace("\tMAP %v", input)
 			viewRows, err := view.mapFunction.CallFunction(&input)
 			if err != nil {
 				logError("Error running map function on doc %q: %s", input.DocID, err)
@@ -218,7 +230,7 @@ func (c *Collection) updateView(view *rosmarView) error {
 				} else if value, err = json.Marshal(viewRow.Value); err != nil {
 					return err
 				}
-				//debug("\tEMIT %s , %s  (doc %d %q; CAS %d)", key, value, doc_id, input.DocID, input.VbSeq)
+				trace("\tEMIT %s , %s  (doc %d %q; CAS %d)", key, value, doc_id, input.DocID, input.VbSeq)
 				_, err = txn.Exec(`INSERT INTO mapped (view,doc,key,value)
 									VALUES (?1, ?2, ?3, ?4)`,
 					view.id, doc_id, string(key), string(value))
@@ -244,7 +256,7 @@ func (c *Collection) updateView(view *rosmarView) error {
 // Handles key ranges, descending order and limit (and clears the corresponding params)
 // but does not reduce.
 func (c *Collection) getViewRows(view *rosmarView, params *sgbucket.ViewParams) (result sgbucket.ViewResult, err error) {
-	debug("querying view %s", view.fullName)
+	trace("querying view %s", view.fullName)
 
 	args := []any{sql.Named(`VIEW`, view.id)}
 	sel := `SELECT documents.key, mapped.key, mapped.value, `
@@ -283,8 +295,8 @@ func (c *Collection) getViewRows(view *rosmarView, params *sgbucket.ViewParams) 
 		sel += fmt.Sprintf(`LIMIT %d `, *params.Limit)
 		params.Limit = nil
 	}
-	debug("\t SQL = %s", sel)
-	debug("\t args = %+v", args)
+	trace("\t SQL = %s", sel)
+	trace("\t args = %+v", args)
 
 	rows, err := c.db().Query(sel, args...)
 	if err != nil {
@@ -306,7 +318,7 @@ func (c *Collection) getViewRows(view *rosmarView, params *sgbucket.ViewParams) 
 			}
 		}
 		result.Rows = append(result.Rows, &viewRow)
-		debug("\tRow --> %s  =  %s  (doc %q)", jsonKey, jsonValue, viewRow.ID)
+		trace("\tRow --> %s  =  %s  (doc %q)", jsonKey, jsonValue, viewRow.ID)
 	}
 	err = rows.Close()
 	result.TotalRows = len(result.Rows)
