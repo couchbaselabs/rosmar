@@ -31,10 +31,10 @@ func remapKeyError(err error, key string) error {
 // Tries to convert a SQL[ite] error into a sgbucket one, or at least wrap it in a DatabaseError.
 func remapError(err error) error {
 	if sqliteErr, ok := err.(sqlite3.Error); ok {
-		logError("SQLite error: %v (code %d)", err, sqliteErr.Code) //TEMP
+		info("SQLite error: %v (code %d)", err, sqliteErr.Code)
 		return &DatabaseError{original: err}
 	} else if err == sql.ErrConnDone || err == sql.ErrNoRows || err == sql.ErrTxDone {
-		logError("SQL error: %T %v", err, err) //TEMP
+		info("SQL error: %T %v", err, err)
 		return &DatabaseError{original: err}
 	} else {
 		return err

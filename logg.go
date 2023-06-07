@@ -28,7 +28,7 @@ var (
 )
 
 // Set this to configure logging, or `setenv SG_ROSMAR_LOGGING=true`
-var Logging LogLevel = LevelNone
+var Logging LogLevel = LevelInfo
 
 // Set this callback to redirect logging elsewhere. Default value writes to Go `log.Printf`
 var LoggingCallback = func(level LogLevel, fmt string, args ...any) {

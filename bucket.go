@@ -48,6 +48,8 @@ const kNumVbuckets = 32
 //go:embed schema.sql
 var kSchema string
 
+var setupOnce sync.Once
+
 // Creates a new bucket.
 func NewBucket(urlStr, bucketName string) (*Bucket, error) {
 	bucket, _, err := openBucket(urlStr, false)
@@ -123,7 +125,14 @@ func openBucket(urlStr string, mustExist bool) (bucket *Bucket, inMemory bool, e
 	u.Scheme = "file"
 	info("Opening Rosmar db %s", u)
 
-	db, err := sql.Open("sqlite3", u.String())
+	setupOnce.Do(func() {
+		sql.Register("sqlite3_for_rosmar",
+			&sqlite3.SQLiteDriver{
+				ConnectHook: connectHook,
+			})
+	})
+
+	db, err := sql.Open("sqlite3_for_rosmar", u.String())
 	if err != nil {
 		return
 	}
@@ -134,6 +143,7 @@ func openBucket(urlStr string, mustExist bool) (bucket *Bucket, inMemory bool, e
 	var vers int
 	if err = db.QueryRow(`pragma user_version`).Scan(&vers); err != nil {
 		err = remapError(err)
+		return
 	}
 
 	bucket = &Bucket{
@@ -153,6 +163,16 @@ func (bucket *Bucket) initializeSchema(bucketName string) (err error) {
 	}
 	bucket.name = bucketName
 	return
+}
+
+func connectHook(conn *sqlite3.SQLiteConn) error {
+	warn("CONNECT HOOK!")
+	var collator sgbucket.JSONCollator
+	return conn.RegisterCollation("JSON", func(s1, s2 string) int {
+		cmp := collator.CollateRaw([]byte(s1), []byte(s2))
+		warn("COLLATE: %s   <=>   %s   = %d", s1, s2, cmp)
+		return cmp
+	})
 }
 
 func encodeDBURL(urlStr string) (*url.URL, error) {

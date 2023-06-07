@@ -70,6 +70,16 @@ func TestView(t *testing.T) {
 	assert.Equal(t, &sgbucket.ViewRow{ID: "doc2", Key: "k2", Value: "v2",
 		Doc: &expectedDoc}, result.Rows[0])
 
+	// Try descending:
+	options["descending"] = true
+	result, err = coll.View("docname", "view1", options)
+	assert.NoError(t, err, "View call failed")
+	assert.Equal(t, 3, result.TotalRows)
+	assert.Equal(t, "doc2", result.Rows[0].ID)
+	assert.Equal(t, "doc1", result.Rows[1].ID)
+	assert.Equal(t, "doc3", result.Rows[2].ID)
+	delete(options, "descending")
+
 	// Try an endkey:
 	options["endkey"] = "k2"
 	result, err = coll.View("docname", "view1", options)

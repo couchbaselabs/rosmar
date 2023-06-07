@@ -28,8 +28,12 @@ func (vn *viewKey) String() string { return vn.designDoc + "/" + vn.name }
 
 const kMapFnTimeout = 5 * time.Second
 
-func (c *Collection) View(designDoc string, viewName string, params map[string]interface{}) (result sgbucket.ViewResult, err error) {
-	debug("View(%q, %q, %+v)", designDoc, viewName, params)
+func (c *Collection) View(designDoc string, viewName string, jsonParams map[string]interface{}) (result sgbucket.ViewResult, err error) {
+	debug("View(%q, %q, %+v)", designDoc, viewName, jsonParams)
+	params, err := sgbucket.ParseViewParams(jsonParams)
+	if err != nil {
+		return
+	}
 	// Look up the view and its index:
 	view, upToDate, err := c.findView(designDoc, viewName)
 	if err != nil {
@@ -38,8 +42,8 @@ func (c *Collection) View(designDoc string, viewName string, params map[string]i
 	// Update the view index if it's out of date:
 	if !upToDate {
 		var staleVal any
-		if params != nil {
-			staleVal = params["stale"]
+		if jsonParams != nil {
+			staleVal = jsonParams["stale"]
 		}
 		if staleVal == "updateAfter" {
 			go func() {
@@ -54,11 +58,11 @@ func (c *Collection) View(designDoc string, viewName string, params map[string]i
 		}
 	}
 	// Fetch the view index:
-	if result, err = c.getViewRows(view, params); err != nil {
+	if result, err = c.getViewRows(view, &params); err != nil {
 		return
 	}
 	// Filter and reduce:
-	err = result.Process(params, c, view.reduceFnSource)
+	err = result.ProcessParsed(params, c, view.reduceFnSource)
 	debug("\tView --> %d rows", result.TotalRows)
 	return
 }
@@ -217,7 +221,7 @@ func (c *Collection) updateView(view *rosmarView) error {
 				//debug("\tEMIT %s , %s  (doc %d %q; CAS %d)", key, value, doc_id, input.DocID, input.VbSeq)
 				_, err = txn.Exec(`INSERT INTO mapped (view,doc,key,value)
 									VALUES (?1, ?2, ?3, ?4)`,
-					view.id, doc_id, key, value)
+					view.id, doc_id, string(key), string(value))
 				if err != nil {
 					return err
 				}
@@ -237,19 +241,52 @@ func (c *Collection) updateView(view *rosmarView) error {
 }
 
 // Returns all the view rows from the database.
-// They are sorted, but not filtered or reduced.
-// TODO: Do the sorting/filtering in the query. Will require SQLite being able to collate mapped.key (custom encoding or custom collator fn)
-func (c *Collection) getViewRows(view *rosmarView, params map[string]interface{}) (result sgbucket.ViewResult, err error) {
+// Handles key ranges, descending order and limit (and clears the corresponding params)
+// but does not reduce.
+func (c *Collection) getViewRows(view *rosmarView, params *sgbucket.ViewParams) (result sgbucket.ViewResult, err error) {
 	debug("querying view %s", view.fullName)
-	includeDocs := false
-	if params != nil {
-		includeDocs, _ = params["include_docs"].(bool)
+
+	args := []any{sql.Named(`VIEW`, view.id)}
+	sel := `SELECT documents.key, mapped.key, mapped.value, `
+	sel += ifelse(params.IncludeDocs, `documents.value `, `null `)
+	sel += `FROM mapped INNER JOIN documents ON mapped.doc=documents.id WHERE mapped.view=$VIEW `
+
+	setMinMax := func(minmax *any, inclusive bool, cmp string, arg string) error {
+		if *minmax != nil {
+			sel += `AND mapped.key ` + cmp
+			if inclusive {
+				sel += `=`
+			}
+			sel += ` $` + arg + ` `
+			if jsonKey, jsonErr := json.Marshal(*minmax); jsonErr == nil {
+				args = append(args, sql.Named(arg, string(jsonKey)))
+			} else {
+				return jsonErr
+			}
+			*minmax = nil
+		}
+		return nil
 	}
-	sql := `SELECT documents.key, mapped.key, mapped.value, `
-	sql += ifelse(includeDocs, `documents.value`, `null`)
-	sql += ` FROM mapped INNER JOIN documents ON mapped.doc=documents.id
-			WHERE mapped.view=?1`
-	rows, err := c.db().Query(sql, view.id)
+	if err = setMinMax(&params.MinKey, params.IncludeMinKey, `>`, "MINKEY"); err != nil {
+		return
+	}
+	if err = setMinMax(&params.MaxKey, params.IncludeMaxKey, `<`, "MAXKEY"); err != nil {
+		return
+	}
+
+	sel += `ORDER BY mapped.key `
+	if params.Descending {
+		sel += `DESC `
+		params.Descending = false
+	}
+	if params.Limit != nil {
+		sel += fmt.Sprintf(`LIMIT %d `, *params.Limit)
+		params.Limit = nil
+	}
+	debug("\t SQL = %s", sel)
+	debug("\t args = %+v", args)
+
+	rows, err := c.db().Query(sel, args...)
 	if err != nil {
 		return
 	}
@@ -263,16 +300,16 @@ func (c *Collection) getViewRows(view *rosmarView, params map[string]interface{}
 		} else if err = json.Unmarshal(jsonValue, &viewRow.Value); err != nil {
 			return
 		}
-		if includeDocs {
+		if params.IncludeDocs {
 			if err = json.Unmarshal(jsonDoc, &viewRow.Doc); err != nil {
 				return
 			}
 		}
 		result.Rows = append(result.Rows, &viewRow)
-		//debug("\tQUERY found %+v", viewRow)
+		debug("\tRow --> %s  =  %s  (doc %q)", jsonKey, jsonValue, viewRow.ID)
 	}
 	err = rows.Close()
-	result.Sort()
 	result.TotalRows = len(result.Rows)
+	params.IncludeDocs = false // we already did it
 	return
 }
