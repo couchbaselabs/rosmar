@@ -98,7 +98,7 @@ func (c *Collection) DeleteUserXattr(key string, xattrKey string) (CAS, error) {
 func (c *Collection) GetWithXattr(
 	key string,
 	xattrKey string,
-	userXattrKey string, // TODO
+	userXattrKey string,
 	rv interface{},
 	xv interface{},
 	uxv interface{},
@@ -297,7 +297,7 @@ func (c *Collection) writeWithXattr(
 	xattr sgbucket.Xattr, // xattr; nil value means delete
 	ifCas *CAS, // if non-nil, must match current CAS; 0 for insert
 	exp Exp, // expiration
-	isDelete bool, // if true, doc must be a tombstone	// TODO: Implement this
+	isDelete bool, // if true, doc must be a tombstone
 	deleteBody bool, // if true, delete the doc body
 	xattrIsUser bool, // true if this is a user xattr
 ) (casOut CAS, err error) {
@@ -313,10 +313,10 @@ func (c *Collection) writeWithXattr(
 		err := scan(row, &e.value, &e.isJSON, &e.cas, &rawXattrs)
 		if err != nil && err != sql.ErrNoRows {
 			return nil, remapKeyError(err, key)
-		}
-
-		if ifCas != nil && *ifCas != e.cas {
+		} else if ifCas != nil && *ifCas != e.cas {
 			return nil, sgbucket.CasMismatchErr{Expected: *ifCas, Actual: e.cas}
+		} else if isDelete && e.value != nil {
+			return nil, fmt.Errorf("document is not deleted (isDelete=true)")
 		}
 
 		var xattrs semiParsedXattrs

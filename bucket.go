@@ -124,6 +124,7 @@ func openBucket(urlStr string, mustExist bool) (bucket *Bucket, inMemory bool, e
 	}
 	query.Add("_auto_vacuum", "1")      // Full auto-vacuum
 	query.Add("_busy_timeout", "10000") // 10-sec timeout for db-busy
+	query.Add("_foreign_keys", "1")     // Enable foreign-key constraints
 	query.Add("_journal_mode", "WAL")   // Use write-ahead log (supports read during write)
 	u.RawQuery = query.Encode()
 	u.Scheme = "file"

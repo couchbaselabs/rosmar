@@ -172,11 +172,15 @@ func (c *Collection) set(key string, exp Exp, opts *sgbucket.UpsertOptions, val 
 }
 
 func (c *Collection) _set(txn *sql.Tx, key string, exp Exp, opts *sgbucket.UpsertOptions, val []byte, isJSON bool, newCas CAS) error {
-	//FIXME: Obey opts.PreserveExpiry
-	_, err := txn.Exec(
-		`INSERT INTO documents (collection,key,value,cas,exp,isJSON) VALUES (?1,?2,?3,?4,?5,?6)
-			ON CONFLICT(collection,key) DO UPDATE SET value=?3, cas=?4, exp=?5, isJSON=?6`,
-		c.id, key, val, newCas, exp, isJSON)
+	var stmt string
+	if opts != nil && opts.PreserveExpiry {
+		stmt = `INSERT INTO documents (collection,key,value,cas,isJSON) VALUES (?1,?2,?3,?4,?6)
+			ON CONFLICT(collection,key) DO UPDATE SET value=?3, cas=?4, isJSON=?6`
+	} else {
+		stmt = `INSERT INTO documents (collection,key,value,cas,exp,isJSON) VALUES (?1,?2,?3,?4,?5,?6)
+			ON CONFLICT(collection,key) DO UPDATE SET value=?3, cas=?4, exp=?5, isJSON=?6`
+	}
+	_, err := txn.Exec(stmt, c.id, key, val, newCas, exp, isJSON)
 	return err
 }
 
@@ -245,7 +249,7 @@ func (c *Collection) WriteCas(key string, flags int, exp Exp, cas CAS, val any, 
 		var sql string
 		if (opt & sgbucket.Append) != 0 {
 			// Append:
-			sql = `UPDATE documents SET value=value || ?1, cas=?2, exp=?6, isJSON=?7
+			sql = `UPDATE documents SET value=value || ?1, cas=?2, exp=?6, isJSON=0
 					 WHERE collection=?3 AND key=?4 AND cas=?5`
 		} else if (opt&sgbucket.AddOnly) != 0 || cas == 0 {
 			// Insert, but fall back to Update if the doc is a tombstone
