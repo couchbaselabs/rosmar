@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"hash/crc32"
+	"runtime"
+	"sync"
 
 	sgbucket "github.com/couchbase/sg-bucket"
 	sqlite3 "github.com/mattn/go-sqlite3"
@@ -120,6 +122,30 @@ func encodedCRC32c(data []byte) string {
 	table := crc32.MakeTable(crc32.Castagnoli)
 	checksum := crc32.Checksum(data, table)
 	return fmt.Sprintf("0x%08x", checksum)
+}
+
+// Feeds the input channel through a number of copies of the function in parallel.
+// This call is asynchronous. Output can be read from the returned channel.
+func parallelize[IN any, OUT any](input <-chan IN, parallelism int, f func(input IN) OUT) <-chan OUT {
+	if parallelism == 0 {
+		parallelism = runtime.GOMAXPROCS(0)
+	}
+	output := make(chan OUT, len(input))
+	var waiter sync.WaitGroup
+	for j := 0; j < parallelism; j++ {
+		waiter.Add(1)
+		go func() {
+			defer waiter.Done()
+			for item := range input {
+				output <- f(item)
+			}
+		}()
+	}
+	go func() {
+		waiter.Wait()
+		close(output)
+	}()
+	return output
 }
 
 var (

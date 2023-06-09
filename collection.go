@@ -172,6 +172,7 @@ func (c *Collection) set(key string, exp Exp, opts *sgbucket.UpsertOptions, val 
 }
 
 func (c *Collection) _set(txn *sql.Tx, key string, exp Exp, opts *sgbucket.UpsertOptions, val []byte, isJSON bool, newCas CAS) error {
+	//FIXME: Obey opts.PreserveExpiry
 	_, err := txn.Exec(
 		`INSERT INTO documents (collection,key,value,cas,exp,isJSON) VALUES (?1,?2,?3,?4,?5,?6)
 			ON CONFLICT(collection,key) DO UPDATE SET value=?3, cas=?4, exp=?5, isJSON=?6`,
@@ -528,8 +529,8 @@ func (bucket *Bucket) getLastCas(txn *sql.Tx) (cas CAS, err error) {
 }
 
 // Returns the last CAS assigned to any doc in this collection.
-func (c *Collection) getLastCas() (cas CAS, err error) {
-	row := c.db().QueryRow("SELECT lastCas FROM collections WHERE id=?1", c.id)
+func (c *Collection) getLastCas(q queryable) (cas CAS, err error) {
+	row := q.QueryRow("SELECT lastCas FROM collections WHERE id=?1", c.id)
 	err = scan(row, &cas)
 	return
 }

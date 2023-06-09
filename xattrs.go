@@ -297,7 +297,7 @@ func (c *Collection) writeWithXattr(
 	xattr sgbucket.Xattr, // xattr; nil value means delete
 	ifCas *CAS, // if non-nil, must match current CAS; 0 for insert
 	exp Exp, // expiration
-	isDelete bool, // if true, doc must be a tombstone
+	isDelete bool, // if true, doc must be a tombstone	// TODO: Implement this
 	deleteBody bool, // if true, delete the doc body
 	xattrIsUser bool, // true if this is a user xattr
 ) (casOut CAS, err error) {

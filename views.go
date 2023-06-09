@@ -68,12 +68,16 @@ func (c *Collection) view(
 		return
 	}
 	// Look up the view and its index:
-	view, upToDate, err := c.findView(designDoc, viewName)
+	view, err := c.findView(c.db(), designDoc, viewName)
 	if err != nil {
 		return result, err
 	}
+	lastCas, err := c.getLastCas(c.db())
+	if err != nil {
+		return
+	}
 	// Update the view index if it's out of date:
-	if !upToDate {
+	if view.lastCas != lastCas {
 		var staleVal any
 		if jsonParams != nil {
 			staleVal = jsonParams["stale"]
@@ -81,11 +85,11 @@ func (c *Collection) view(
 		if staleVal == "updateAfter" {
 			go func() {
 				debug("\t{updating view in background...}")
-				c.updateView(view)
+				_, _ = c.updateView(designDoc, viewName)
 				debug("\t{...done updating view in background}")
 			}()
 		} else if staleVal != true && staleVal != "ok" {
-			if err = c.updateView(view); err != nil {
+			if view, err = c.updateView(designDoc, viewName); err != nil {
 				return
 			}
 		}
@@ -101,12 +105,12 @@ func (c *Collection) view(
 }
 
 // Returns an up-to-date `rosmarView` for a given view name.
-func (c *Collection) findView(designDoc string, viewName string) (view *rosmarView, upToDate bool, err error) {
+func (c *Collection) findView(q queryable, designDoc string, viewName string) (view *rosmarView, err error) {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
 
 	key := viewKey{designDoc, viewName}
-	row := c.db().QueryRow(`SELECT views.id, views.mapFn, views.reduceFn, views.lastCas
+	row := q.QueryRow(`SELECT views.id, views.mapFn, views.reduceFn, views.lastCas
 							FROM views JOIN designDocs ON views.designDoc=designDocs.id
 		 					WHERE designDocs.collection=?1 AND designDocs.name=?2 AND views.name=?3`,
 		c.id, designDoc, viewName)
@@ -128,15 +132,15 @@ func (c *Collection) findView(designDoc string, viewName string) (view *rosmarVi
 			view.mapFunction = cachedView.mapFunction
 		}
 	}
+	if view.mapFunction == nil {
+		view.mapFunction = sgbucket.NewJSMapFunction(view.mapFnSource, kMapFnTimeout)
+	}
 
 	// Cache it:
 	if c.viewCache == nil {
 		c.viewCache = map[viewKey]*rosmarView{}
 	}
 	c.viewCache[key] = view
-
-	lastCas, err := c.getLastCas()
-	upToDate = (err == nil && view.lastCas == lastCas)
 	return
 }
 
@@ -149,31 +153,46 @@ func (c *Collection) forgetCachedViews(designDoc string) {
 	}
 }
 
-// Updates the view index if necessary.
-func (c *Collection) updateView(view *rosmarView) error {
-	if view.mapFunction == nil {
-		view.mapFunction = sgbucket.NewJSMapFunction(view.mapFnSource, kMapFnTimeout)
-	}
+type mapInput struct {
+	doc_id int64
+	sgbucket.JSMapFunctionInput
+}
 
-	return c.bucket.inTransaction(func(txn *sql.Tx) error {
-		var latestCas CAS
-		row := txn.QueryRow("SELECT lastCas FROM collections WHERE id=?1", c.id)
-		err := scan(row, &latestCas)
+type mapOutput struct {
+	docID  string
+	doc_id int64
+	rows   []mapRow
+	err    error
+}
+
+type mapRow struct {
+	key, value []byte
+}
+
+// Updates the view index if necessary.
+func (c *Collection) updateView(designDoc string, viewName string) (view *rosmarView, err error) {
+	err = c.bucket.inTransaction(func(txn *sql.Tx) error {
+		// Read the view to ensure we get the current lastCas, mapFn, reduceFn:
+		view, err = c.findView(txn, designDoc, viewName)
 		if err != nil {
 			return err
 		}
+
+		latestCas, err := c.getLastCas(txn)
+		if err != nil || latestCas == view.lastCas {
+			return err
+		}
+
 		info("\t... updating view %s index to seq %d (from %d)", view.fullName, latestCas, view.lastCas)
 
 		// First delete all obsolete index rows, i.e. those whose source doc has been
 		// updated since view.lastCas:
 		_, err = txn.Exec(`DELETE FROM mapped WHERE view=?1 AND doc IN
-						(SELECT id FROM documents WHERE collection=?2 AND cas > ?3)`,
+								(SELECT id FROM documents WHERE collection=?2 AND cas > ?3)`,
 			view.id, c.id, view.lastCas)
 		if err != nil {
 			return err
 		}
-
-		//TODO: Parallelize the below: SELECT -> mapFunction -> INSERT
 
 		// Now iterate over all those updated docs:
 		rows, err := txn.Query(`SELECT id, key, value, cas, isJSON, xattrs FROM documents
@@ -183,62 +202,91 @@ func (c *Collection) updateView(view *rosmarView) error {
 		if err != nil {
 			return err
 		}
-		for rows.Next() {
-			// Read the document from the query row:
-			var input sgbucket.JSMapFunctionInput
-			var doc_id int
-			var value []byte
-			var isJSON bool
-			var rawXattrs []byte
-			if err = rows.Scan(&doc_id, &input.DocID, &value, &input.VbSeq, &isJSON, &rawXattrs); err != nil {
-				return err
-			}
-			input.VbNo = sgbucket.VBHash(input.DocID, kNumVbuckets)
+		defer rows.Close()
 
-			if isJSON && value != nil {
-				input.Doc = string(value)
-			} else {
-				input.Doc = "{}"
-			}
+		// One goroutine reads documents from the db:
+		mapInputChan := make(chan *mapInput, 100)
+		go func() {
+			defer close(mapInputChan)
+			for rows.Next() {
+				// Read the document from the query row:
+				var input mapInput
+				var value []byte
+				var isJSON bool
+				var rawXattrs []byte
+				if err = rows.Scan(&input.doc_id, &input.DocID, &value, &input.VbSeq, &isJSON, &rawXattrs); err != nil {
+					logError("Error reading doc %q for view: %s", input.DocID, err)
+					continue
+				}
+				input.VbNo = sgbucket.VBHash(input.DocID, kNumVbuckets)
 
-			if len(rawXattrs) > 0 {
-				var semiParsed semiParsedXattrs
-				err = json.Unmarshal(rawXattrs, &semiParsed)
-				if err != nil {
-					logError("Error unmarshaling xattrs: %s", err)
+				if isJSON && value != nil {
+					input.Doc = string(value)
 				} else {
-					input.Xattrs = make(map[string][]byte, len(semiParsed))
-					for key, val := range semiParsed {
-						input.Xattrs[key] = val
+					input.Doc = "{}"
+				}
+
+				if len(rawXattrs) > 0 {
+					var semiParsed semiParsedXattrs
+					err = json.Unmarshal(rawXattrs, &semiParsed)
+					if err != nil {
+						logError("Error unmarshaling xattrs of doc %q: %s", input.DocID, err)
+						continue
+					} else {
+						input.Xattrs = make(map[string][]byte, len(semiParsed))
+						for key, val := range semiParsed {
+							input.Xattrs[key] = val
+						}
 					}
 				}
+				mapInputChan <- &input
 			}
+		}()
 
+		// Another goroutine pool calls the map function on the docs:
+		mapOutputChan := parallelize(mapInputChan, 0, func(input *mapInput) (out mapOutput) {
 			// Call the map function:
 			trace("\tMAP %v", input)
-			viewRows, err := view.mapFunction.CallFunction(&input)
+			viewRows, err := view.mapFunction.CallFunction(&input.JSMapFunctionInput)
+			if err == nil {
+				// Marshal each key and value:
+				jsonRows := make([]mapRow, len(viewRows))
+				for i, row := range viewRows {
+					if jsonRows[i].key, err = json.Marshal(row.Key); err != nil {
+						break
+					} else if jsonRows[i].value, err = json.Marshal(row.Value); err != nil {
+						break
+					}
+				}
+				if err == nil {
+					out.rows = jsonRows
+				}
+			}
 			if err != nil {
 				logError("Error running map function on doc %q: %s", input.DocID, err)
+			}
+			out.docID = input.DocID
+			out.doc_id = input.doc_id
+			return
+		})
+
+		// And finally we read the emitted rows and write them to the db:
+		for docRows := range mapOutputChan {
+			if docRows.err != nil {
 				continue
 			}
-
-			for _, viewRow := range viewRows {
-				// Insert each emitted row into the `mapped` table:
-				var key, value []byte
-				if key, err = json.Marshal(viewRow.Key); err != nil {
-					return err
-				} else if value, err = json.Marshal(viewRow.Value); err != nil {
-					return err
-				}
-				trace("\tEMIT %s , %s  (doc %d %q; CAS %d)", key, value, doc_id, input.DocID, input.VbSeq)
+			// Insert each emitted row into the `mapped` table:
+			for _, row := range docRows.rows {
+				trace("\tEMIT %s , %s  (doc %d %q)", row.key, row.value, docRows.doc_id, docRows.docID)
 				_, err = txn.Exec(`INSERT INTO mapped (view,doc,key,value)
 									VALUES (?1, ?2, ?3, ?4)`,
-					view.id, doc_id, string(key), string(value))
+					view.id, docRows.doc_id, string(row.key), string(row.value))
 				if err != nil {
 					return err
 				}
 			}
 		}
+
 		if err = rows.Close(); err != nil {
 			return err
 		}
@@ -250,6 +298,7 @@ func (c *Collection) updateView(view *rosmarView) error {
 		}
 		return err
 	})
+	return view, err
 }
 
 // Returns all the view rows from the database.

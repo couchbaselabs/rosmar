@@ -53,7 +53,7 @@ func TestView(t *testing.T) {
 	options := map[string]interface{}{"stale": false}
 	result, err := coll.View("docname", "view1", options)
 	assert.NoError(t, err, "View call failed")
-	assert.Equal(t, 5, result.TotalRows)
+	require.Equal(t, 5, result.TotalRows)
 	assert.Equal(t, &sgbucket.ViewRow{ID: "doc3", Key: 17.0, Value: []interface{}{"v3"}}, result.Rows[0])
 	assert.Equal(t, &sgbucket.ViewRow{ID: "doc1", Key: "k1", Value: "v1"}, result.Rows[1])
 	assert.Equal(t, &sgbucket.ViewRow{ID: "doc2", Key: "k2", Value: "v2"}, result.Rows[2])
