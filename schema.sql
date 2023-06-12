@@ -48,7 +48,10 @@ CREATE INDEX mapped_doc ON mapped (view, doc);
 CREATE INDEX mapped_key ON mapped (view, key);
 
 /* Create the singleton `bucket` row */
-INSERT INTO bucket (name, uuid, lastCas) VALUES ($1, $2, 0);
+INSERT INTO bucket (name, uuid, lastCas) VALUES ($NAME, $UUID, 0);
 
 /* Create the default collection */
-INSERT INTO COLLECTIONS (scope, name) VALUES ($3, $4);
+INSERT INTO COLLECTIONS (scope, name) VALUES ($SCOPE, $COLL);
+
+/* Bump the user_version to indicate the schema is created */
+PRAGMA user_version = 1;

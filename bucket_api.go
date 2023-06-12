@@ -11,9 +11,22 @@ import (
 
 //////// Interface BucketStore
 
-func (bucket *Bucket) GetURL() string  { return bucket.url }
+// The URL used to open the bucket.
+func (bucket *Bucket) GetURL() string { return bucket.url }
+
+// The bucket's name. This defaults to the last path component of the URL.
 func (bucket *Bucket) GetName() string { return bucket.name }
 
+// Renames the bucket. This doesn't affect its URL, only the value returned by GetName.
+func (bucket *Bucket) SetName(name string) error {
+	_, err := bucket.db().Exec(`UPDATE bucket SET name=?1`, name)
+	if err == nil {
+		bucket.name = name
+	}
+	return err
+}
+
+// The universally unique ID given the bucket when it was created.
 func (bucket *Bucket) UUID() (string, error) {
 	var uuid string
 	row := bucket.db().QueryRow(`SELECT uuid FROM bucket;`)
@@ -21,6 +34,7 @@ func (bucket *Bucket) UUID() (string, error) {
 	return uuid, err
 }
 
+// Closes a bucket.
 func (bucket *Bucket) Close() {
 	trace("Close(bucket %s)", bucket.GetName())
 	bucket.mutex.Lock()
@@ -36,6 +50,7 @@ func (bucket *Bucket) Close() {
 	}
 }
 
+// Closes a bucket and deletes its directory and files (unless it's in-memory.)
 func (bucket *Bucket) CloseAndDelete() error {
 	bucket.Close()
 

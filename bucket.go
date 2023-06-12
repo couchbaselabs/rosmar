@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"net/url"
 	"os"
+	"path"
 	"sync"
 	"time"
 
@@ -28,7 +29,7 @@ type Bucket struct {
 
 type collectionsMap = map[sgbucket.DataStoreNameImpl]*Collection
 
-// Scheme of Rosmar URLs
+// Scheme of Rosmar database URLs
 const URLScheme = "rosmar"
 
 // URL representing an in-memory database with no file
@@ -48,87 +49,62 @@ var kSchema string
 
 var setupOnce sync.Once
 
+// Options for opening a bucket.
+type OpenMode int
+
+const (
+	CreateOrOpen   = iota // Create a new bucket, or reopen an existing one.
+	CreateNew             // Create a new bucket, or fail if the directory exists.
+	ReOpenExisting        // Open an existing bucket, or fail if none exists.
+)
+
 // Creates a new bucket, or opens an existing one.
+//
 // The URL should have the scheme 'rosmar' or 'file' and a filesystem path.
-// The final component of the path is the directory name that will be created,
-// containing the SQLite database files.
+// The path represents a directory; the SQLite database files will be created inside it.
 // Alternatively, the `InMemoryURL` can be given, to create an in-memory bucket with no file.
-func NewBucket(urlStr, bucketName string) (*Bucket, error) {
-	bucket, _, err := openBucket(urlStr, false)
-	if err != nil {
-		return nil, err
-	}
-	if err = bucket.initializeSchema(bucketName); err != nil {
-		bucket = nil
-	}
-	return bucket, err
-}
-
-// Opens an existing bucket; fails if it doesn't exist. See `NewBucket` for details on the URL.
-func GetBucket(urlStr string, bucketName string) (bucket *Bucket, err error) {
-	bucket, inMemory, err := openBucket(urlStr, true)
-	if err != nil {
-		return nil, err
-	}
-	if inMemory {
-		err = bucket.initializeSchema(bucketName)
-	} else {
-		row := bucket.db().QueryRow(`SELECT name FROM bucket`)
-		err = scan(row, &bucket.name)
-	}
-	if err != nil {
-		bucket = nil
-	}
-	return
-}
-
-// Deletes the bucket at the given URL. No-op if it's in-memory.
-func DeleteBucket(urlStr string) error {
-	if urlStr == InMemoryURL {
-		return nil
-	}
-	u, err := url.Parse(urlStr)
-	if err != nil {
-		return err
-	} else if u.Scheme != "" && u.Scheme != "file" && u.Scheme != URLScheme {
-		return fmt.Errorf("not a rosmar: or file: URL")
-	} else if u.Query().Get("mode") == "memory" {
-		return nil
-	}
-	u = u.JoinPath(kDBFilename)
-	info("Deleting db at path %s", u.Path)
-	err = os.Remove(u.Path)
-	if errors.Is(err, fs.ErrNotExist) {
-		err = nil
-	}
-	if err == nil {
-		_ = os.Remove(urlStr + "_wal")
-		_ = os.Remove(urlStr + "_shm")
-	}
-	return err
-}
-
-func openBucket(urlStr string, mustExist bool) (bucket *Bucket, inMemory bool, err error) {
+func OpenBucket(urlStr string, mode OpenMode) (*Bucket, error) {
 	u, err := encodeDBURL(urlStr)
 	if err != nil {
-		return
+		return nil, err
 	}
 	urlStr = u.String()
 
-	// See https://github.com/mattn/go-sqlite3#connection-string
 	query := u.Query()
-	inMemory = query.Get("mode") == "memory"
-	if !inMemory {
+	inMemory := query.Get("mode") == "memory"
+	var bucketName string
+	if inMemory {
+		if mode == ReOpenExisting {
+			return nil, fs.ErrNotExist
+		}
+		bucketName = "memory"
+	} else {
+		dir := u.Path
+		if mode != ReOpenExisting {
+			if _, err = os.Stat(dir); err == nil {
+				if mode == CreateNew {
+					err = fs.ErrExist
+				}
+			} else if errors.Is(err, fs.ErrNotExist) {
+				err = os.Mkdir(dir, 0700)
+			}
+			if err != nil {
+				return nil, err
+			}
+		}
+
+		query.Set("mode", ifelse(mode == ReOpenExisting, "rw", "rwc"))
 		u = u.JoinPath(kDBFilename)
-		query.Set("mode", ifelse(mustExist, "rw", "rwc"))
+		bucketName = path.Base(dir)
 	}
+
+	// See https://github.com/mattn/go-sqlite3#connection-string
 	query.Add("_auto_vacuum", "1")      // Full auto-vacuum
 	query.Add("_busy_timeout", "10000") // 10-sec timeout for db-busy
 	query.Add("_foreign_keys", "1")     // Enable foreign-key constraints
 	query.Add("_journal_mode", "WAL")   // Use write-ahead log (supports read during write)
 	u.RawQuery = query.Encode()
 	u.Scheme = "file"
-	info("Opening Rosmar db %s", u)
 
 	// One-time registration of the SQLite3 database driver.
 	setupOnce.Do(func() {
@@ -144,19 +120,68 @@ func openBucket(urlStr string, mustExist bool) (bucket *Bucket, inMemory bool, e
 		sql.Register("sqlite3_for_rosmar", &sqlite3.SQLiteDriver{ConnectHook: connectHook})
 	})
 
+	info("Opening Rosmar db %s", u)
 	db, err := sql.Open("sqlite3_for_rosmar", u.String())
 	if err != nil {
-		return
+		return nil, err
 	}
-	// An in-memory db cannot have multiple connections
+	// An in-memory db cannot have multiple connections (or each would be a separate database!)
 	db.SetMaxOpenConns(ifelse(inMemory, 1, kMaxOpenConnections))
 
-	bucket = &Bucket{
+	bucket := &Bucket{
 		url:         urlStr,
 		_db:         db,
 		collections: make(map[sgbucket.DataStoreNameImpl]*Collection),
 	}
-	return
+
+	// Initialize the schema if necessary:
+	var vers int
+	err = db.QueryRow(`PRAGMA user_version`).Scan(&vers)
+	if err != nil {
+		return nil, err
+	}
+	if vers == 0 {
+		if err = bucket.initializeSchema(bucketName); err != nil {
+			return nil, err
+		}
+	}
+	return bucket, err
+}
+
+// Creates or re-opens a bucket, like OpenBucket.
+// The difference is that the input bucket URL is split into a parent directory URL and a
+// bucket name. The bucket will be opened in a subdirectory of the directory URL.
+func OpenBucketIn(dirUrlStr string, bucketName string, mode OpenMode) (*Bucket, error) {
+	u, err := parseDBFileURL(dirUrlStr)
+	if err != nil {
+		return nil, err
+	}
+	return OpenBucket(u.JoinPath(bucketName).String(), mode)
+}
+
+// Deletes the bucket at the given URL, i.e. the filesystem directory at its path, if it exists.
+// If given `InMemoryURL` it's a no-op.
+// Warning: Never call this while there are any open Bucket instances on this URL!
+func DeleteBucket(urlStr string) error {
+	if urlStr == InMemoryURL {
+		return nil
+	}
+	info("DeleteBucket(%q)", urlStr)
+	u, err := parseDBFileURL(urlStr)
+	if err != nil {
+		return err
+	} else if u.Query().Get("mode") == "memory" {
+		return nil
+	}
+	// For safety's sake, don't delete just any directory. Ensure it contains a db file:
+	err = os.Remove(u.JoinPath(kDBFilename).Path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err == nil {
+		err = os.Remove(u.Path)
+	}
+	return err
 }
 
 // Validates the URL string given to NewBucket or OpenBucket, and converts it to a URL object.
@@ -169,26 +194,37 @@ func encodeDBURL(urlStr string) (*url.URL, error) {
 			RawQuery: "mode=memory",
 		}, nil
 	}
-	u, err := url.Parse(urlStr)
+	u, err := parseDBFileURL(urlStr)
 	if err != nil {
 		return nil, err
 	}
-	if u.Scheme != "" && u.Scheme != "file" && u.Scheme != URLScheme {
-		return nil, fmt.Errorf("rosmar requires rosmar: or file: URLs")
-	} else if u.User != nil || u.Host != "" || u.Fragment != "" {
-		return nil, fmt.Errorf("rosmar URL may not have user, host or fragment")
-	} else if u.RawQuery != "" && u.RawQuery != "mode=memory" {
-		return nil, fmt.Errorf("unsupported query in rosmar URL")
-	}
-
 	u.Scheme = "rosmar"
 	u.OmitHost = true
 	return u, nil
 }
 
+func parseDBFileURL(urlStr string) (*url.URL, error) {
+	if u, err := url.Parse(urlStr); err != nil {
+		return nil, err
+	} else if u.Scheme != "" && u.Scheme != "file" && u.Scheme != URLScheme {
+		return nil, fmt.Errorf("rosmar requires rosmar: or file: URLs")
+	} else if u.User != nil || u.Host != "" || u.Fragment != "" {
+		return nil, fmt.Errorf("rosmar URL may not have user, host or fragment")
+	} else if u.RawQuery != "" && u.RawQuery != "mode=memory" {
+		return nil, fmt.Errorf("unsupported query in rosmar URL")
+	} else {
+		return u, err
+	}
+}
+
 func (bucket *Bucket) initializeSchema(bucketName string) (err error) {
 	uuid := uuid.New().String()
-	_, err = bucket.db().Exec(kSchema, bucketName, uuid, sgbucket.DefaultScope, sgbucket.DefaultCollection)
+	_, err = bucket.db().Exec(kSchema,
+		sql.Named("NAME", bucketName),
+		sql.Named("UUID", uuid),
+		sql.Named("SCOPE", sgbucket.DefaultScope),
+		sql.Named("COLL", sgbucket.DefaultCollection),
+	)
 	if err != nil {
 		_ = bucket.CloseAndDelete()
 		panic("Rosmar SQL schema is invalid: " + err.Error())
@@ -211,6 +247,7 @@ func (bucket *Bucket) db() queryable {
 // Runs a function within a SQLite transaction.
 func (bucket *Bucket) inTransaction(fn func(txn *sql.Tx) error) error {
 	// SQLite allows only a single writer, so use a mutex to avoid BUSY and LOCKED errors.
+	// However, BUSY errors can still occur (somehow?), so we retry if we get one.
 	bucket.mutex.Lock()
 	defer bucket.mutex.Unlock()
 

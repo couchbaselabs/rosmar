@@ -3,6 +3,7 @@ package rosmar
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"testing"
 	"time"
@@ -18,17 +19,15 @@ func init() {
 	}
 }
 
-const testBucketDirName = "rosmar_test"
-const testBucketName = "RosmarTest"
+const testBucketDirName = "RosmarTest"
 
 func testBucketPath(t *testing.T) string {
 	dir := fmt.Sprintf("%s%c%s", t.TempDir(), os.PathSeparator, testBucketDirName)
-	os.Mkdir(dir, 0700)
 	return dir
 }
 
 func makeTestBucket(t *testing.T) *Bucket {
-	bucket, err := NewBucket(testBucketPath(t), testBucketName)
+	bucket, err := OpenBucket(testBucketPath(t), CreateNew)
 	require.NoError(t, err)
 	t.Cleanup(bucket.Close)
 
@@ -44,14 +43,14 @@ func dsName(scope string, coll string) sgbucket.DataStoreName {
 
 func TestNewBucket(t *testing.T) {
 	bucket := makeTestBucket(t)
-	assert.Equal(t, testBucketName, bucket.GetName())
+	assert.Equal(t, testBucketDirName, bucket.GetName())
 	assert.Contains(t, bucket.GetURL(), testBucketDirName)
 }
 
 func TestGetMissingBucket(t *testing.T) {
 	path := testBucketPath(t)
 	require.NoError(t, DeleteBucket(path))
-	bucket, err := GetBucket(path, "Rosmar")
+	bucket, err := OpenBucket(path, ReOpenExisting)
 	assert.ErrorContains(t, err, "unable to open database file: no such file or directory")
 	assert.Nil(t, bucket)
 }
@@ -69,17 +68,19 @@ func TestCallClosedBucket(t *testing.T) {
 func TestNewBucketInMemory(t *testing.T) {
 	assert.NoError(t, DeleteBucket(InMemoryURL))
 
-	bucket, err := NewBucket(InMemoryURL, "Rosmar")
-	require.NoError(t, err)
-	require.NotNil(t, bucket)
+	modes := []OpenMode{CreateNew, CreateOrOpen}
+	for _, mode := range modes {
+		bucket, err := OpenBucket(InMemoryURL, mode)
+		require.NoError(t, err)
+		require.NotNil(t, bucket)
 
-	err = bucket.CloseAndDelete()
-	assert.NoError(t, err)
+		err = bucket.CloseAndDelete()
+		assert.NoError(t, err)
+	}
 
-	bucket, err = GetBucket(InMemoryURL, "Rosmar")
-	require.NoError(t, err)
-	require.NotNil(t, bucket)
-	bucket.Close()
+	_, err := OpenBucket(InMemoryURL, ReOpenExisting)
+	assert.Error(t, err)
+	assert.Equal(t, err, fs.ErrNotExist)
 }
 
 var defaultCollection = dsName("_default", "_default")
@@ -191,7 +192,7 @@ func TestGetPersistentMultiCollectionBucket(t *testing.T) {
 	huddle.Close()
 
 	// Reopen persisted collection bucket
-	loadedHuddle, loadedErr := GetBucket(huddleURL, "bucket")
+	loadedHuddle, loadedErr := OpenBucket(huddleURL, ReOpenExisting)
 	assert.NoError(t, loadedErr)
 
 	// validate contents
@@ -221,7 +222,7 @@ func TestGetPersistentMultiCollectionBucket(t *testing.T) {
 	loadedHuddle.Close()
 
 	// Reopen persisted collection bucket again to ensure dropped collection is not present
-	reloadedHuddle, reloadedErr := GetBucket(huddleURL, "bucket")
+	reloadedHuddle, reloadedErr := OpenBucket(huddleURL, ReOpenExisting)
 	assert.NoError(t, reloadedErr)
 
 	// reopen dropped collection, verify that previous data is not present
@@ -240,10 +241,13 @@ func TestGetPersistentMultiCollectionBucket(t *testing.T) {
 	// Close and Delete the bucket, should delete underlying collections
 	require.NoError(t, reloadedHuddle.CloseAndDelete())
 
-	// Attempt to reopen persisted collectionBucket
-	postDeleteHuddle, err := NewBucket(huddleURL, testBucketName)
-	assert.NoError(t, err)
+	// Attempt to reopen deleted bucket
+	_, err = OpenBucket(huddleURL, ReOpenExisting)
+	assert.Error(t, err)
 
+	// Create new bucket at same path:
+	postDeleteHuddle, err := OpenBucket(huddleURL, CreateNew)
+	require.NoError(t, err)
 	var postDeleteValue interface{}
 	postDeleteC2, err := postDeleteHuddle.NamedDataStore(dsName("scope1", "collection2"))
 	require.NoError(t, err)
