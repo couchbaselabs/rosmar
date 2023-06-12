@@ -106,9 +106,6 @@ func (c *Collection) view(
 
 // Returns an up-to-date `rosmarView` for a given view name.
 func (c *Collection) findView(q queryable, designDoc string, viewName string) (view *rosmarView, err error) {
-	c.mutex.Lock()
-	defer c.mutex.Unlock()
-
 	key := viewKey{designDoc, viewName}
 	row := q.QueryRow(`SELECT views.id, views.mapFn, views.reduceFn, views.lastCas
 							FROM views JOIN designDocs ON views.designDoc=designDocs.id
@@ -125,6 +122,9 @@ func (c *Collection) findView(q queryable, designDoc string, viewName string) (v
 		}
 		return
 	}
+
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
 
 	if cachedView, found := c.viewCache[key]; found {
 		// Reuse cached compiled map function:
@@ -335,10 +335,11 @@ func (c *Collection) getViewRows(view *rosmarView, params *sgbucket.ViewParams) 
 		return
 	}
 
-	sel += `ORDER BY mapped.key `
 	if params.Descending {
-		sel += `DESC `
+		sel += `ORDER BY mapped.key DESC, documents.key DESC `
 		params.Descending = false
+	} else {
+		sel += `ORDER BY mapped.key, documents.key `
 	}
 	if params.Limit != nil {
 		sel += fmt.Sprintf(`LIMIT %d `, *params.Limit)

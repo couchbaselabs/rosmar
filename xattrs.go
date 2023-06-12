@@ -205,7 +205,7 @@ func (c *Collection) WriteUpdateWithXattr(
 		}
 
 		// Update body and/or xattr:
-		casOut, err = c.WriteWithXattr(key, xattrKey, exp, previous.Cas, opts, updatedDoc, updatedXattr, deleteDoc, (updatedDoc == nil))
+		casOut, err = c.WriteWithXattr(key, xattrKey, exp, previous.Cas, opts, updatedDoc, updatedXattr, false, deleteDoc)
 
 		if _, ok := err.(sgbucket.CasMismatchErr); !ok {
 			// Exit loop on success or failure
@@ -297,7 +297,7 @@ func (c *Collection) writeWithXattr(
 	xattr sgbucket.Xattr, // xattr; nil value means delete
 	ifCas *CAS, // if non-nil, must match current CAS; 0 for insert
 	exp Exp, // expiration
-	isDelete bool, // if true, doc must be a tombstone
+	isDelete bool, // ignored: I have no idea what exactly it does...
 	deleteBody bool, // if true, delete the doc body
 	xattrIsUser bool, // true if this is a user xattr
 ) (casOut CAS, err error) {
@@ -315,8 +315,6 @@ func (c *Collection) writeWithXattr(
 			return nil, remapKeyError(err, key)
 		} else if ifCas != nil && *ifCas != e.cas {
 			return nil, sgbucket.CasMismatchErr{Expected: *ifCas, Actual: e.cas}
-		} else if isDelete && e.value != nil {
-			return nil, fmt.Errorf("document is not deleted (isDelete=true)")
 		}
 
 		var xattrs semiParsedXattrs

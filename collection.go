@@ -187,8 +187,9 @@ func (c *Collection) _set(txn *sql.Tx, key string, exp Exp, opts *sgbucket.Upser
 // Non-Raw:
 
 func (c *Collection) Get(key string, outVal any) (cas CAS, err error) {
-	trace("rosmar.Get(%q)", key)
-	return c.get(c.db(), key, outVal)
+	cas, err = c.get(c.db(), key, outVal)
+	trace("rosmar.Get(%q) -> %d, %v", key, cas, err)
+	return
 }
 
 func (c *Collection) get(q queryable, key string, outVal any) (cas CAS, err error) {
@@ -366,12 +367,15 @@ func (c *Collection) Update(key string, exp Exp, callback sgbucket.UpdateFunc) (
 	for {
 		var raw []byte
 		var cas CAS
-		if raw, cas, err = c.GetRaw(key); err != nil && !c.IsError(err, sgbucket.KeyNotFoundError) {
+		if raw, cas, err = c.getRaw(c.db(), key); err != nil && !c.IsError(err, sgbucket.KeyNotFoundError) {
 			return
 		}
 
+		var newRaw []byte
+		var newExp *uint32
 		var delete bool
-		raw, _, delete, err = callback(raw)
+		newRaw, newExp, delete, err = callback(raw)
+		trace("\t callback(%q) -> %q, exp=%v, delete=%v, err=%v", raw, newRaw, exp, delete, err)
 		if err != nil {
 			if err == sgbucket.ErrCasFailureShouldRetry {
 				continue // Callback wants us to retry
@@ -379,8 +383,14 @@ func (c *Collection) Update(key string, exp Exp, callback sgbucket.UpdateFunc) (
 				return cas, err
 			}
 		}
-		if raw == nil && !delete {
+		if newRaw == nil && newExp == nil && !delete {
 			return 0, nil // Callback canceled
+		}
+		if newRaw != nil || delete {
+			raw = newRaw
+		}
+		if newExp != nil {
+			exp = *newExp
 		}
 
 		casOut, err = c.WriteCas(key, 0, exp, cas, raw, sgbucket.Raw)
