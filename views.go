@@ -214,7 +214,7 @@ func (c *Collection) updateView(designDoc string, viewName string) (view *rosmar
 				var value []byte
 				var isJSON bool
 				var rawXattrs []byte
-				if err = rows.Scan(&input.doc_id, &input.DocID, &value, &input.VbSeq, &isJSON, &rawXattrs); err != nil {
+				if err := rows.Scan(&input.doc_id, &input.DocID, &value, &input.VbSeq, &isJSON, &rawXattrs); err != nil {
 					logError("Error reading doc %q for view: %s", input.DocID, err)
 					continue
 				}
@@ -278,7 +278,7 @@ func (c *Collection) updateView(designDoc string, viewName string) (view *rosmar
 			// Insert each emitted row into the `mapped` table:
 			for _, row := range docRows.rows {
 				trace("\tEMIT %s , %s  (doc %d %q)", row.key, row.value, docRows.doc_id, docRows.docID)
-				_, err = txn.Exec(`INSERT INTO mapped (view,doc,key,value)
+				_, err := txn.Exec(`INSERT INTO mapped (view,doc,key,value)
 									VALUES (?1, ?2, ?3, ?4)`,
 					view.id, docRows.doc_id, string(row.key), string(row.value))
 				if err != nil {
