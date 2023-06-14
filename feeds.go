@@ -221,6 +221,9 @@ type event struct {
 }
 
 func (e *event) asFeedEvent() *sgbucket.FeedEvent {
+	if e.exp != absoluteExpiry(e.exp) {
+		panic(fmt.Sprintf("expiry %d isn't absolute", e.exp)) // caller forgot absoluteExpiry()
+	}
 	feedEvent := sgbucket.FeedEvent{
 		Opcode:       ifelse(e.isDeletion, sgbucket.FeedOpDeletion, sgbucket.FeedOpMutation),
 		CollectionID: e.collectionID,

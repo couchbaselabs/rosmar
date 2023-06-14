@@ -4,7 +4,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"time"
 
 	sgbucket "github.com/couchbase/sg-bucket"
 )
@@ -271,7 +270,7 @@ func (bucket *Bucket) NextExpiration() (exp Exp, err error) {
 func (bucket *Bucket) ExpireDocuments() (count int64, err error) {
 	err = bucket.inTransaction(func(txn *sql.Tx) error {
 		result, err := txn.Exec(`DELETE FROM documents WHERE exp > 0 AND exp < ?1`,
-			time.Now().Unix())
+			nowAsExpiry())
 		if err == nil {
 			count, err = result.RowsAffected()
 			info("rosmar.ExpireDocuments: purged %d docs", count)

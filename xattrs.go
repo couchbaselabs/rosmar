@@ -302,6 +302,7 @@ func (c *Collection) writeWithXattr(
 	xattrIsUser bool, // true if this is a user xattr
 ) (casOut CAS, err error) {
 	err = c.withNewCas(func(txn *sql.Tx, newCas CAS) (*event, error) {
+		exp = absoluteExpiry(exp)
 		e := &event{
 			key: key,
 			exp: exp,

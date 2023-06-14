@@ -96,6 +96,7 @@ func (c *Collection) getRaw(q queryable, key string) (val []byte, cas CAS, err e
 func (c *Collection) GetAndTouchRaw(key string, exp Exp) (val []byte, cas CAS, err error) {
 	trace("rosmar.GetAndTouchRaw(%q)", key)
 	err = c.withNewCas(func(txn *sql.Tx, newCas CAS) (e *event, err error) {
+		exp = absoluteExpiry(exp)
 		val, cas, err = c.getRaw(txn, key)
 		if err == nil {
 			_, err = txn.Exec(`UPDATE documents SET exp=?1 WHERE key=?2`, exp, key)
@@ -116,6 +117,7 @@ func (c *Collection) add(key string, exp Exp, val []byte, isJSON bool) (added bo
 	}
 	var casOut CAS
 	err = c.withNewCas(func(txn *sql.Tx, newCas CAS) (e *event, err error) {
+		exp = absoluteExpiry(exp)
 		result, err := txn.Exec(
 			`INSERT INTO documents (collection,key,value,cas,exp,isJSON) VALUES (?1,?2,?3,?4,?5,?6)
 				ON CONFLICT(collection,key) DO UPDATE SET value=?3, cas=?4, exp=?5, isJSON=?6
@@ -152,6 +154,7 @@ func (c *Collection) set(key string, exp Exp, opts *sgbucket.UpsertOptions, val 
 		return
 	}
 	return c.withNewCas(func(txn *sql.Tx, newCas CAS) (*event, error) {
+		exp = absoluteExpiry(exp)
 		err = c._set(txn, key, exp, opts, val, isJSON, newCas)
 		if err != nil {
 			return nil, err
@@ -172,6 +175,7 @@ func (c *Collection) set(key string, exp Exp, opts *sgbucket.UpsertOptions, val 
 }
 
 func (c *Collection) _set(txn *sql.Tx, key string, exp Exp, opts *sgbucket.UpsertOptions, val []byte, isJSON bool, newCas CAS) error {
+	exp = absoluteExpiry(exp)
 	var stmt string
 	if opts != nil && opts.PreserveExpiry {
 		stmt = `INSERT INTO documents (collection,key,value,cas,isJSON) VALUES (?1,?2,?3,?4,?6)
@@ -247,6 +251,7 @@ func (c *Collection) WriteCas(key string, flags int, exp Exp, cas CAS, val any, 
 	}
 
 	err = c.withNewCas(func(txn *sql.Tx, newCas CAS) (*event, error) {
+		exp = absoluteExpiry(exp)
 		var sql string
 		if (opt & sgbucket.Append) != 0 {
 			// Append:
@@ -406,6 +411,7 @@ func (c *Collection) Update(key string, exp Exp, callback sgbucket.UpdateFunc) (
 func (c *Collection) Incr(key string, amt, deflt uint64, exp Exp) (result uint64, err error) {
 	trace("rosmar.Incr(%q, %d, %d)", key, amt, deflt)
 	err = c.withNewCas(func(txn *sql.Tx, newCas CAS) (*event, error) {
+		exp = absoluteExpiry(exp)
 		_, err = c.get(txn, key, &result)
 		if err == nil {
 			result += amt

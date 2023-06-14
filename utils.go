@@ -7,6 +7,7 @@ import (
 	"hash/crc32"
 	"runtime"
 	"sync"
+	"time"
 
 	sgbucket "github.com/couchbase/sg-bucket"
 	sqlite3 "github.com/mattn/go-sqlite3"
@@ -146,6 +147,22 @@ func parallelize[IN any, OUT any](input <-chan IN, parallelism int, f func(input
 		close(output)
 	}()
 	return output
+}
+
+const kMaxDeltaTtl = 60 * 60 * 24 * 30 // Constant used by CBS
+
+// The current time, as an expiry value
+func nowAsExpiry() Exp {
+	return uint32(time.Now().Unix())
+}
+
+// Converts an input expiry value, which may be either an absolute Unix timestamp or a relative
+// offset from the current time, into the absolute form.
+func absoluteExpiry(exp Exp) Exp {
+	if exp <= kMaxDeltaTtl && exp > 0 {
+		exp += nowAsExpiry()
+	}
+	return exp
 }
 
 var (
