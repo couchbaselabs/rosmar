@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"time"
 
 	sgbucket "github.com/couchbase/sg-bucket"
 )
@@ -39,6 +40,9 @@ func (bucket *Bucket) Close() {
 	bucket.mutex.Lock()
 	defer bucket.mutex.Unlock()
 
+	if bucket.expTimer != nil {
+		bucket.expTimer.Stop()
+	}
 	for _, c := range bucket.collections {
 		c.close()
 	}
@@ -233,6 +237,26 @@ func (bucket *Bucket) getOrCreateCollection(name sgbucket.DataStoreNameImpl, orC
 	}
 }
 
+func (bucket *Bucket) getCollectionByID(id CollectionID) (*Collection, error) {
+	// unused (so far)
+	bucket.mutex.Lock()
+	defer bucket.mutex.Unlock()
+
+	for _, coll := range bucket.collections {
+		if coll.id == id {
+			return coll, nil
+		}
+	}
+	row := bucket.db().QueryRow(`SELECT scope,name FROM collections WHERE id=?1`, id)
+	var scope, name string
+	err := scan(row, &scope, &name)
+	if err != nil {
+		return nil, err
+	}
+	dsName := sgbucket.DataStoreNameImpl{Scope: scope, Collection: name}
+	return bucket._initCollection(dsName, id), nil
+}
+
 func (bucket *Bucket) dropCollection(name sgbucket.DataStoreNameImpl) error {
 	if name.IsDefault() {
 		return errors.New("default collection cannot be dropped")
@@ -266,14 +290,69 @@ func (bucket *Bucket) NextExpiration() (exp Exp, err error) {
 	return
 }
 
-// Deletes any expired documents.
-func (bucket *Bucket) ExpireDocuments() (count int64, err error) {
+// Immediately deletes all expired documents in this bucket.
+func (bucket *Bucket) ExpireDocuments() (int64, error) {
+	names, err := bucket.ListDataStores()
+	if err != nil {
+		return 0, err
+	}
+	var count int64
+	for _, name := range names {
+		if coll, err := bucket.getCollection(name.(sgbucket.DataStoreNameImpl)); err != nil {
+			return 0, err
+		} else if n, err := coll.ExpireDocuments(); err != nil {
+			return 0, err
+		} else {
+			count += n
+		}
+	}
+	return count, nil
+}
+
+func (bucket *Bucket) scheduleExpiration() {
+	if nextExp, err := bucket.NextExpiration(); err == nil && nextExp > 0 {
+		bucket.scheduleExpirationAtOrBefore(nextExp)
+	}
+}
+
+func (bucket *Bucket) scheduleExpirationAtOrBefore(exp uint32) {
+	if exp > 0 {
+		bucket.mutex.Lock()
+		defer bucket.mutex.Unlock()
+		if exp < bucket.nextExp || bucket.nextExp == 0 {
+			bucket.nextExp = exp
+			dur := expDuration(exp)
+			if dur < 0 {
+				dur = 0
+			}
+			debug("EXP: Scheduling in %s", dur)
+			if bucket.expTimer == nil {
+				bucket.expTimer = time.AfterFunc(dur, bucket.doExpiration)
+			} else {
+				bucket.expTimer.Reset(dur)
+			}
+		}
+	}
+}
+
+func (bucket *Bucket) doExpiration() {
+	bucket.mutex.Lock()
+	bucket.nextExp = 0
+	bucket.mutex.Unlock()
+
+	debug("EXP: Running scheduled expiration...")
+	bucket.ExpireDocuments()
+
+	bucket.scheduleExpiration()
+}
+
+// Completely removes all deleted documents (tombstones).
+func (bucket *Bucket) PurgeTombstones() (count int64, err error) {
 	err = bucket.inTransaction(func(txn *sql.Tx) error {
-		result, err := txn.Exec(`DELETE FROM documents WHERE exp > 0 AND exp < ?1`,
-			nowAsExpiry())
+		result, err := txn.Exec(`DELETE FROM documents WHERE value IS NULL`)
 		if err == nil {
 			count, err = result.RowsAffected()
-			info("rosmar.ExpireDocuments: purged %d docs", count)
+			info("rosmar.PurgeTombstones: purged %d docs", count)
 		}
 		return err
 	})

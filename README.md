@@ -10,6 +10,8 @@ Rosmar supports:
 * Xattrs
 * Subdocuments
 * DCP feeds
+* Expiration (automatic)
+* Metadata purging (on demand)
 
 Rosmar does not support:
 

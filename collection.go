@@ -350,7 +350,7 @@ func (c *Collection) remove(key string, ifCas *CAS) (casOut CAS, err error) {
 
 		// Now update, setting value=null, isJSON=false, and updating the xattrs:
 		_, err = txn.Exec(
-			`UPDATE documents SET value=null, cas=?1, isJSON=0, xattrs=?2
+			`UPDATE documents SET value=null, cas=?1, exp=0, isJSON=0, xattrs=?2
 			 WHERE collection=?3 AND key=?4`,
 			newCas, rawXattrs, c.id, key)
 		if err == nil {
@@ -537,6 +537,40 @@ func (c *Collection) IsError(err error, errorType sgbucket.DataStoreErrorType) b
 
 func (c *Collection) IsSupported(feature sgbucket.BucketStoreFeature) bool {
 	return c.bucket.IsSupported(feature)
+}
+
+//////// EXPIRATION
+
+// Immediately deletes all expired documents in this collection.
+func (c *Collection) ExpireDocuments() (count int64, err error) {
+	// First find all the expired docs and collect their keys:
+	exp := nowAsExpiry()
+	rows, err := c.db().Query(`SELECT key FROM documents
+								WHERE collection = ?1 AND exp > 0 AND exp <= ?2`, c.id, exp)
+	if err != nil {
+		return
+	}
+	var keys []string
+	for rows.Next() {
+		var key string
+		if err = rows.Scan(&key); err != nil {
+			return
+		}
+		keys = append(keys, key)
+	}
+	if err = rows.Err(); err != nil {
+		return
+	}
+
+	// Now delete each doc. (This has to be done after the above query finishes, because Delete()
+	// will get its own db connection, and if the db only supports one connection (i.e. in-memory)
+	// having both queries active would deadlock.)
+	for _, key := range keys {
+		if c.Delete(key) == nil {
+			count++
+		}
+	}
+	return
 }
 
 //////// Utilities:

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log"
 	"os"
 	"testing"
 	"time"
@@ -258,6 +259,7 @@ func TestGetPersistentMultiCollectionBucket(t *testing.T) {
 }
 
 func TestExpiration(t *testing.T) {
+	Logging = LevelTrace
 	bucket := makeTestBucket(t)
 	c := bucket.DefaultDataStore()
 
@@ -267,7 +269,7 @@ func TestExpiration(t *testing.T) {
 	}
 
 	exp2 := Exp(time.Now().Add(-5 * time.Second).Unix())
-	exp4 := Exp(time.Now().Add(5 * time.Second).Unix())
+	exp4 := Exp(time.Now().Add(2 * time.Second).Unix())
 
 	c.AddRaw("k1", 0, []byte("v1"))
 	c.AddRaw("k2", exp2, []byte("v2"))
@@ -278,16 +280,33 @@ func TestExpiration(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, exp2, exp)
 
-	n, err := bucket.ExpireDocuments()
+	log.Printf("... waiting 1 sec ...")
+	time.Sleep(1 * time.Second)
+
+	exp, err = bucket.NextExpiration()
 	require.NoError(t, err)
-	assert.Equal(t, int64(1), n)
+	assert.Equal(t, exp4, exp)
 
 	_, _, err = c.GetRaw("k1")
 	assert.NoError(t, err)
 	_, _, err = c.GetRaw("k2")
-	assert.Error(t, err)
+	assert.Error(t, err) // k2 is gone
 	_, _, err = c.GetRaw("k3")
 	assert.NoError(t, err)
 	_, _, err = c.GetRaw("k4")
 	assert.NoError(t, err)
+
+	log.Printf("... waiting 2 secs ...")
+	time.Sleep(2 * time.Second)
+
+	exp, err = bucket.NextExpiration()
+	require.NoError(t, err)
+	assert.Equal(t, uint32(0), exp)
+
+	_, _, err = c.GetRaw("k4")
+	assert.Error(t, err)
+
+	n, err := bucket.PurgeTombstones()
+	assert.NoError(t, err)
+	assert.Equal(t, int64(2), n)
 }

@@ -165,6 +165,12 @@ func absoluteExpiry(exp Exp) Exp {
 	return exp
 }
 
+// Converts an expiry to a Duration.
+func expDuration(exp Exp) time.Duration {
+	secs := int64(absoluteExpiry(exp)) - int64(nowAsExpiry())
+	return time.Duration(secs) * time.Second
+}
+
 var (
 	// Enforce interface conformance:
 	_ error = &ErrUnimplemented{}

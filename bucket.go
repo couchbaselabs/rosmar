@@ -25,6 +25,8 @@ type Bucket struct {
 	collections collectionsMap // Collections, indexed by DataStoreName
 	mutex       sync.Mutex     // mutex for synchronized access to Bucket
 	_db         *sql.DB        // SQLite database handle (do not access; call db() instead)
+	expTimer    *time.Timer    // Schedules expiration of docs
+	nextExp     uint32         // Timestamp when expTimer will run (0 if never)
 }
 
 type collectionsMap = map[sgbucket.DataStoreNameImpl]*Collection
@@ -144,6 +146,8 @@ func OpenBucket(urlStr string, mode OpenMode) (*Bucket, error) {
 		if err = bucket.initializeSchema(bucketName); err != nil {
 			return nil, err
 		}
+	} else {
+		bucket.scheduleExpiration()
 	}
 	return bucket, err
 }

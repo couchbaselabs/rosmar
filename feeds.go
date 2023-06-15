@@ -251,6 +251,7 @@ func (e *event) asFeedEvent() *sgbucket.FeedEvent {
 func (c *Collection) postDocEvent(e *event) {
 	e.collectionID = c.GetCollectionID()
 	c.postEvent(e.asFeedEvent())
+	c.bucket.scheduleExpirationAtOrBefore(e.exp)
 }
 
 var (
