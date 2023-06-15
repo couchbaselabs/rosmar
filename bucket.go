@@ -158,6 +158,14 @@ func OpenBucket(urlStr string, mode OpenMode) (bucket *Bucket, err error) {
 // The difference is that the input bucket URL is split into a parent directory URL and a
 // bucket name. The bucket will be opened in a subdirectory of the directory URL.
 func OpenBucketIn(dirUrlStr string, bucketName string, mode OpenMode) (*Bucket, error) {
+	if isInMemoryURL(dirUrlStr) {
+		bucket, err := OpenBucket(dirUrlStr, mode)
+		if err == nil {
+			bucket.SetName(bucketName)
+		}
+		return bucket, err
+	}
+
 	u, err := parseDBFileURL(dirUrlStr)
 	if err != nil {
 		return nil, err
@@ -192,9 +200,13 @@ func DeleteBucket(urlStr string) (err error) {
 	return err
 }
 
+func isInMemoryURL(urlStr string) bool {
+	return urlStr == InMemoryURL || urlStr == "walrus:"
+}
+
 // Validates the URL string given to NewBucket or OpenBucket, and converts it to a URL object.
 func encodeDBURL(urlStr string) (*url.URL, error) {
-	if urlStr == InMemoryURL {
+	if isInMemoryURL(urlStr) {
 		return &url.URL{
 			Scheme:   "file",
 			Path:     "/",
