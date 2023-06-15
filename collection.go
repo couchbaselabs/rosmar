@@ -120,8 +120,8 @@ func (c *Collection) AddRaw(key string, exp Exp, val []byte) (added bool, err er
 }
 
 func (c *Collection) add(key string, exp Exp, val []byte, isJSON bool) (added bool, err error) {
-	if len(val) > MaxDocSize {
-		return false, &sgbucket.DocTooBigErr{}
+	if err = checkDocSize(len(val)); err != nil {
+		return false, err
 	}
 	var casOut CAS
 	err = c.withNewCas(func(txn *sql.Tx, newCas CAS) (e *event, err error) {
@@ -159,9 +159,8 @@ func (c *Collection) SetRaw(key string, exp Exp, opts *sgbucket.UpsertOptions, v
 }
 
 func (c *Collection) set(key string, exp Exp, opts *sgbucket.UpsertOptions, val []byte, isJSON bool) (err error) {
-	if len(val) > MaxDocSize {
-		err = &sgbucket.DocTooBigErr{}
-		return
+	if err = checkDocSize(len(val)); err != nil {
+		return err
 	}
 	return c.withNewCas(func(txn *sql.Tx, newCas CAS) (*event, error) {
 		exp = absoluteExpiry(exp)
@@ -258,8 +257,8 @@ func (c *Collection) WriteCas(key string, flags int, exp Exp, cas CAS, val any, 
 	if err != nil {
 		return 0, err
 	}
-	if len(raw) > MaxDocSize {
-		return 0, &sgbucket.DocTooBigErr{}
+	if err = checkDocSize(len(raw)); err != nil {
+		return
 	}
 	if raw == nil {
 		isJSON = false

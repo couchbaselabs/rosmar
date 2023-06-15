@@ -61,6 +61,14 @@ func sqliteErrCode(err error) sqlite3.ErrNo {
 	}
 }
 
+func checkDocSize(size int) error {
+	if MaxDocSize > 0 && size > MaxDocSize {
+		return sgbucket.DocTooBigErr{}
+	} else {
+		return nil
+	}
+}
+
 // Something like C's `?:` operator
 func ifelse[T any](cond bool, ifTrue T, ifFalse T) T {
 	if cond {

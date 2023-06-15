@@ -369,8 +369,8 @@ func (c *Collection) writeWithXattr(
 		}
 		rawXattrs, _ = json.Marshal(xattrs)
 
-		if MaxDocSize > 0 && len(e.value)+len(rawXattrs) > MaxDocSize {
-			return nil, sgbucket.DocTooBigErr{}
+		if err = checkDocSize(len(e.value) + len(rawXattrs)); err != nil {
+			return nil, err
 		}
 
 		e.xattrs = rawXattrs
