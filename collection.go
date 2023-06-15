@@ -63,7 +63,10 @@ func (c *Collection) GetCollectionID() uint32 {
 //// Raw:
 
 func (c *Collection) Exists(key string) (exists bool, err error) {
-	return c.exists(c.db(), key)
+	traceEnter("Exists", "%q", key)
+	exists, err = c.exists(c.db(), key)
+	traceExit("Exists", err, "%v", exists)
+	return
 }
 
 func (c *Collection) exists(q queryable, key string) (exists bool, err error) {
@@ -79,8 +82,10 @@ func (c *Collection) exists(q queryable, key string) (exists bool, err error) {
 }
 
 func (c *Collection) GetRaw(key string) (val []byte, cas CAS, err error) {
-	trace("rosmar.GetRaw(%q)", key)
-	return c.getRaw(c.db(), key)
+	traceEnter("GetRaw", "%q", key)
+	val, cas, err = c.getRaw(c.db(), key)
+	traceExit("GetRaw", err, "cas=0x%x, val %s", cas, val)
+	return
 }
 
 func (c *Collection) getRaw(q queryable, key string) (val []byte, cas CAS, err error) {
@@ -94,7 +99,7 @@ func (c *Collection) getRaw(q queryable, key string) (val []byte, cas CAS, err e
 }
 
 func (c *Collection) GetAndTouchRaw(key string, exp Exp) (val []byte, cas CAS, err error) {
-	trace("rosmar.GetAndTouchRaw(%q)", key)
+	traceEnter("GetAndTouchRaw", "%q, %d", key, exp)
 	err = c.withNewCas(func(txn *sql.Tx, newCas CAS) (e *event, err error) {
 		exp = absoluteExpiry(exp)
 		val, cas, err = c.getRaw(txn, key)
@@ -103,12 +108,15 @@ func (c *Collection) GetAndTouchRaw(key string, exp Exp) (val []byte, cas CAS, e
 		}
 		return
 	})
+	traceExit("GetAndTouchRaw", err, "cas=0x%x, val %s", cas, val)
 	return
 }
 
 func (c *Collection) AddRaw(key string, exp Exp, val []byte) (added bool, err error) {
-	trace("rosmar.AddRaw(%q, %d, ...)", key, exp)
-	return c.add(key, exp, val, looksLikeJSON(val))
+	traceEnter("AddRaw", "%q, %d, ...", key, exp)
+	added, err = c.add(key, exp, val, looksLikeJSON(val))
+	traceExit("AddRaw", err, "%v", added)
+	return
 }
 
 func (c *Collection) add(key string, exp Exp, val []byte, isJSON bool) (added bool, err error) {
@@ -144,8 +152,10 @@ func (c *Collection) add(key string, exp Exp, val []byte, isJSON bool) (added bo
 }
 
 func (c *Collection) SetRaw(key string, exp Exp, opts *sgbucket.UpsertOptions, val []byte) (err error) {
-	trace("rosmar.SetRaw(%q, %d, ...)", key, exp)
-	return c.set(key, exp, opts, val, false)
+	traceEnter("SetRaw", "%q, %d, ...", key, exp)
+	err = c.set(key, exp, opts, val, false)
+	traceExit("SetRaw", err, "ok")
+	return
 }
 
 func (c *Collection) set(key string, exp Exp, opts *sgbucket.UpsertOptions, val []byte, isJSON bool) (err error) {
@@ -191,8 +201,9 @@ func (c *Collection) _set(txn *sql.Tx, key string, exp Exp, opts *sgbucket.Upser
 // Non-Raw:
 
 func (c *Collection) Get(key string, outVal any) (cas CAS, err error) {
+	traceEnter("Get", "%q", key)
 	cas, err = c.get(c.db(), key, outVal)
-	trace("rosmar.Get(%q) -> %d, %v", key, cas, err)
+	traceExit("Get", err, "cas=0x%x, val %v", cas, outVal)
 	return
 }
 
@@ -205,9 +216,11 @@ func (c *Collection) get(q queryable, key string, outVal any) (cas CAS, err erro
 }
 
 func (c *Collection) GetExpiry(key string) (exp Exp, err error) {
+	traceEnter("GetExpiry", "%q", key)
 	row := c.db().QueryRow("SELECT exp FROM documents WHERE collection=? AND key=?", c.id, key)
 	err = scan(row, &exp)
 	err = remapKeyError(err, key)
+	traceExit("GetExpiry", err, "%d", exp)
 	return
 }
 
@@ -217,21 +230,22 @@ func (c *Collection) Touch(key string, exp Exp) (cas CAS, err error) {
 }
 
 func (c *Collection) Add(key string, exp Exp, val any) (added bool, err error) {
-	trace("rosmar.Add(%q, %v)", key, val)
+	traceEnter("Add", "%q, %v", key, val)
 	raw, err := encodeAsRaw(val, true)
 	if err == nil {
 		added, err = c.add(key, exp, raw, true)
 	}
-	trace("\tadd -> %v, %v", added, err)
+	traceExit("Add", err, "%v", added)
 	return
 }
 
 func (c *Collection) Set(key string, exp Exp, opts *sgbucket.UpsertOptions, val any) (err error) {
-	trace("rosmar.Set(%q, %v)", key, val)
+	traceEnter("Set", "%q, %v", key, val)
 	raw, err := encodeAsRaw(val, true)
 	if err == nil {
 		err = c.set(key, exp, opts, raw, true)
 	}
+	traceExit("Set", err, "ok")
 	return
 }
 
@@ -239,10 +253,11 @@ func (c *Collection) WriteCas(key string, flags int, exp Exp, cas CAS, val any, 
 	// Marshal JSON if the value is not raw:
 	isJSON := (opt&(sgbucket.Raw|sgbucket.Append) == 0)
 	raw, err := encodeAsRaw(val, isJSON)
+	traceEnter("WriteCas", "%q, exp=%d, cas=0x%x, opt=%v, val=%s", key, exp, cas, opt, raw)
+	defer func() { traceExit("WriteCas", err, "0x%x", casOut) }()
 	if err != nil {
 		return 0, err
 	}
-	trace("rosmar.WriteCas(%q, cas=%x, opt=%v, val=%s)", key, cas, opt, raw)
 	if len(raw) > MaxDocSize {
 		return 0, &sgbucket.DocTooBigErr{}
 	}
@@ -308,13 +323,16 @@ func (c *Collection) WriteCas(key string, flags int, exp Exp, cas CAS, val any, 
 }
 
 func (c *Collection) Remove(key string, cas CAS) (casOut CAS, err error) {
-	trace("rosmar.Remove(%q, %x)", key, cas)
-	return c.remove(key, &cas)
+	traceEnter("Remove", "%q, 0x%x", key, cas)
+	casOut, err = c.remove(key, &cas)
+	traceExit("Remove", err, "0x%x", casOut)
+	return
 }
 
 func (c *Collection) Delete(key string) (err error) {
-	trace("rosmar.Delete(%q)", key)
+	traceEnter("Delete", "%q", key)
 	_, err = c.remove(key, nil)
+	traceExit("Delete", err, "ok")
 	return err
 }
 
@@ -368,7 +386,8 @@ func (c *Collection) remove(key string, ifCas *CAS) (casOut CAS, err error) {
 }
 
 func (c *Collection) Update(key string, exp Exp, callback sgbucket.UpdateFunc) (casOut CAS, err error) {
-	trace("rosmar.Update(%q, %d, ...)", key, exp)
+	traceEnter("Update", "%q, %d, ...", key, exp)
+	defer func() { traceExit("Update", err, "0x%x", casOut) }()
 	for {
 		var raw []byte
 		var cas CAS
@@ -409,7 +428,7 @@ func (c *Collection) Update(key string, exp Exp, callback sgbucket.UpdateFunc) (
 }
 
 func (c *Collection) Incr(key string, amt, deflt uint64, exp Exp) (result uint64, err error) {
-	trace("rosmar.Incr(%q, %d, %d)", key, amt, deflt)
+	traceEnter("Incr", "%q, %d, %d", key, amt, deflt)
 	err = c.withNewCas(func(txn *sql.Tx, newCas CAS) (*event, error) {
 		exp = absoluteExpiry(exp)
 		_, err = c.get(txn, key, &result)
@@ -434,20 +453,24 @@ func (c *Collection) Incr(key string, amt, deflt uint64, exp Exp) (result uint64
 			exp:   exp,
 		}, nil
 	})
-	trace("\tincr -> %d, %v", result, err)
+	traceExit("Incr", err, "%d", result)
 	return
 }
 
 //////// Interface SubdocStore
 
 func (c *Collection) SubdocInsert(key string, subdocKey string, cas CAS, value any) (err error) {
-	trace("rosmar.SubdocInsert(%q, %q, %d)", key, subdocKey, cas)
-	return &ErrUnimplemented{reason: "Rosmar does not implement SubdocInsert"}
+	traceEnter("SubdocInsert", "%q, %q, %d", key, subdocKey, cas)
+	err = &ErrUnimplemented{reason: "Rosmar does not implement SubdocInsert"}
+	traceExit("SubdocInsert", err, "ok")
+	return
 }
 
 func (c *Collection) GetSubDocRaw(key string, subdocKey string) (value []byte, casOut uint64, err error) {
 	// TODO: Use SQLite JSON syntax to get the property
-	trace("rosmar.SubdocGetRaw(%q, %q)", key, subdocKey)
+	traceEnter("SubdocGetRaw", "%q, %q", key, subdocKey)
+	defer func() { traceExit("SubdocGetRaw", err, "0x%x, %s", casOut, value) }()
+
 	if subdocKeyNesting(subdocKey) {
 		err = &ErrUnimplemented{reason: "Rosmar does not support subdoc nesting"}
 		return
@@ -471,7 +494,9 @@ func (c *Collection) GetSubDocRaw(key string, subdocKey string) (value []byte, c
 
 func (c *Collection) WriteSubDoc(key string, subdocKey string, cas CAS, value []byte) (casOut CAS, err error) {
 	// TODO: Use SQLite JSON syntax to update the property
-	trace("rosmar.WriteSubDoc(%q, %q, %d, %s)", key, subdocKey, cas, value)
+	traceEnter("WriteSubDoc", "%q, %q, %d, %s", key, subdocKey, cas, value)
+	defer func() { traceExit("WriteSubDoc", err, "0x%x", casOut) }()
+
 	if subdocKeyNesting(subdocKey) {
 		err = &ErrUnimplemented{reason: "Rosmar does not support subdoc nesting"}
 		return
@@ -543,6 +568,9 @@ func (c *Collection) IsSupported(feature sgbucket.BucketStoreFeature) bool {
 
 // Immediately deletes all expired documents in this collection.
 func (c *Collection) ExpireDocuments() (count int64, err error) {
+	traceEnter("ExpireDocuments", "")
+	defer func() { traceExit("ExpireDocuments", err, "%d", count) }()
+
 	// First find all the expired docs and collect their keys:
 	exp := nowAsExpiry()
 	rows, err := c.db().Query(`SELECT key FROM documents

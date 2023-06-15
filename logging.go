@@ -1,6 +1,7 @@
 package rosmar
 
 import (
+	"fmt"
 	"log"
 	"os"
 )
@@ -75,5 +76,22 @@ func debug(fmt string, args ...any) {
 func trace(fmt string, args ...any) {
 	if Logging >= LevelTrace {
 		LoggingCallback(LevelTrace, fmt, args...)
+	}
+}
+
+func traceEnter(fnName string, format string, args ...any) {
+	if Logging >= LevelTrace {
+		format = fmt.Sprintf("rosmar.%s (%s)", fnName, format)
+		LoggingCallback(LevelTrace, format, args...)
+	}
+}
+
+func traceExit(fnName string, err error, fmt string, args ...any) {
+	if Logging >= LevelTrace {
+		if err == nil {
+			LoggingCallback(LevelTrace, "\trosmar."+fnName+" --> "+fmt, args...)
+		} else {
+			LoggingCallback(LevelError, "\trosmar.%s --> %T: %s", fnName, err, err)
+		}
 	}
 }

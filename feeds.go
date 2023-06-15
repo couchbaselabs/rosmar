@@ -23,7 +23,7 @@ func (bucket *Bucket) StartDCPFeed(
 	callback sgbucket.FeedEventCallbackFunc,
 	dbStats *expvar.Map,
 ) error {
-	trace("rosmar.StartDCPFeed(bucket=%s, args=%+v)", bucket.GetName(), args)
+	traceEnter("StartDCPFeed", "bucket=%s, args=%+v", bucket.GetName(), args)
 	// If no scopes are specified, return feed for the default collection, if it exists
 	if args.Scopes == nil || len(args.Scopes) == 0 {
 		return bucket.DefaultDataStore().(*Collection).StartDCPFeed(args, callback, dbStats)
@@ -66,7 +66,6 @@ func (bucket *Bucket) StartDCPFeed(
 		for _, collection := range requestedCollections {
 			<-doneChans[collection]
 		}
-		trace("rosmar.FEED closing doneChan")
 		if doneChan != nil {
 			close(doneChan)
 		}
@@ -89,7 +88,7 @@ func (c *Collection) StartDCPFeed(
 	callback sgbucket.FeedEventCallbackFunc,
 	dbStats *expvar.Map,
 ) error {
-	trace("rosmar.StartDCPFeed(collection=%s, args=%+v)", c, args)
+	traceEnter("StartDCPFeed", "collection=%s, args=%+v", c, args)
 	feed := &dcpFeed{
 		collection: c,
 		args:       args,
@@ -142,7 +141,7 @@ func (c *Collection) postEvent(event *sgbucket.FeedEvent) {
 	defer c.mutex.Unlock()
 
 	if len(c.feeds) > 0 {
-		info("%s: postEvent(op=%v, %q, cas=%x, type=%d, flags=0x%x)", c.DataStoreNameImpl, event.Opcode, event.Key, event.Cas, event.DataType, event.Flags)
+		info("%s: postEvent(op=%v, %q, cas=0x%x, type=%d, flags=0x%x)", c.DataStoreNameImpl, event.Opcode, event.Key, event.Cas, event.DataType, event.Flags)
 		var eventNoValue sgbucket.FeedEvent = *event // copies the struct
 		eventNoValue.Value = nil
 

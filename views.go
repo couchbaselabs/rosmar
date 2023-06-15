@@ -246,7 +246,7 @@ func (c *Collection) updateView(designDoc string, viewName string) (view *rosmar
 		// Another goroutine pool calls the map function on the docs:
 		mapOutputChan := parallelize(mapInputChan, 0, func(input *mapInput) (out mapOutput) {
 			// Call the map function:
-			trace("\tMAP %v", input)
+			//trace("\tMAP %v", input)
 			viewRows, err := view.mapFunction.CallFunction(&input.JSMapFunctionInput)
 			if err == nil {
 				// Marshal each key and value:
@@ -277,7 +277,7 @@ func (c *Collection) updateView(designDoc string, viewName string) (view *rosmar
 			}
 			// Insert each emitted row into the `mapped` table:
 			for _, row := range docRows.rows {
-				trace("\tEMIT %s , %s  (doc %d %q)", row.key, row.value, docRows.doc_id, docRows.docID)
+				//trace("\tEMIT %s , %s  (doc %d %q)", row.key, row.value, docRows.doc_id, docRows.docID)
 				_, err := txn.Exec(`INSERT INTO mapped (view,doc,key,value)
 									VALUES (?1, ?2, ?3, ?4)`,
 					view.id, docRows.doc_id, string(row.key), string(row.value))
@@ -345,8 +345,8 @@ func (c *Collection) getViewRows(view *rosmarView, params *sgbucket.ViewParams) 
 		sel += fmt.Sprintf(`LIMIT %d `, *params.Limit)
 		params.Limit = nil
 	}
-	trace("\t SQL = %s", sel)
-	trace("\t args = %+v", args)
+	//trace("\t SQL = %s", sel)
+	//trace("\t args = %+v", args)
 
 	rows, err := c.db().Query(sel, args...)
 	if err != nil {
@@ -368,7 +368,7 @@ func (c *Collection) getViewRows(view *rosmarView, params *sgbucket.ViewParams) 
 			}
 		}
 		result.Rows = append(result.Rows, &viewRow)
-		trace("\tRow --> %s  =  %s  (doc %q)", jsonKey, jsonValue, viewRow.ID)
+		//trace("\tRow --> %s  =  %s  (doc %q)", jsonKey, jsonValue, viewRow.ID)
 	}
 	err = rows.Close()
 	result.TotalRows = len(result.Rows)

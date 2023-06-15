@@ -36,7 +36,7 @@ func (bucket *Bucket) UUID() (string, error) {
 
 // Closes a bucket.
 func (bucket *Bucket) Close() {
-	trace("Close(bucket %s)", bucket.GetName())
+	traceEnter("Bucket.Close", "")
 	bucket.mutex.Lock()
 	defer bucket.mutex.Unlock()
 
@@ -54,12 +54,11 @@ func (bucket *Bucket) Close() {
 }
 
 // Closes a bucket and deletes its directory and files (unless it's in-memory.)
-func (bucket *Bucket) CloseAndDelete() error {
+func (bucket *Bucket) CloseAndDelete() (err error) {
 	bucket.Close()
 
 	bucket.mutex.Lock()
 	defer bucket.mutex.Unlock()
-	var err error
 	if bucket.url != "" {
 		err = DeleteBucket(bucket.url)
 		bucket.url = ""
@@ -113,7 +112,7 @@ func validateName(name sgbucket.DataStoreName) (sgbucket.DataStoreNameImpl, erro
 }
 
 func (bucket *Bucket) DefaultDataStore() sgbucket.DataStore {
-	trace("rosmar.DefaultDataStore()")
+	traceEnter("DefaultDataStore", "")
 	collection, err := bucket.getOrCreateCollection(defaultDataStoreName, true)
 	if err != nil {
 		warn("DefaultDataStore() ->  %v", err)
@@ -123,7 +122,7 @@ func (bucket *Bucket) DefaultDataStore() sgbucket.DataStore {
 }
 
 func (bucket *Bucket) NamedDataStore(name sgbucket.DataStoreName) (sgbucket.DataStore, error) {
-	trace("rosmar.NamedDataStore(%q)", name)
+	traceEnter("NamedDataStore", "%q", name)
 	sc, err := validateName(name)
 	if err != nil {
 		warn("NamedDataStore(%q) -> %v", name, err)
@@ -140,7 +139,7 @@ func (bucket *Bucket) NamedDataStore(name sgbucket.DataStoreName) (sgbucket.Data
 }
 
 func (bucket *Bucket) CreateDataStore(name sgbucket.DataStoreName) error {
-	trace("rosmar.CreateDataStore(%q)", name)
+	traceEnter("CreateDataStore", "%q", name)
 	sc, err := validateName(name)
 	if err != nil {
 		return err
@@ -150,7 +149,7 @@ func (bucket *Bucket) CreateDataStore(name sgbucket.DataStoreName) error {
 }
 
 func (bucket *Bucket) DropDataStore(name sgbucket.DataStoreName) error {
-	trace("rosmar.DropDataStore(%q)", name)
+	traceEnter("DropDataStore", "%q", name)
 	sc, err := validateName(name)
 	if err != nil {
 		return err
@@ -158,13 +157,13 @@ func (bucket *Bucket) DropDataStore(name sgbucket.DataStoreName) error {
 	return bucket.dropCollection(sc)
 }
 
-func (bucket *Bucket) ListDataStores() ([]sgbucket.DataStoreName, error) {
-	trace("rosmar.ListDataStores()")
+func (bucket *Bucket) ListDataStores() (result []sgbucket.DataStoreName, err error) {
+	traceEnter("ListDataStores", "")
+	defer func() { traceExit("ListDataStores", err, "%v", result) }()
 	rows, err := bucket.db().Query(`SELECT id, scope, name FROM collections ORDER BY id`)
 	if err != nil {
 		return nil, err
 	}
-	var result []sgbucket.DataStoreName
 	for rows.Next() {
 		var id CollectionID
 		var scope, name string
@@ -173,8 +172,8 @@ func (bucket *Bucket) ListDataStores() ([]sgbucket.DataStoreName, error) {
 		}
 		result = append(result, sgbucket.DataStoreNameImpl{Scope: scope, Collection: name})
 	}
-	trace("\t listDataStores() -> %v", result)
-	return result, rows.Close()
+	err = rows.Close()
+	return
 }
 
 //////// COLLECTION INTERNALS:
@@ -348,14 +347,15 @@ func (bucket *Bucket) doExpiration() {
 
 // Completely removes all deleted documents (tombstones).
 func (bucket *Bucket) PurgeTombstones() (count int64, err error) {
+	traceEnter("PurgeTombstones", "")
 	err = bucket.inTransaction(func(txn *sql.Tx) error {
 		result, err := txn.Exec(`DELETE FROM documents WHERE value IS NULL`)
 		if err == nil {
 			count, err = result.RowsAffected()
-			info("rosmar.PurgeTombstones: purged %d docs", count)
 		}
 		return err
 	})
+	traceExit("PurgeTombstones", err, "%d", count)
 	return
 }
 

@@ -65,7 +65,9 @@ const (
 // The URL should have the scheme 'rosmar' or 'file' and a filesystem path.
 // The path represents a directory; the SQLite database files will be created inside it.
 // Alternatively, the `InMemoryURL` can be given, to create an in-memory bucket with no file.
-func OpenBucket(urlStr string, mode OpenMode) (*Bucket, error) {
+func OpenBucket(urlStr string, mode OpenMode) (bucket *Bucket, err error) {
+	traceEnter("OpenBucket", "%q, %d", urlStr, mode)
+	defer func() { traceExit("OpenBucket", err, "ok") }()
 	u, err := encodeDBURL(urlStr)
 	if err != nil {
 		return nil, err
@@ -130,7 +132,7 @@ func OpenBucket(urlStr string, mode OpenMode) (*Bucket, error) {
 	// An in-memory db cannot have multiple connections (or each would be a separate database!)
 	db.SetMaxOpenConns(ifelse(inMemory, 1, kMaxOpenConnections))
 
-	bucket := &Bucket{
+	bucket = &Bucket{
 		url:         urlStr,
 		_db:         db,
 		collections: make(map[sgbucket.DataStoreNameImpl]*Collection),
@@ -166,7 +168,9 @@ func OpenBucketIn(dirUrlStr string, bucketName string, mode OpenMode) (*Bucket, 
 // Deletes the bucket at the given URL, i.e. the filesystem directory at its path, if it exists.
 // If given `InMemoryURL` it's a no-op.
 // Warning: Never call this while there are any open Bucket instances on this URL!
-func DeleteBucket(urlStr string) error {
+func DeleteBucket(urlStr string) (err error) {
+	traceEnter("DeleteBucket", "%q", urlStr)
+	defer func() { traceExit("DeleteBucket", err, "ok") }()
 	if urlStr == InMemoryURL {
 		return nil
 	}
