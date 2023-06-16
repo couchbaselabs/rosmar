@@ -13,12 +13,12 @@ CREATE TABLE collections (
 CREATE TABLE documents (
 	id 			integer primary key autoincrement,
 	collection 	integer references collections(id) on delete cascade,
-	key 		text not null,
+	key 		text not null,		/* i.e. documentID */
 	cas 		integer not null,
 	exp 		integer default 0,
-	xattrs 		blob, /*JSON*/
+	xattrs 		blob, 				/* xattrs in JSON, else null */
 	isJSON 		integer default true,
-	value 		blob,
+	value 		blob, 				/* document body, usually JSON; null if deleted */
 	UNIQUE (collection, key) );
 CREATE INDEX docs_cas ON documents (collection, cas);
 CREATE INDEX docs_exp ON documents (collection, exp) WHERE exp > 0;
