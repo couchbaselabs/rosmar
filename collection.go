@@ -16,7 +16,7 @@ import (
 var MaxDocSize int = 20 * 1024 * 1024
 
 // A collection within a Bucket.
-// Implements sgbucket interfaces DataStore, DataStoreName
+// Implements sgbucket interfaces DataStore, DataStoreName, ViewStore, QueryableStore
 type Collection struct {
 	sgbucket.DataStoreNameImpl // Fully qualified name (scope and collection)
 	bucket                     *Bucket

@@ -60,7 +60,7 @@ func (bucket *Bucket) CloseAndDelete() (err error) {
 	bucket.mutex.Lock()
 	defer bucket.mutex.Unlock()
 	if bucket.url != "" {
-		err = DeleteBucket(bucket.url)
+		err = DeleteBucketAt(bucket.url)
 		bucket.url = ""
 	}
 	return err

@@ -176,7 +176,7 @@ func OpenBucketIn(dirUrlStr string, bucketName string, mode OpenMode) (*Bucket, 
 // Deletes the bucket at the given URL, i.e. the filesystem directory at its path, if it exists.
 // If given `InMemoryURL` it's a no-op.
 // Warning: Never call this while there are any open Bucket instances on this URL!
-func DeleteBucket(urlStr string) (err error) {
+func DeleteBucketAt(urlStr string) (err error) {
 	traceEnter("DeleteBucket", "%q", urlStr)
 	defer func() { traceExit("DeleteBucket", err, "ok") }()
 	if urlStr == InMemoryURL {

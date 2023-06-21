@@ -50,7 +50,7 @@ func TestNewBucket(t *testing.T) {
 
 func TestGetMissingBucket(t *testing.T) {
 	path := testBucketPath(t)
-	require.NoError(t, DeleteBucket(path))
+	require.NoError(t, DeleteBucketAt(path))
 	bucket, err := OpenBucket(path, ReOpenExisting)
 	assert.ErrorContains(t, err, "unable to open database file: no such file or directory")
 	assert.Nil(t, bucket)
@@ -67,7 +67,7 @@ func TestCallClosedBucket(t *testing.T) {
 }
 
 func TestNewBucketInMemory(t *testing.T) {
-	assert.NoError(t, DeleteBucket(InMemoryURL))
+	assert.NoError(t, DeleteBucketAt(InMemoryURL))
 
 	modes := []OpenMode{CreateNew, CreateOrOpen}
 	for _, mode := range modes {

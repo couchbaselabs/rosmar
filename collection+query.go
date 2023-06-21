@@ -10,7 +10,7 @@ import (
 	sgbucket "github.com/couchbase/sg-bucket"
 )
 
-//////// Interface Queryable
+//////// Interface QueryableStore
 
 func (c *Collection) CanQueryIn(language sgbucket.QueryLanguage) bool {
 	return language == sgbucket.SQLiteLanguage
