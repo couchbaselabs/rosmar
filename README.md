@@ -21,7 +21,9 @@ Rosmar supports:
 
 ## Building It
 
-Rosmar requires an updated version of sg-bucket -- this is on the `walrus-xattrs` branch. Rosmar's `go.mod` file points to the appropriate commit.
+Rosmar requires an updated version of sg-bucket -- this is on the `feature/walrus-xattrs` branch. Rosmar's `go.mod` file points to the appropriate commit.
+
+To use Rosmar in Sync Gateway, check out the latter's `feature/walrus_xattrs` branch.
 
 ## Architecture
 
