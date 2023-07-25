@@ -107,6 +107,7 @@ func OpenBucket(urlStr string, mode OpenMode) (bucket *Bucket, err error) {
 	query.Add("_busy_timeout", "10000") // 10-sec timeout for db-busy
 	query.Add("_foreign_keys", "1")     // Enable foreign-key constraints
 	query.Add("_journal_mode", "WAL")   // Use write-ahead log (supports read during write)
+	query.Add("_txlock", "immediate")   // Transaction grabs file lock ASAP when it begins
 	u.RawQuery = query.Encode()
 	u.Scheme = "file"
 
@@ -267,7 +268,9 @@ func (bucket *Bucket) db() queryable {
 // Runs a function within a SQLite transaction.
 func (bucket *Bucket) inTransaction(fn func(txn *sql.Tx) error) error {
 	// SQLite allows only a single writer, so use a mutex to avoid BUSY and LOCKED errors.
-	// However, BUSY errors can still occur (somehow?), so we retry if we get one.
+	// However, these errors can still occur (somehow?), so we retry if we get one.
+	// --Update, 25 July 2023: After adding "_txlock=immediate" to the DB options when opening,
+	// the busy/locked errors have gone away. But there's no harm leaving the retry code in place.
 	bucket.mutex.Lock()
 	defer bucket.mutex.Unlock()
 
@@ -278,7 +281,7 @@ func (bucket *Bucket) inTransaction(fn func(txn *sql.Tx) error) error {
 	var err error
 	for attempt := 0; attempt < 10; attempt++ {
 		if attempt > 0 {
-			warn("\tinTransaction: %s; retrying (#%d) ...", err, attempt+1)
+			warn("Transaction failed with: %s; retrying (#%d) ...", err, attempt+1)
 			time.Sleep(time.Duration((10 * attempt * attempt) * int(time.Millisecond)))
 		}
 
@@ -299,10 +302,10 @@ func (bucket *Bucket) inTransaction(fn func(txn *sql.Tx) error) error {
 			if sqliteErrCode(err) == sqlite3.ErrBusy || sqliteErrCode(err) == sqlite3.ErrLocked {
 				continue // retry
 			} else {
-				logError("\tinTransaction: ROLLBACK with error %T %v", err, err)
+				logError("Transaction aborted with error %T %v", err, err)
 			}
 		} else if attempt > 0 {
-			warn("\tinTransaction: COMMIT successful on attempt #%d", attempt+1)
+			warn("Transaction: COMMIT successful on attempt #%d", attempt+1)
 		}
 		break
 	}
