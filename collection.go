@@ -416,7 +416,8 @@ func (c *Collection) Update(key string, exp Exp, callback sgbucket.UpdateFunc) (
 			exp = *newExp
 		}
 
-		casOut, err = c.WriteCas(key, 0, exp, cas, raw, sgbucket.Raw)
+		var opt sgbucket.WriteOptions = 0 // Hardcoded; callback cannot customize this :(
+		casOut, err = c.WriteCas(key, 0, exp, cas, raw, opt)
 		if err == nil {
 			break
 		} else if _, ok := err.(sgbucket.CasMismatchErr); !ok {
