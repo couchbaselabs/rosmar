@@ -296,7 +296,7 @@ func (bucket *Bucket) inTransaction(fn func(txn *sql.Tx) error) error {
 
 		if err != nil {
 			txn.Rollback()
-			if sqliteErrCode(err) == sqlite3.ErrBusy {
+			if sqliteErrCode(err) == sqlite3.ErrBusy || sqliteErrCode(err) == sqlite3.ErrLocked {
 				continue // retry
 			} else {
 				logError("\tinTransaction: ROLLBACK with error %T %v", err, err)

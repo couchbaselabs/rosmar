@@ -54,7 +54,7 @@ func remapKeyError(err error, key string) error {
 
 // If the error is a SQLite error, returns its error code (`sqlite3.SQLITE_*`); else 0.
 func sqliteErrCode(err error) sqlite3.ErrNo {
-	if sqliteErr, ok := err.(*sqlite3.Error); ok {
+	if sqliteErr, ok := err.(sqlite3.Error); ok {
 		return sqliteErr.Code
 	} else {
 		return 0
