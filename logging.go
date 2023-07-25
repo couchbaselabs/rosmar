@@ -91,6 +91,7 @@ func traceExit(fnName string, err error, fmt string, args ...any) {
 		if err == nil {
 			LoggingCallback(LevelTrace, "\trosmar."+fnName+" --> "+fmt, args...)
 		} else {
+			// Log error returns at Error level, but only if overall logging is at Trace
 			LoggingCallback(LevelError, "\trosmar.%s --> %T: %s", fnName, err, err)
 		}
 	}

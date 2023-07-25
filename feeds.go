@@ -141,7 +141,7 @@ func (c *Collection) postEvent(event *sgbucket.FeedEvent) {
 	defer c.mutex.Unlock()
 
 	if len(c.feeds) > 0 {
-		info("%s: postEvent(op=%v, %q, cas=0x%x, type=%d, flags=0x%x)", c.DataStoreNameImpl, event.Opcode, event.Key, event.Cas, event.DataType, event.Flags)
+		debug("%s: postEvent(op=%v, %q, cas=0x%x, type=%d, flags=0x%x)", c.DataStoreNameImpl, event.Opcode, event.Key, event.Cas, event.DataType, event.Flags)
 		var eventNoValue sgbucket.FeedEvent = *event // copies the struct
 		eventNoValue.Value = nil
 
