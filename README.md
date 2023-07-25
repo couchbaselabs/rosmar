@@ -19,13 +19,41 @@ Rosmar supports:
 * Metadata purging (on demand) 🆕
 * Queries (in SQLite SQL, not N1QL/SQL++) 🆕
 
-## Building It
+## 1. Building and Using It
 
 Rosmar requires an updated version of sg-bucket -- this is on the `feature/walrus-xattrs` branch. Rosmar's `go.mod` file points to the appropriate commit.
 
-To use Rosmar in Sync Gateway, check out the latter's `feature/walrus_xattrs` branch.
+To use Rosmar in Sync Gateway, check out the latter's `feature/walrus_xattrs` branch, in which Walrus has been replaced with Rosmar.
 
-## Architecture
+To run SG normally with a Rosmar bucket, use a non-persistent SG config file like this one:
+
+```json
+{
+  "disable_persistent_config": true,
+
+  "logging": {
+    "console": { "log_level": "info", "log_keys": ["*"] }
+  },
+
+  "adminInterface": ":4985",
+
+  "databases": {
+    "travel-sample": {
+      "bucket": "travel-sample",
+      "server": "rosmar:///Users/snej/Couchbase/buckets/",
+      "enable_shared_bucket_access": true,
+      "use_views": true,
+      "users": {
+        "GUEST": {"disabled": false, "admin_channels": ["*"] }
+      }
+    }
+  }
+}
+```
+
+The directory given in the `server` property has to exist beforehand. SG will create the bucket in a subdirectory.
+
+## 2. Architecture
 
 ### SQLite Bindings
 
@@ -57,7 +85,7 @@ There is a custom collation called `JSON`, implemented as a SQLite callback, tha
 
 As in Walrus, CAS values are produced by a monotonically increasing counter starting from 1; they're not timestamps as in present-day Server. This could be changed pretty easily.
 
-## API
+## 3. API
 
 ### Bucket Management
 
@@ -118,7 +146,7 @@ Queries should use the pseudo-variable `$_keyspace` in the `FROM` clause to refe
 
 There is also a `CreateIndex` method to create indexes to optimize queries. (Each index is added to all collections.)
 
-## Limitations
+## 4. Limitations
 
 ### Nested Subdocument Properties
 
@@ -135,3 +163,36 @@ Currently, every bucket write call creates and commits its own SQLite transactio
 Since the bucket interface has no notion of transactions, Rosmar would have to heuristically group consecutive writes, leaving a transaction opening between calls and committing it after some brief time interval.
 
 However, while that transaction was open, _all_ operations would have to use it (i.e. call into the specific SQLite connection with the open transaction.) Otherwise reads wouldn't see yet-uncommitted writes, and writes would block (SQLite only allows a single transaction at a time per database file.) This would reduce parallelism of reads, which might be an issue.
+
+## 5. Debugging Tips
+
+Some advice for using Rosmar when debugging something in Sync Gateway:
+
+### API Tracing
+
+If you crank the log level for `KeyWalrus` up to `LevelTrace`, Rosmar will log on entry and exit of every API call. The messages will include the most important parameters and return values. Error returns will be logged at Error level.
+
+### Inspecting a Bucket
+
+If you have a persistent bucket you can use the `sqlite3` CLI tool, even while SG is running, to inspect it using `select` statements.
+
+* The tool supports many different output modes, selectable with the `.mode` command; I find `box` easier to read than the default.
+* If you forget the schema, the `.schema` command will dump it.
+* The tool can't query the `mapped` table because it has a custom collation.
+
+```
+$ sqlite3 /path/to/bucketname/rosmar.sqlite3
+sqlite> .mode box
+sqlite> select key,value,cas from documents where isJSON order by cas desc limit 10;
+┌───────────┬──────────────────────────────────────────────────────────────┬───────┐
+│    key    │                            value                             │  cas  │
+├───────────┼──────────────────────────────────────────────────────────────┼───────┤
+│ doc-30801 │ {"id":9211,"type":"route","airline":"AF","airlineid":"airlin │ 34774 │
+│           │ e_137","sourceairport":"BKK","stops":0,"equipment":"320","sc │       │
+│           │ hedule":[{"day":0,"utc":"06:03:00","flight":"AF920"},{"day": │       │
+│           │ 0,"utc":"15:05:00","flight":"AF040"},{"day":0,"utc":"06:14:0 │       │
+│           │ 0","flight":"AF625"},{"day":0,"utc":"07:37:00","flight":"AF0 │       │
+│           │ 53"},{"day":1,"utc":"01:57:00","flight":"AF870"},{"day":1,"u │       │
+...
+...
+```
