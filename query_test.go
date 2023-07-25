@@ -29,7 +29,7 @@ func TestQuery(t *testing.T) {
 
 	rows, err := coll.Query(
 		sgbucket.SQLiteLanguage,
-		`SELECT id, body->>'key' as key FROM $_keyspace
+		`SELECT json_quote(id) as id, json_quote(body->'key') as key FROM $_keyspace
 		 WHERE body->>'value' IS NOT NULL ORDER BY id`,
 		nil,
 		sgbucket.RequestPlus,
@@ -48,7 +48,6 @@ func TestQuery(t *testing.T) {
 		assert.EqualValues(t, expectedDocs[n], row["id"])
 		assert.EqualValues(t, expectedKeys[n], row["key"])
 		assert.Equal(t, 2, len(row))
-		row["foo"] = true // detect whether `rows` tries to reuse this object
 		n++
 	}
 	assert.NoError(t, rows.Close(), "rows.Close")

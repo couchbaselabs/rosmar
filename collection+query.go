@@ -1,6 +1,7 @@
 package rosmar
 
 import (
+	"bytes"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -43,6 +44,8 @@ func (c *Collection) Query(
 	rows, err := c.db().Query(statement, sqlArgs...)
 	if err == nil {
 		iter = &queryIterator{rows: rows}
+	} else {
+		err = fmt.Errorf("SQLite query failed: %w", err)
 	}
 	return
 }
@@ -120,26 +123,35 @@ func (c *Collection) prepareQuery(statement string, args map[string]any) (string
 
 type queryIterator struct {
 	rows          *sql.Rows
-	columnNames   []string
-	columnVals    []any
+	columnNames   [][]byte
+	columnVals    []string
 	columnValPtrs []any
-	row           map[string]any
 	err           error
 }
 
-// Returns the next query row as a map, or nil at the end or on error.
-func (iter *queryIterator) next() map[string]any {
+// returns the next row as a JSON string.
+func (iter *queryIterator) NextBytes() []byte {
+	if iter.err != nil {
+		return nil
+	}
 	if !iter.rows.Next() {
 		return nil
 	}
 
 	// Initialize column arrays:
 	if iter.columnVals == nil {
-		if iter.columnNames, iter.err = iter.rows.Columns(); iter.err != nil {
+		var colNames []string
+		if colNames, iter.err = iter.rows.Columns(); iter.err != nil {
 			return nil
 		}
-		nCols := len(iter.columnNames)
-		iter.columnVals = make([]any, nCols)
+		// Convert each column name to a JSON string, including quotes:
+		nCols := len(colNames)
+		iter.columnNames = make([][]byte, nCols)
+		for i, name := range colNames {
+			iter.columnNames[i], _ = json.Marshal(name)
+		}
+		// Create array of column values, and the pointers thereto:
+		iter.columnVals = make([]string, nCols)
 		iter.columnValPtrs = make([]any, nCols)
 		for i := range iter.columnNames {
 			iter.columnValPtrs[i] = &iter.columnVals[i]
@@ -152,45 +164,33 @@ func (iter *queryIterator) next() map[string]any {
 		return nil
 	}
 
-	// Convert to map:
-	if iter.row == nil {
-		iter.row = make(map[string]any, len(iter.columnNames))
-	}
+	// Generate JSON. Each column value must be a JSON string.
+	row := bytes.Buffer{}
+	row.WriteByte('{')
 	for i, val := range iter.columnVals {
-		iter.row[iter.columnNames[i]] = val
+		if i > 0 {
+			row.WriteByte(',')
+		}
+		row.Write(iter.columnNames[i])
+		row.WriteByte(':')
+		row.WriteString(val)
 	}
-	return iter.row
+	row.WriteByte('}')
+	return row.Bytes()
 }
 
-func (iter *queryIterator) NextBytes() []byte {
-	if result := iter.next(); result != nil {
-		bytes, _ := json.Marshal(result)
-		return bytes
-	} else {
-		return nil
-	}
-}
-
+// unmarshals the query row into the pointed-to struct.
 func (iter *queryIterator) Next(valuePtr any) bool {
-	switch val := valuePtr.(type) {
-	case *map[string]any:
-		// If caller wants a map, I can give that directly:
-		result := iter.next()
-		if result == nil {
-			return false
-		}
-		*val = result
-		iter.row = nil // so next() will not reuse the map I'm giving out
-		return true
-	default:
-		// Otherwise marshal the map to JSON, then unmarshal into their result:
-		bytes := iter.NextBytes()
-		if bytes == nil {
-			return false
-		}
-		iter.err = json.Unmarshal(bytes, valuePtr)
-		return iter.err != nil
+	bytes := iter.NextBytes()
+	info("queryIterator.next: %s", bytes) //TEMP
+	if bytes == nil {
+		return false
 	}
+	if err := json.Unmarshal(bytes, valuePtr); err != nil {
+		iter.err = fmt.Errorf("failed to unmarshal query result: %w; raw result is: %s", err, bytes)
+		return false
+	}
+	return true
 }
 
 func (iter *queryIterator) One(valuePtr any) error {
