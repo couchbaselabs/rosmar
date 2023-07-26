@@ -1,6 +1,7 @@
 package rosmar
 
 import (
+	"context"
 	"fmt"
 	"sync"
 	"testing"
@@ -31,7 +32,7 @@ func TestBackfill(t *testing.T) {
 		Dump:     true,
 		DoneChan: make(chan struct{}),
 	}
-	err := bucket.StartDCPFeed(args, callback, nil)
+	err := bucket.StartDCPFeed(context.TODO(), args, callback, nil)
 	assert.NoError(t, err, "StartDCPFeed failed")
 
 	event := <-events
@@ -71,7 +72,7 @@ func TestMutations(t *testing.T) {
 		Backfill: sgbucket.FeedNoBackfill,
 		DoneChan: make(chan struct{}),
 	}
-	err := bucket.StartDCPFeed(args, callback, nil)
+	err := bucket.StartDCPFeed(context.TODO(), args, callback, nil)
 	assert.NoError(t, err, "StartTapFeed failed")
 
 	addToCollection(t, c, "delta", 0, "D")
@@ -161,7 +162,7 @@ func TestCollectionMutations(t *testing.T) {
 		Terminator: make(chan bool),
 	}
 	defer close(args.Terminator)
-	err = huddle.StartDCPFeed(args, callback, nil)
+	err = huddle.StartDCPFeed(context.TODO(), args, callback, nil)
 	require.NoError(t, err, "StartTapFeed failed")
 
 	// wait for mutation counts to reach expected

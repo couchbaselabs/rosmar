@@ -1,6 +1,7 @@
 package rosmar
 
 import (
+	"context"
 	"encoding/json"
 	"expvar"
 	"fmt"
@@ -19,6 +20,7 @@ func (bucket *Bucket) GetFeedType() sgbucket.FeedType {
 }
 
 func (bucket *Bucket) StartDCPFeed(
+	ctx context.Context,
 	args sgbucket.FeedArguments,
 	callback sgbucket.FeedEventCallbackFunc,
 	dbStats *expvar.Map,
@@ -26,7 +28,7 @@ func (bucket *Bucket) StartDCPFeed(
 	traceEnter("StartDCPFeed", "bucket=%s, args=%+v", bucket.GetName(), args)
 	// If no scopes are specified, return feed for the default collection, if it exists
 	if args.Scopes == nil || len(args.Scopes) == 0 {
-		return bucket.DefaultDataStore().(*Collection).StartDCPFeed(args, callback, dbStats)
+		return bucket.DefaultDataStore().(*Collection).StartDCPFeed(ctx, args, callback, dbStats)
 	}
 
 	// Validate requested collections exist before starting feeds
@@ -58,7 +60,7 @@ func (bucket *Bucket) StartDCPFeed(
 		argsCopy.DoneChan = doneChans[collection]
 
 		// Ignoring error is safe because RosmarBucket doesn't have error scenarios for StartDCPFeed
-		_ = collection.StartDCPFeed(argsCopy, collectionAwareCallback, dbStats)
+		_ = collection.StartDCPFeed(ctx, argsCopy, collectionAwareCallback, dbStats)
 	}
 
 	// coalesce doneChans
@@ -84,12 +86,14 @@ func (wh *Bucket) StartTapFeed(
 //////// COLLECTION API:
 
 func (c *Collection) StartDCPFeed(
+	ctx context.Context,
 	args sgbucket.FeedArguments,
 	callback sgbucket.FeedEventCallbackFunc,
 	dbStats *expvar.Map,
 ) error {
 	traceEnter("StartDCPFeed", "collection=%s, args=%+v", c, args)
 	feed := &dcpFeed{
+		ctx:        ctx,
 		collection: c,
 		args:       args,
 		callback:   callback,
@@ -170,6 +174,7 @@ func (c *Collection) stopFeeds() {
 type eventQueue = queue[*sgbucket.FeedEvent]
 
 type dcpFeed struct {
+	ctx        context.Context // TODO: Use this
 	collection *Collection
 	args       sgbucket.FeedArguments
 	callback   sgbucket.FeedEventCallbackFunc
@@ -182,7 +187,7 @@ func (feed *dcpFeed) run() {
 
 	if feed.args.Terminator != nil {
 		go func() {
-			_ = <-feed.args.Terminator
+			<-feed.args.Terminator
 			debug("FEED %s terminator closed", feed.collection)
 			feed.events.close()
 		}()
