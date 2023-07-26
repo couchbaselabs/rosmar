@@ -27,6 +27,7 @@ type Bucket struct {
 	_db         *sql.DB        // SQLite database handle (do not access; call db() instead)
 	expTimer    *time.Timer    // Schedules expiration of docs
 	nextExp     uint32         // Timestamp when expTimer will run (0 if never)
+	inMemory    bool           // True if it's an in-memory database
 }
 
 type collectionsMap = map[sgbucket.DataStoreNameImpl]*Collection
@@ -137,6 +138,7 @@ func OpenBucket(urlStr string, mode OpenMode) (bucket *Bucket, err error) {
 		url:         urlStr,
 		_db:         db,
 		collections: make(map[sgbucket.DataStoreNameImpl]*Collection),
+		inMemory:    inMemory,
 	}
 
 	// Initialize the schema if necessary:

@@ -42,10 +42,20 @@ func (c *Collection) Query(
 	// TODO: Save a sql.Stmt if adhoc==false
 
 	rows, err := c.db().Query(statement, sqlArgs...)
-	if err == nil {
-		iter = &queryIterator{rows: rows}
-	} else {
+	if err != nil {
 		err = fmt.Errorf("SQLite query failed: %w", err)
+		return
+	}
+
+	it := &queryIterator{rows: rows}
+	if c.bucket.inMemory {
+		// An in-memory database has only a single connection, so it's dangerous to leave the
+		// sql.Rows object open -- any other database call will block until it's closed. This
+		// can easily lead to deadlock. As a workaround, read all the rows now, close the
+		// Rows object, and return an iterator over the in-memory rows.
+		iter = preRecord(it)
+	} else {
+		iter = it
 	}
 	return
 }
@@ -124,7 +134,7 @@ func (c *Collection) prepareQuery(statement string, args map[string]any) (string
 type queryIterator struct {
 	rows          *sql.Rows
 	columnNames   [][]byte
-	columnVals    []string
+	columnVals    []sql.NullString
 	columnValPtrs []any
 	err           error
 }
@@ -151,7 +161,7 @@ func (iter *queryIterator) NextBytes() []byte {
 			iter.columnNames[i], _ = json.Marshal(name)
 		}
 		// Create array of column values, and the pointers thereto:
-		iter.columnVals = make([]string, nCols)
+		iter.columnVals = make([]sql.NullString, nCols)
 		iter.columnValPtrs = make([]any, nCols)
 		for i := range iter.columnNames {
 			iter.columnValPtrs[i] = &iter.columnVals[i]
@@ -167,13 +177,18 @@ func (iter *queryIterator) NextBytes() []byte {
 	// Generate JSON. Each column value must be a JSON string.
 	row := bytes.Buffer{}
 	row.WriteByte('{')
+	first := true
 	for i, val := range iter.columnVals {
-		if i > 0 {
-			row.WriteByte(',')
+		if val.Valid {
+			if first {
+				first = false
+			} else {
+				row.WriteByte(',')
+			}
+			row.Write(iter.columnNames[i])
+			row.WriteByte(':')
+			row.WriteString(val.String)
 		}
-		row.Write(iter.columnNames[i])
-		row.WriteByte(':')
-		row.WriteString(val)
 	}
 	row.WriteByte('}')
 	return row.Bytes()
@@ -210,8 +225,64 @@ func (iter *queryIterator) Close() error {
 	return iter.err
 }
 
+//////// Pre-recorded query iterator:
+
+type preRecordedQueryIterator struct {
+	rows [][]byte
+	err  error
+}
+
+func preRecord(iter *queryIterator) *preRecordedQueryIterator {
+	var rows [][]byte
+	for {
+		if row := iter.NextBytes(); row != nil {
+			rows = append(rows, row)
+		} else {
+			break
+		}
+	}
+	return &preRecordedQueryIterator{
+		rows: rows,
+		err:  iter.Close(),
+	}
+}
+
+func (iter *preRecordedQueryIterator) NextBytes() []byte {
+	if len(iter.rows) == 0 || iter.err != nil {
+		return nil
+	}
+	result := iter.rows[0]
+	iter.rows = iter.rows[1:]
+	return result
+}
+
+func (iter *preRecordedQueryIterator) Next(valuePtr any) bool {
+	bytes := iter.NextBytes()
+	if bytes == nil {
+		return false
+	}
+	if err := json.Unmarshal(bytes, valuePtr); err != nil {
+		iter.err = fmt.Errorf("failed to unmarshal query result: %w; raw result is: %s", err, bytes)
+		return false
+	}
+	return true
+}
+
+func (iter *preRecordedQueryIterator) One(valuePtr any) error {
+	if !iter.Next(valuePtr) {
+		iter.err = sgbucket.ErrNoRows
+	}
+	return iter.Close()
+}
+
+func (iter *preRecordedQueryIterator) Close() error {
+	iter.rows = nil
+	return iter.err
+}
+
 var (
 	// Enforce interface conformance:
 	_ sgbucket.QueryableStore      = &Collection{}
 	_ sgbucket.QueryResultIterator = &queryIterator{}
+	_ sgbucket.QueryResultIterator = &preRecordedQueryIterator{}
 )
