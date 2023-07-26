@@ -154,6 +154,8 @@ func OpenBucket(urlStr string, mode OpenMode) (bucket *Bucket, err error) {
 	} else {
 		bucket.scheduleExpiration()
 	}
+
+	registerBucket(bucket)
 	return bucket, err
 }
 
@@ -182,7 +184,7 @@ func OpenBucketIn(dirUrlStr string, bucketName string, mode OpenMode) (*Bucket, 
 func DeleteBucketAt(urlStr string) (err error) {
 	traceEnter("DeleteBucket", "%q", urlStr)
 	defer func() { traceExit("DeleteBucket", err, "ok") }()
-	if urlStr == InMemoryURL {
+	if isInMemoryURL(urlStr) {
 		return nil
 	}
 	info("DeleteBucket(%q)", urlStr)
@@ -192,19 +194,24 @@ func DeleteBucketAt(urlStr string) (err error) {
 	} else if u.Query().Get("mode") == "memory" {
 		return nil
 	}
+
+	if len(bucketsAtURL(u.String())) > 0 {
+		return fmt.Errorf("there is a Bucket open at that URL")
+	}
+
 	// For safety's sake, don't delete just any directory. Ensure it contains a db file:
 	err = os.Remove(u.JoinPath(kDBFilename).Path)
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil
+	} else if err != nil {
+		return err
+	} else {
+		return os.Remove(u.Path)
 	}
-	if err == nil {
-		err = os.Remove(u.Path)
-	}
-	return err
 }
 
 func isInMemoryURL(urlStr string) bool {
-	return urlStr == InMemoryURL || urlStr == "walrus:"
+	return urlStr == InMemoryURL || urlStr == "file:/?mode=memory" || urlStr == "walrus:"
 }
 
 // Validates the URL string given to NewBucket or OpenBucket, and converts it to a URL object.

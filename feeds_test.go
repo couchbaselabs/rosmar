@@ -62,28 +62,42 @@ func TestMutations(t *testing.T) {
 	addToCollection(t, c, "baker", 0, "B")
 	addToCollection(t, c, "charlie", 0, "C")
 
-	events := make(chan sgbucket.FeedEvent, 10)
-	callback := func(event sgbucket.FeedEvent) bool {
-		events <- event
-		return true
-	}
-
-	args := sgbucket.FeedArguments{
-		Backfill: sgbucket.FeedNoBackfill,
-		DoneChan: make(chan struct{}),
-	}
-	err := bucket.StartDCPFeed(context.TODO(), args, callback, nil)
-	assert.NoError(t, err, "StartTapFeed failed")
+	events, doneChan := startFeed(t, bucket)
 
 	addToCollection(t, c, "delta", 0, "D")
 	addToCollection(t, c, "eskimo", 0, "E")
 
 	go func() {
 		addToCollection(t, c, "fahrvergnügen", 0, "F")
-		err = c.Delete("eskimo")
+		err := c.Delete("eskimo")
 		require.NoError(t, err)
 	}()
 
+	readExpectedEvents(t, events)
+
+	bucket.Close()
+
+	_, ok := <-doneChan
+	assert.False(t, ok)
+}
+
+func startFeed(t *testing.T, bucket *Bucket) (events chan sgbucket.FeedEvent, doneChan chan struct{}) {
+	events = make(chan sgbucket.FeedEvent, 10)
+	callback := func(event sgbucket.FeedEvent) bool {
+		events <- event
+		return true
+	}
+	doneChan = make(chan struct{})
+	args := sgbucket.FeedArguments{
+		Backfill: sgbucket.FeedNoBackfill,
+		DoneChan: doneChan,
+	}
+	err := bucket.StartDCPFeed(context.TODO(), args, callback, nil)
+	require.NoError(t, err, "StartDCPFeed failed")
+	return events, doneChan
+}
+
+func readExpectedEvents(t *testing.T, events chan sgbucket.FeedEvent) {
 	e := <-events
 	e.TimeReceived = time.Time{}
 	assert.Equal(t, sgbucket.FeedEvent{Opcode: sgbucket.FeedOpMutation, Key: []byte("delta"), Value: []byte(`"D"`), Cas: 4, DataType: sgbucket.FeedDataTypeJSON}, e)
@@ -96,10 +110,44 @@ func TestMutations(t *testing.T) {
 	e = <-events
 	e.TimeReceived = time.Time{}
 	assert.Equal(t, sgbucket.FeedEvent{Opcode: sgbucket.FeedOpDeletion, Key: []byte("eskimo"), Cas: 7, DataType: sgbucket.FeedDataTypeRaw}, e)
+}
+
+func TestCrossBucketEvents(t *testing.T) {
+	ensureNoLeakedFeeds(t)
+	bucket := makeTestBucket(t)
+	c := bucket.DefaultDataStore()
+
+	addToCollection(t, c, "able", 0, "A")
+	addToCollection(t, c, "baker", 0, "B")
+	addToCollection(t, c, "charlie", 0, "C")
+
+	// Open a 2nd bucket on the same file, to receive events:
+	bucket2, err := OpenBucket(bucket.url, ReOpenExisting)
+	require.NoError(t, err)
+	t.Cleanup(bucket2.Close)
+
+	events, doneChan := startFeed(t, bucket)
+	events2, doneChan2 := startFeed(t, bucket2)
+
+	addToCollection(t, c, "delta", 0, "D")
+	addToCollection(t, c, "eskimo", 0, "E")
+
+	go func() {
+		addToCollection(t, c, "fahrvergnügen", 0, "F")
+		err = c.Delete("eskimo")
+		require.NoError(t, err)
+	}()
+
+	readExpectedEvents(t, events)
+	readExpectedEvents(t, events2)
 
 	bucket.Close()
+	bucket2.Close()
 
-	_, ok := <-args.DoneChan
+	_, ok := <-doneChan
+	assert.False(t, ok)
+
+	_, ok = <-doneChan2
 	assert.False(t, ok)
 }
 

@@ -37,6 +37,9 @@ func (bucket *Bucket) UUID() (string, error) {
 // Closes a bucket.
 func (bucket *Bucket) Close() {
 	traceEnter("Bucket.Close", "")
+
+	unregisterBucket(bucket)
+
 	bucket.mutex.Lock()
 	defer bucket.mutex.Unlock()
 
@@ -234,6 +237,18 @@ func (bucket *Bucket) getOrCreateCollection(name sgbucket.DataStoreNameImpl, orC
 	} else {
 		return nil, err
 	}
+}
+
+func (bucket *Bucket) getOpenCollectionByID(id CollectionID) *Collection {
+	bucket.mutex.Lock()
+	defer bucket.mutex.Unlock()
+
+	for _, coll := range bucket.collections {
+		if coll.id == id {
+			return coll
+		}
+	}
+	return nil
 }
 
 func (bucket *Bucket) getCollectionByID(id CollectionID) (*Collection, error) {

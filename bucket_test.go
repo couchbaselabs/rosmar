@@ -46,6 +46,13 @@ func TestNewBucket(t *testing.T) {
 	bucket := makeTestBucket(t)
 	assert.Equal(t, testBucketDirName, bucket.GetName())
 	assert.Contains(t, bucket.GetURL(), testBucketDirName)
+
+	url := bucket.url
+	buckets := bucketsAtURL(url)
+	assert.Contains(t, buckets, bucket)
+
+	bucket.Close()
+	assert.Empty(t, bucketsAtURL(url))
 }
 
 func TestGetMissingBucket(t *testing.T) {
@@ -75,6 +82,8 @@ func TestNewBucketInMemory(t *testing.T) {
 		require.NoError(t, err)
 		require.NotNil(t, bucket)
 
+		assert.Empty(t, bucketsAtURL(bucket.url))
+
 		err = bucket.CloseAndDelete()
 		assert.NoError(t, err)
 	}
@@ -85,6 +94,38 @@ func TestNewBucketInMemory(t *testing.T) {
 }
 
 var defaultCollection = dsName("_default", "_default")
+
+func TestTwoBucketsOneURL(t *testing.T) {
+	bucket1 := makeTestBucket(t)
+	url := bucket1.url
+
+	bucket2, err := OpenBucket(url, CreateNew)
+	require.ErrorContains(t, err, "already exists")
+	require.Nil(t, bucket2)
+
+	bucket2, err = OpenBucket(url, ReOpenExisting)
+	require.NoError(t, err)
+	t.Cleanup(bucket2.Close)
+
+	buckets := bucketsAtURL(url)
+	assert.Len(t, buckets, 2)
+	assert.Contains(t, buckets, bucket1)
+	assert.Contains(t, buckets, bucket2)
+
+	bucket1.Close()
+	buckets = bucketsAtURL(url)
+	assert.Len(t, buckets, 1)
+	assert.Contains(t, buckets, bucket2)
+
+	err = DeleteBucketAt(url)
+	assert.ErrorContains(t, err, "there is a Bucket open at that URL")
+
+	bucket2.Close()
+	assert.Empty(t, bucketsAtURL(url))
+
+	err = DeleteBucketAt(url)
+	assert.NoError(t, err)
+}
 
 func TestDefaultCollection(t *testing.T) {
 	bucket := makeTestBucket(t)

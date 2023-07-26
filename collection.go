@@ -642,7 +642,7 @@ func (c *Collection) withNewCas(fn func(txn *sql.Tx, newCas CAS) (*event, error)
 		return err
 	})
 	if err == nil && e != nil {
-		c.postDocEvent(e)
+		c.postNewEvent(e)
 	}
 	return err
 }

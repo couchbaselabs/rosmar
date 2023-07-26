@@ -140,6 +140,23 @@ func (c *Collection) enqueueBackfillEvents(startCas uint64, keysOnly bool, q *ev
 	return rows.Close()
 }
 
+func (c *Collection) postNewEvent(e *event) {
+	e.collectionID = c.GetCollectionID()
+	feedEvent := e.asFeedEvent()
+
+	c.postEvent(feedEvent)
+	c.bucket.scheduleExpirationAtOrBefore(e.exp)
+
+	// Tell collections of other buckets on the same db file to post the event too:
+	for _, otherBucket := range bucketsAtURL(c.bucket.url) {
+		if otherBucket != c.bucket {
+			if otherCollection := otherBucket.getOpenCollectionByID(c.id); otherCollection != nil {
+				otherCollection.postEvent(feedEvent)
+			}
+		}
+	}
+}
+
 func (c *Collection) postEvent(event *sgbucket.FeedEvent) {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
@@ -250,12 +267,6 @@ func (e *event) asFeedEvent() *sgbucket.FeedEvent {
 		feedEvent.DataType |= sgbucket.FeedDataTypeXattr
 	}
 	return &feedEvent
-}
-
-func (c *Collection) postDocEvent(e *event) {
-	e.collectionID = c.GetCollectionID()
-	c.postEvent(e.asFeedEvent())
-	c.bucket.scheduleExpirationAtOrBefore(e.exp)
 }
 
 var (
