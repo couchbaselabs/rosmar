@@ -9,6 +9,10 @@ import (
 	sgbucket "github.com/couchbase/sg-bucket"
 )
 
+func (bucket *Bucket) String() string {
+	return fmt.Sprintf("B#%d", bucket.serial)
+}
+
 //////// Interface BucketStore
 
 // The URL used to open the bucket.
@@ -19,6 +23,7 @@ func (bucket *Bucket) GetName() string { return bucket.name }
 
 // Renames the bucket. This doesn't affect its URL, only the value returned by GetName.
 func (bucket *Bucket) SetName(name string) error {
+	info("Bucket %s is now named %q", bucket, name)
 	_, err := bucket.db().Exec(`UPDATE bucket SET name=?1`, name)
 	if err == nil {
 		bucket.name = name
@@ -36,7 +41,7 @@ func (bucket *Bucket) UUID() (string, error) {
 
 // Closes a bucket.
 func (bucket *Bucket) Close() {
-	traceEnter("Bucket.Close", "")
+	traceEnter("Bucket.Close", "%s", bucket)
 
 	unregisterBucket(bucket)
 
@@ -115,7 +120,7 @@ func validateName(name sgbucket.DataStoreName) (sgbucket.DataStoreNameImpl, erro
 }
 
 func (bucket *Bucket) DefaultDataStore() sgbucket.DataStore {
-	traceEnter("DefaultDataStore", "")
+	traceEnter("DefaultDataStore", "%s", bucket)
 	collection, err := bucket.getOrCreateCollection(defaultDataStoreName, true)
 	if err != nil {
 		warn("DefaultDataStore() ->  %v", err)
@@ -125,7 +130,7 @@ func (bucket *Bucket) DefaultDataStore() sgbucket.DataStore {
 }
 
 func (bucket *Bucket) NamedDataStore(name sgbucket.DataStoreName) (sgbucket.DataStore, error) {
-	traceEnter("NamedDataStore", "%q", name)
+	traceEnter("NamedDataStore", "%s.%s", bucket, name)
 	sc, err := validateName(name)
 	if err != nil {
 		warn("NamedDataStore(%q) -> %v", name, err)
@@ -142,7 +147,7 @@ func (bucket *Bucket) NamedDataStore(name sgbucket.DataStoreName) (sgbucket.Data
 }
 
 func (bucket *Bucket) CreateDataStore(name sgbucket.DataStoreName) error {
-	traceEnter("CreateDataStore", "%q", name)
+	traceEnter("CreateDataStore", "%s.%s", bucket, name)
 	sc, err := validateName(name)
 	if err != nil {
 		return err
@@ -152,7 +157,7 @@ func (bucket *Bucket) CreateDataStore(name sgbucket.DataStoreName) error {
 }
 
 func (bucket *Bucket) DropDataStore(name sgbucket.DataStoreName) error {
-	traceEnter("DropDataStore", "%q", name)
+	traceEnter("DropDataStore", "%s.%s", bucket, name)
 	sc, err := validateName(name)
 	if err != nil {
 		return err
@@ -161,7 +166,7 @@ func (bucket *Bucket) DropDataStore(name sgbucket.DataStoreName) error {
 }
 
 func (bucket *Bucket) ListDataStores() (result []sgbucket.DataStoreName, err error) {
-	traceEnter("ListDataStores", "")
+	traceEnter("ListDataStores", "%s", bucket)
 	defer func() { traceExit("ListDataStores", err, "%v", result) }()
 	rows, err := bucket.db().Query(`SELECT id, scope, name FROM collections ORDER BY id`)
 	if err != nil {

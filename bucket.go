@@ -10,6 +10,7 @@ import (
 	"os"
 	"path"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	sgbucket "github.com/couchbase/sg-bucket"
@@ -27,6 +28,7 @@ type Bucket struct {
 	_db         *sql.DB        // SQLite database handle (do not access; call db() instead)
 	expTimer    *time.Timer    // Schedules expiration of docs
 	nextExp     uint32         // Timestamp when expTimer will run (0 if never)
+	serial      uint32         // Serial number for logging
 	inMemory    bool           // True if it's an in-memory database
 }
 
@@ -51,6 +53,8 @@ const kNumVbuckets = 32
 var kSchema string
 
 var setupOnce sync.Once
+
+var lastSerial uint32
 
 // Options for opening a bucket.
 type OpenMode int
@@ -126,7 +130,8 @@ func OpenBucket(urlStr string, mode OpenMode) (bucket *Bucket, err error) {
 		sql.Register("sqlite3_for_rosmar", &sqlite3.SQLiteDriver{ConnectHook: connectHook})
 	})
 
-	info("Opening Rosmar db %s", u)
+	serial := atomic.AddUint32(&lastSerial, 1)
+	info("Opening Rosmar bucket B#%d on %s", serial, u)
 	db, err := sql.Open("sqlite3_for_rosmar", u.String())
 	if err != nil {
 		return nil, err
@@ -139,6 +144,7 @@ func OpenBucket(urlStr string, mode OpenMode) (bucket *Bucket, err error) {
 		_db:         db,
 		collections: make(map[sgbucket.DataStoreNameImpl]*Collection),
 		inMemory:    inMemory,
+		serial:      serial,
 	}
 
 	// Initialize the schema if necessary:
@@ -182,12 +188,12 @@ func OpenBucketIn(dirUrlStr string, bucketName string, mode OpenMode) (*Bucket, 
 // If given `InMemoryURL` it's a no-op.
 // Warning: Never call this while there are any open Bucket instances on this URL!
 func DeleteBucketAt(urlStr string) (err error) {
-	traceEnter("DeleteBucket", "%q", urlStr)
+	traceEnter("DeleteBucketAt", "%q", urlStr)
 	defer func() { traceExit("DeleteBucket", err, "ok") }()
 	if isInMemoryURL(urlStr) {
 		return nil
 	}
-	info("DeleteBucket(%q)", urlStr)
+	info("DeleteBucketAt(%q)", urlStr)
 	u, err := parseDBFileURL(urlStr)
 	if err != nil {
 		return err

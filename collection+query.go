@@ -197,7 +197,6 @@ func (iter *queryIterator) NextBytes() []byte {
 // unmarshals the query row into the pointed-to struct.
 func (iter *queryIterator) Next(valuePtr any) bool {
 	bytes := iter.NextBytes()
-	info("queryIterator.next: %s", bytes) //TEMP
 	if bytes == nil {
 		return false
 	}

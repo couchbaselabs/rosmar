@@ -30,7 +30,7 @@ func registerBucket(bucket *Bucket) {
 	if isInMemoryURL(url) {
 		return
 	}
-	info("registerBucket %v at %s", bucket, url)
+	debug("registerBucket %v at %s", bucket, url)
 	bucketRegistryMutex.Lock()
 	bucketRegistry[url] = append(bucketRegistry[url], bucket)
 	bucketRegistryMutex.Unlock()
@@ -42,7 +42,7 @@ func unregisterBucket(bucket *Bucket) {
 	if isInMemoryURL(url) {
 		return
 	}
-	info("UNregisterBucket %v at %s", bucket, url)
+	debug("UNregisterBucket %v at %s", bucket, url)
 	bucketRegistryMutex.Lock()
 	defer bucketRegistryMutex.Unlock()
 

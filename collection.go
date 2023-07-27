@@ -31,11 +31,17 @@ type CAS = uint64
 type Exp = uint32
 
 func newCollection(bucket *Bucket, name sgbucket.DataStoreNameImpl, id CollectionID) *Collection {
-	return &Collection{
+	c := &Collection{
 		bucket:            bucket,
 		DataStoreNameImpl: name,
 		id:                id,
 	}
+	info("Opened collection %s on %s", c, c.GetName())
+	return c
+}
+
+func (c *Collection) String() string {
+	return fmt.Sprintf("B#%dc%d", c.bucket.serial, c.GetCollectionID())
 }
 
 func (c *Collection) close() {

@@ -183,7 +183,7 @@ func (c *Collection) updateView(designDoc string, viewName string) (view *rosmar
 			return err
 		}
 
-		info("\t... updating view %s index to seq %d (from %d)", view.fullName, latestCas, view.lastCas)
+		info("Updating view %s index to cas %d (from %d)", view.fullName, latestCas, view.lastCas)
 
 		// First delete all obsolete index rows, i.e. those whose source doc has been
 		// updated since view.lastCas:
@@ -305,8 +305,6 @@ func (c *Collection) updateView(designDoc string, viewName string) (view *rosmar
 // Handles key ranges, descending order and limit (and clears the corresponding params)
 // but does not reduce.
 func (c *Collection) getViewRows(view *rosmarView, params *sgbucket.ViewParams) (result sgbucket.ViewResult, err error) {
-	trace("querying view %s", view.fullName)
-
 	args := []any{sql.Named(`VIEW`, view.id)}
 	sel := `SELECT documents.key, mapped.key, mapped.value, `
 	sel += ifelse(params.IncludeDocs, `documents.value `, `null `)
@@ -345,8 +343,6 @@ func (c *Collection) getViewRows(view *rosmarView, params *sgbucket.ViewParams) 
 		sel += fmt.Sprintf(`LIMIT %d `, *params.Limit)
 		params.Limit = nil
 	}
-	//trace("\t SQL = %s", sel)
-	//trace("\t args = %+v", args)
 
 	rows, err := c.db().Query(sel, args...)
 	if err != nil {
@@ -373,5 +369,6 @@ func (c *Collection) getViewRows(view *rosmarView, params *sgbucket.ViewParams) 
 	err = rows.Close()
 	result.TotalRows = len(result.Rows)
 	params.IncludeDocs = false // we already did it
+	info("Queried view %s --> %d rows", view.fullName, result.TotalRows)
 	return
 }
