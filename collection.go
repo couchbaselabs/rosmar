@@ -47,7 +47,7 @@ func (c *Collection) String() string {
 func (c *Collection) close() {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
-	c.stopFeeds()
+	c._stopFeeds()
 }
 
 func (c *Collection) db() queryable {

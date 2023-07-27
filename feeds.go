@@ -27,7 +27,7 @@ func (bucket *Bucket) StartDCPFeed(
 ) error {
 	traceEnter("StartDCPFeed", "bucket=%s, args=%+v", bucket.GetName(), args)
 	// If no scopes are specified, return feed for the default collection, if it exists
-	if args.Scopes == nil || len(args.Scopes) == 0 {
+	if len(args.Scopes) == 0 {
 		return bucket.DefaultDataStore().(*Collection).StartDCPFeed(ctx, args, callback, dbStats)
 	}
 
@@ -47,7 +47,7 @@ func (bucket *Bucket) StartDCPFeed(
 	doneChans := map[*Collection]chan struct{}{}
 	for _, collection := range requestedCollections {
 		// Not bothering to remove scopes from args for the single collection feeds
-		// here because it's ignored by RosmarBucket's StartDCPFeed
+		// here because it's ignored by Collection.StartDCPFeed
 		collectionID := collection.GetCollectionID()
 		collectionAwareCallback := func(event sgbucket.FeedEvent) bool {
 			event.CollectionID = collectionID
@@ -59,7 +59,7 @@ func (bucket *Bucket) StartDCPFeed(
 		argsCopy := args
 		argsCopy.DoneChan = doneChans[collection]
 
-		// Ignoring error is safe because RosmarBucket doesn't have error scenarios for StartDCPFeed
+		// Ignoring error is safe because Collection doesn't have error scenarios for StartDCPFeed
 		_ = collection.StartDCPFeed(ctx, argsCopy, collectionAwareCallback, dbStats)
 	}
 
@@ -160,26 +160,24 @@ func (c *Collection) postNewEvent(e *event) {
 
 func (c *Collection) postEvent(event *sgbucket.FeedEvent) {
 	c.mutex.Lock()
-	defer c.mutex.Unlock()
+	feeds := c.feeds
+	c.mutex.Unlock()
 
-	if len(c.feeds) > 0 {
-		var eventNoValue sgbucket.FeedEvent = *event // copies the struct
-		eventNoValue.Value = nil
-
-		for _, feed := range c.feeds {
-			if feed != nil {
-				if feed.args.KeysOnly {
-					feed.events.push(&eventNoValue)
-				} else {
-					feed.events.push(event)
-				}
+	for _, feed := range feeds {
+		if feed != nil {
+			if feed.args.KeysOnly {
+				var eventNoValue sgbucket.FeedEvent = *event // copies the struct
+				eventNoValue.Value = nil
+				feed.events.push(&eventNoValue)
+			} else {
+				feed.events.push(event)
 			}
 		}
 	}
 }
 
 // stops all feeds. Caller MUST hold the bucket's lock.
-func (c *Collection) stopFeeds() {
+func (c *Collection) _stopFeeds() {
 	for _, feed := range c.feeds {
 		feed.close()
 	}
