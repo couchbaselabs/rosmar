@@ -317,10 +317,14 @@ func (c *Collection) writeWithXattr(
 			c.id, key)
 		casOut = newCas
 		var rawXattrs []byte
-		err := scan(row, &e.value, &e.isJSON, &e.cas, &rawXattrs)
-		if err != nil && err != sql.ErrNoRows {
+		if err := scan(row, &e.value, &e.isJSON, &e.cas, &rawXattrs); err == nil {
+			if e.value == nil {
+				rawXattrs = nil // xattrs are cleared whenever resurrecting a tombstone
+			}
+		} else if err != sql.ErrNoRows {
 			return nil, remapKeyError(err, key)
-		} else if ifCas != nil && *ifCas != e.cas {
+		}
+		if ifCas != nil && *ifCas != e.cas {
 			return nil, sgbucket.CasMismatchErr{Expected: *ifCas, Actual: e.cas}
 		}
 
