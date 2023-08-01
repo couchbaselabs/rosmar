@@ -35,7 +35,7 @@ func (bucket *Bucket) StartDCPFeed(
 	requestedCollections := make([]*Collection, 0)
 	for scopeName, collections := range args.Scopes {
 		for _, collectionName := range collections {
-			collection, err := bucket.getCollection(sgbucket.DataStoreNameImpl{scopeName, collectionName})
+			collection, err := bucket.getCollection(sgbucket.DataStoreNameImpl{Scope: scopeName, Collection: collectionName})
 			if err != nil {
 				return fmt.Errorf("DCPFeed args specified unknown collection: %s:%s", scopeName, collectionName)
 			}
@@ -101,12 +101,27 @@ func (c *Collection) StartDCPFeed(
 	feed.events.init()
 
 	if args.Backfill != sgbucket.FeedNoBackfill {
+		startCas := args.Backfill
+		if args.Backfill == sgbucket.FeedResume {
+			if args.CheckpointPrefix == "" {
+				return fmt.Errorf("feed's Backfill is FeedResume but no CheckpointPrefix given")
+			}
+			if err := feed.readCheckpoint(); err != nil {
+				return fmt.Errorf("couldn't read DCP feed checkpoint: %w", err)
+			}
+			startCas = feed.lastCas + 1
+		}
+
+		debug("%s starting backfill from CAS 0x%x", feed, startCas)
 		feed.events.push(&sgbucket.FeedEvent{Opcode: sgbucket.FeedOpBeginBackfill})
-		err := c.enqueueBackfillEvents(args.Backfill, args.KeysOnly, &feed.events)
+		err := c.enqueueBackfillEvents(startCas, args.KeysOnly, &feed.events)
 		if err != nil {
 			return err
 		}
+		debug("%s ended backfill", feed)
 		feed.events.push(&sgbucket.FeedEvent{Opcode: sgbucket.FeedOpEndBackfill})
+	} else {
+		feed.readCheckpoint()
 	}
 
 	if args.Dump {
@@ -189,12 +204,62 @@ func (c *Collection) _stopFeeds() {
 
 type eventQueue = queue[*sgbucket.FeedEvent]
 
+type checkpoint struct {
+	LastSeq uint64 `json:"last_seq"`
+}
+
 type dcpFeed struct {
-	ctx        context.Context // TODO: Use this
-	collection *Collection
-	args       sgbucket.FeedArguments
-	callback   sgbucket.FeedEventCallbackFunc
-	events     eventQueue
+	ctx            context.Context // TODO: Use this
+	collection     *Collection
+	args           sgbucket.FeedArguments
+	callback       sgbucket.FeedEventCallbackFunc
+	events         eventQueue
+	lastCas        CAS
+	lastCasChanged bool
+}
+
+func (feed *dcpFeed) String() string {
+	return fmt.Sprintf("Feed(%s %s)", feed.collection, feed.args.ID)
+}
+
+func (feed *dcpFeed) checkpointKey() string {
+	return feed.args.CheckpointPrefix + ":" + feed.args.ID
+}
+
+// Reads the feed's lastCas from the checkpoint document, if there is one.
+func (feed *dcpFeed) readCheckpoint() (err error) {
+	if feed.args.CheckpointPrefix == "" {
+		return
+	}
+	key := feed.checkpointKey()
+	var checkpt checkpoint
+	if _, err = feed.collection.Get(key, &checkpt); err != nil {
+		if _, ok := err.(sgbucket.MissingError); ok {
+			err = nil
+			debug("%s checkpoint %q missing", feed, key)
+		} else {
+			logError("%s failed to read lastCas from %q: %v", feed, key, err)
+		}
+		return
+	}
+	feed.lastCas = checkpt.LastSeq
+	debug("%s read lastCas 0x%x from %q", feed, feed.lastCas, key)
+	return
+}
+
+// Writes the feed's lastCas to the checkpoint document, if there is one.
+func (feed *dcpFeed) writeCheckpoint() (err error) {
+	if feed.args.CheckpointPrefix == "" || !feed.lastCasChanged {
+		return
+	}
+	key := feed.checkpointKey()
+	err = feed.collection.Set(key, 0, nil, checkpoint{LastSeq: feed.lastCas})
+	if err == nil {
+		debug("%s wrote lastCas 0x%x to %q", feed, feed.lastCas, key)
+	} else {
+		logError("%s failed to write lastCas to %q: %v", feed, key, err)
+	}
+	return err
 }
 
 func (feed *dcpFeed) run() {
@@ -204,7 +269,7 @@ func (feed *dcpFeed) run() {
 	if feed.args.Terminator != nil {
 		go func() {
 			<-feed.args.Terminator
-			debug("FEED %s terminator closed", feed.collection)
+			debug("%s terminator closed", feed)
 			feed.events.close()
 		}()
 	}
@@ -216,11 +281,21 @@ func (feed *dcpFeed) run() {
 	for {
 		if event := feed.events.pull(); event != nil {
 			feed.callback(*event)
+			if event.Cas > feed.lastCas {
+				feed.lastCas = event.Cas
+				feed.lastCasChanged = true
+				debug("%s lastCas = 0x%x", feed, feed.lastCas)
+				// TODO: Set a timer to write the checkpoint "soon"
+			}
 		} else {
 			break
 		}
 	}
-	debug("FEED %s stopping", feed.collection)
+	debug("%s stopping", feed)
+
+	if feed.lastCasChanged {
+		feed.writeCheckpoint()
+	}
 }
 
 func (feed *dcpFeed) close() {

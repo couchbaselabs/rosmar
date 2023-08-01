@@ -21,35 +21,21 @@ func TestBackfill(t *testing.T) {
 	addToCollection(t, c, "baker", 0, "B")
 	addToCollection(t, c, "charlie", 0, "C")
 
-	events := make(chan sgbucket.FeedEvent, 10)
-	callback := func(event sgbucket.FeedEvent) bool {
-		events <- event
-		return true
-	}
-
 	args := sgbucket.FeedArguments{
 		Backfill: 0,
 		Dump:     true,
-		DoneChan: make(chan struct{}),
 	}
-	err := bucket.StartDCPFeed(context.TODO(), args, callback, nil)
-	assert.NoError(t, err, "StartDCPFeed failed")
+	events, doneChan := startFeedWithArgs(t, bucket, args)
 
 	event := <-events
 	assert.Equal(t, sgbucket.FeedOpBeginBackfill, event.Opcode)
-	results := map[string]string{}
-	for i := 0; i < 3; i++ {
-		event := <-events
-		assert.Equal(t, sgbucket.FeedOpMutation, event.Opcode)
-		results[string(event.Key)] = string(event.Value)
-	}
-	assert.Equal(t, map[string]string{
-		"able": `"A"`, "baker": `"B"`, "charlie": `"C"`}, results)
+
+	readExpectedEventsABC(t, events)
 
 	event = <-events
 	assert.Equal(t, sgbucket.FeedOpEndBackfill, event.Opcode)
 
-	_, ok := <-args.DoneChan
+	_, ok := <-doneChan
 	assert.False(t, ok)
 }
 
@@ -73,7 +59,12 @@ func TestMutations(t *testing.T) {
 		require.NoError(t, err)
 	}()
 
-	readExpectedEvents(t, events)
+	readExpectedEventsDEF(t, events, 4)
+
+	// Read the mutation of "eskimo":
+	e := <-events
+	e.TimeReceived = time.Time{}
+	assert.Equal(t, sgbucket.FeedEvent{Opcode: sgbucket.FeedOpDeletion, Key: []byte("eskimo"), Cas: 7, DataType: sgbucket.FeedDataTypeRaw}, e)
 
 	bucket.Close()
 
@@ -81,35 +72,106 @@ func TestMutations(t *testing.T) {
 	assert.False(t, ok)
 }
 
+func TestCheckpoint(t *testing.T) {
+	ensureNoLeakedFeeds(t)
+	bucket := makeTestBucket(t)
+	c := bucket.DefaultDataStore()
+
+	Logging = LevelDebug
+
+	addToCollection(t, c, "able", 0, "A")
+	addToCollection(t, c, "baker", 0, "B")
+	addToCollection(t, c, "charlie", 0, "C")
+
+	// Run the feed:
+	args := sgbucket.FeedArguments{
+		ID:               "myID",
+		Backfill:         sgbucket.FeedResume,
+		Dump:             true,
+		CheckpointPrefix: "Checkpoint",
+	}
+	events, doneChan := startFeedWithArgs(t, bucket, args)
+
+	event := <-events
+	assert.Equal(t, sgbucket.FeedOpBeginBackfill, event.Opcode)
+	readExpectedEventsABC(t, events)
+	event = <-events
+	assert.Equal(t, sgbucket.FeedOpEndBackfill, event.Opcode)
+
+	_, ok := <-doneChan
+	assert.False(t, ok)
+
+	// Create new docs:
+	addToCollection(t, c, "delta", 0, "D")
+	addToCollection(t, c, "eskimo", 0, "E")
+	addToCollection(t, c, "fahrvergnügen", 0, "F")
+
+	// Resume the feed:
+	t.Logf("---- Resuming feed from checkpoint ---")
+	args = sgbucket.FeedArguments{
+		ID:               "myID",
+		Backfill:         sgbucket.FeedResume,
+		Dump:             true,
+		CheckpointPrefix: "Checkpoint",
+	}
+	events, doneChan = startFeedWithArgs(t, bucket, args)
+
+	event = <-events
+	assert.Equal(t, sgbucket.FeedOpBeginBackfill, event.Opcode)
+
+	// The first event will be the writing of the checkpoint itself:
+	e := <-events
+	assert.Equal(t, "Checkpoint:myID", string(e.Key))
+
+	readExpectedEventsDEF(t, events, 5)
+
+	event = <-events
+	assert.Equal(t, sgbucket.FeedOpEndBackfill, event.Opcode)
+
+	_, ok = <-doneChan
+	assert.False(t, ok)
+}
+
 func startFeed(t *testing.T, bucket *Bucket) (events chan sgbucket.FeedEvent, doneChan chan struct{}) {
+	return startFeedWithArgs(t, bucket, sgbucket.FeedArguments{Backfill: sgbucket.FeedNoBackfill})
+}
+
+func startFeedWithArgs(t *testing.T, bucket *Bucket, args sgbucket.FeedArguments) (events chan sgbucket.FeedEvent, doneChan chan struct{}) {
 	events = make(chan sgbucket.FeedEvent, 10)
 	callback := func(event sgbucket.FeedEvent) bool {
 		events <- event
 		return true
 	}
-	doneChan = make(chan struct{})
-	args := sgbucket.FeedArguments{
-		Backfill: sgbucket.FeedNoBackfill,
-		DoneChan: doneChan,
+	if args.DoneChan == nil {
+		args.DoneChan = make(chan struct{})
 	}
 	err := bucket.StartDCPFeed(context.TODO(), args, callback, nil)
 	require.NoError(t, err, "StartDCPFeed failed")
-	return events, doneChan
+	return events, args.DoneChan
 }
 
-func readExpectedEvents(t *testing.T, events chan sgbucket.FeedEvent) {
+func readExpectedEventsABC(t *testing.T, events chan sgbucket.FeedEvent) {
 	e := <-events
 	e.TimeReceived = time.Time{}
-	assert.Equal(t, sgbucket.FeedEvent{Opcode: sgbucket.FeedOpMutation, Key: []byte("delta"), Value: []byte(`"D"`), Cas: 4, DataType: sgbucket.FeedDataTypeJSON}, e)
+	assert.Equal(t, sgbucket.FeedEvent{Opcode: sgbucket.FeedOpMutation, Key: []byte("able"), Value: []byte(`"A"`), Cas: 1, DataType: sgbucket.FeedDataTypeJSON}, e)
 	e = <-events
 	e.TimeReceived = time.Time{}
-	assert.Equal(t, sgbucket.FeedEvent{Opcode: sgbucket.FeedOpMutation, Key: []byte("eskimo"), Value: []byte(`"E"`), Cas: 5, DataType: sgbucket.FeedDataTypeJSON}, e)
+	assert.Equal(t, sgbucket.FeedEvent{Opcode: sgbucket.FeedOpMutation, Key: []byte("baker"), Value: []byte(`"B"`), Cas: 2, DataType: sgbucket.FeedDataTypeJSON}, e)
 	e = <-events
 	e.TimeReceived = time.Time{}
-	assert.Equal(t, sgbucket.FeedEvent{Opcode: sgbucket.FeedOpMutation, Key: []byte("fahrvergnügen"), Value: []byte(`"F"`), Cas: 6, DataType: sgbucket.FeedDataTypeJSON}, e)
+	assert.Equal(t, sgbucket.FeedEvent{Opcode: sgbucket.FeedOpMutation, Key: []byte("charlie"), Value: []byte(`"C"`), Cas: 3, DataType: sgbucket.FeedDataTypeJSON}, e)
+}
+
+func readExpectedEventsDEF(t *testing.T, events chan sgbucket.FeedEvent, cas CAS) {
+	e := <-events
+	e.TimeReceived = time.Time{}
+	assert.Equal(t, sgbucket.FeedEvent{Opcode: sgbucket.FeedOpMutation, Key: []byte("delta"), Value: []byte(`"D"`), Cas: cas, DataType: sgbucket.FeedDataTypeJSON}, e)
 	e = <-events
 	e.TimeReceived = time.Time{}
-	assert.Equal(t, sgbucket.FeedEvent{Opcode: sgbucket.FeedOpDeletion, Key: []byte("eskimo"), Cas: 7, DataType: sgbucket.FeedDataTypeRaw}, e)
+	assert.Equal(t, sgbucket.FeedEvent{Opcode: sgbucket.FeedOpMutation, Key: []byte("eskimo"), Value: []byte(`"E"`), Cas: cas + 1, DataType: sgbucket.FeedDataTypeJSON}, e)
+	e = <-events
+	e.TimeReceived = time.Time{}
+	assert.Equal(t, sgbucket.FeedEvent{Opcode: sgbucket.FeedOpMutation, Key: []byte("fahrvergnügen"), Value: []byte(`"F"`), Cas: cas + 2, DataType: sgbucket.FeedDataTypeJSON}, e)
 }
 
 func TestCrossBucketEvents(t *testing.T) {
@@ -138,8 +200,8 @@ func TestCrossBucketEvents(t *testing.T) {
 		require.NoError(t, err)
 	}()
 
-	readExpectedEvents(t, events)
-	readExpectedEvents(t, events2)
+	readExpectedEventsDEF(t, events, 4)
+	readExpectedEventsDEF(t, events2, 4)
 
 	bucket.Close()
 	bucket2.Close()
