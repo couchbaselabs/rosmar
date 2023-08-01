@@ -20,7 +20,7 @@ func TestQuery(t *testing.T) {
 	require.NoError(t, setJSON(coll, "doc5", `{"key": [17, true], "value": null}`))
 
 	// Add a matching doc to a different collection, to make sure the query won't return it:
-	coll2, err := coll.bucket.NamedDataStore(sgbucket.DataStoreNameImpl{"foo", "bar"})
+	coll2, err := coll.bucket.NamedDataStore(sgbucket.DataStoreNameImpl{Scope: "foo", Collection: "bar"})
 	require.NoError(t, err)
 	require.NoError(t, setJSON(coll2, "doc1", `{"key": "k1", "value": "v1"}`))
 

@@ -359,7 +359,7 @@ func (c *Collection) remove(key string, ifCas *CAS) (casOut CAS, err error) {
 		if len(rawXattrs) > 0 {
 			var xattrs map[string]json.RawMessage
 			_ = json.Unmarshal(rawXattrs, &xattrs)
-			for k, _ := range xattrs {
+			for k := range xattrs {
 				if k == "" || k[0] != '_' {
 					delete(xattrs, k)
 				}

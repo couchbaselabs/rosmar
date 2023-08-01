@@ -84,7 +84,8 @@ func (c *Collection) DeleteXattrs(
 
 func (c *Collection) WriteUserXattr(key string, xattrKey string, xattrVal interface{}) (casOut CAS, err error) {
 	traceEnter("WriteUserXattr", "%q, %q, ...", key, xattrKey)
-	if xattrData, err := encodeAsRaw(xattrVal, true); err == nil {
+	xattrData, err := encodeAsRaw(xattrVal, true)
+	if err == nil {
 		casOut, err = c.writeWithXattr(key, nil, sgbucket.Xattr{Name: xattrKey, Value: xattrData}, nil, 0, false, false, true)
 	}
 	traceExit("WriteUserXattr", err, "0x%x", casOut)
@@ -424,7 +425,7 @@ func removeXattrs(rawXattrs []byte, xattrKeys ...string) (rawResult []byte) {
 }
 
 func removeUserXattrs(xattrs semiParsedXattrs) {
-	for k, _ := range xattrs {
+	for k := range xattrs {
 		if k == "" || k[0] != '_' {
 			delete(xattrs, k)
 		}

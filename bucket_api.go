@@ -256,8 +256,9 @@ func (bucket *Bucket) getOpenCollectionByID(id CollectionID) *Collection {
 	return nil
 }
 
+/*  unused (so far)
 func (bucket *Bucket) getCollectionByID(id CollectionID) (*Collection, error) {
-	// unused (so far)
+
 	bucket.mutex.Lock()
 	defer bucket.mutex.Unlock()
 
@@ -275,6 +276,7 @@ func (bucket *Bucket) getCollectionByID(id CollectionID) (*Collection, error) {
 	dsName := sgbucket.DataStoreNameImpl{Scope: scope, Collection: name}
 	return bucket._initCollection(dsName, id), nil
 }
+*/
 
 func (bucket *Bucket) dropCollection(name sgbucket.DataStoreNameImpl) error {
 	if name.IsDefault() {
