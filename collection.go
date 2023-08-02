@@ -374,7 +374,7 @@ func (c *Collection) remove(key string, ifCas *CAS) (casOut CAS, err error) {
 			`SELECT cas, xattrs FROM documents WHERE collection=?1 AND key=?2`,
 			c.id, key)
 		if err = scan(row, &cas, &rawXattrs); err != nil {
-			return
+			return nil, remapKeyError(err, key)
 		} else if ifCas != nil && cas != *ifCas {
 			return nil, sgbucket.CasMismatchErr{Expected: *ifCas, Actual: cas}
 		}
