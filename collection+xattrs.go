@@ -329,7 +329,11 @@ func (c *Collection) writeWithXattr(
 		}
 
 		var xattrs semiParsedXattrs
-		json.Unmarshal(rawXattrs, &xattrs)
+		if rawXattrs != nil {
+			if err = json.Unmarshal(rawXattrs, &xattrs); err != nil {
+				return nil, fmt.Errorf("document %q xattrs are unreadable: %w", key, err)
+			}
+		}
 
 		// Update the body:
 		if deleteBody {

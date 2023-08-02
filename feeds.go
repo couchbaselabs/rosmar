@@ -120,8 +120,6 @@ func (c *Collection) StartDCPFeed(
 		}
 		debug("%s ended backfill", feed)
 		feed.events.push(&sgbucket.FeedEvent{Opcode: sgbucket.FeedOpEndBackfill})
-	} else {
-		feed.readCheckpoint()
 	}
 
 	if args.Dump {
@@ -294,7 +292,9 @@ func (feed *dcpFeed) run() {
 	debug("%s stopping", feed)
 
 	if feed.lastCasChanged {
-		feed.writeCheckpoint()
+		if err := feed.writeCheckpoint(); err != nil {
+			logError("Error saving %s checkpoint: %v", feed, err)
+		}
 	}
 }
 

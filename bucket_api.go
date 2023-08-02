@@ -362,7 +362,11 @@ func (bucket *Bucket) doExpiration() {
 	bucket.mutex.Unlock()
 
 	debug("EXP: Running scheduled expiration...")
-	bucket.ExpireDocuments()
+	if n, err := bucket.ExpireDocuments(); err != nil {
+		logError("Bucket %s error expiring docs: %v", bucket, err)
+	} else if n > 0 {
+		info("Bucket %s expired %d docs", bucket, n)
+	}
 
 	bucket.scheduleExpiration()
 }

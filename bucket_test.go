@@ -42,6 +42,12 @@ func dsName(scope string, coll string) sgbucket.DataStoreName {
 	return sgbucket.DataStoreNameImpl{Scope: scope, Collection: coll}
 }
 
+func requireAddRaw(t *testing.T, c sgbucket.DataStore, key string, exp Exp, value []byte) {
+	added, err := c.AddRaw(key, exp, value)
+	require.NoError(t, err)
+	require.True(t, added, "Doc was not added")
+}
+
 func TestNewBucket(t *testing.T) {
 	bucket := makeTestBucket(t)
 	assert.Equal(t, testBucketDirName, bucket.GetName())
@@ -312,10 +318,10 @@ func TestExpiration(t *testing.T) {
 	exp2 := Exp(time.Now().Add(-5 * time.Second).Unix())
 	exp4 := Exp(time.Now().Add(2 * time.Second).Unix())
 
-	c.AddRaw("k1", 0, []byte("v1"))
-	c.AddRaw("k2", exp2, []byte("v2"))
-	c.AddRaw("k3", 0, []byte("v3"))
-	c.AddRaw("k4", exp4, []byte("v4"))
+	requireAddRaw(t, c, "k1", 0, []byte("v1"))
+	requireAddRaw(t, c, "k2", exp2, []byte("v2"))
+	requireAddRaw(t, c, "k3", 0, []byte("v3"))
+	requireAddRaw(t, c, "k4", exp4, []byte("v4"))
 
 	exp, err = bucket.NextExpiration()
 	require.NoError(t, err)

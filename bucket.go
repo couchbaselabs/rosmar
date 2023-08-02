@@ -172,7 +172,7 @@ func OpenBucketIn(dirUrlStr string, bucketName string, mode OpenMode) (*Bucket, 
 	if isInMemoryURL(dirUrlStr) {
 		bucket, err := OpenBucket(dirUrlStr, mode)
 		if err == nil {
-			bucket.SetName(bucketName)
+			err = bucket.SetName(bucketName)
 		}
 		return bucket, err
 	}
@@ -313,7 +313,7 @@ func (bucket *Bucket) inTransaction(fn func(txn *sql.Tx) error) error {
 		}
 
 		if err != nil {
-			txn.Rollback()
+			_ = txn.Rollback()
 			if sqliteErrCode(err) == sqlite3.ErrBusy || sqliteErrCode(err) == sqlite3.ErrLocked {
 				continue // retry
 			} else {
