@@ -57,7 +57,8 @@ func unregisterBucket(bucket *Bucket) {
 	} else {
 		// Copy the slice before mutating, in case a client is iterating it:
 		buckets = slices.Clone(buckets)
-		buckets = slices.Delete(buckets, i, 1)
+		buckets[i] = nil // remove ptr that might be left in the underlying array, for gc
+		buckets = slices.Delete(buckets, i, len(buckets))
 		bucketRegistry[url] = buckets
 	}
 }
