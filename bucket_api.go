@@ -79,7 +79,7 @@ func (bucket *Bucket) IsSupported(feature sgbucket.BucketStoreFeature) bool {
 	case sgbucket.BucketStoreFeatureCollections:
 		return true
 	case sgbucket.BucketStoreFeatureSubdocOperations:
-		return false //true
+		return true
 	case sgbucket.BucketStoreFeatureXattrs:
 		return true
 	case sgbucket.BucketStoreFeatureCrc32cMacroExpansion:

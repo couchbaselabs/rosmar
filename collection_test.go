@@ -126,11 +126,61 @@ func TestGets(t *testing.T) {
 	assert.NoError(t, err, "GetsRaw")
 	assert.True(t, cas > 0)
 	assert.Equal(t, []byte("Hello"), value)
-
 }
 
-/*
-func TestWriteSubDoc(t *testing.T) {
+func TestParseSubdocPaths(t *testing.T) {
+	_, err := parseSubdocPath("")
+	assert.Error(t, err)
+
+	path, err := parseSubdocPath("foo")
+	assert.NoError(t, err)
+	assert.Equal(t, []string{"foo"}, path)
+
+	path, err = parseSubdocPath("foo.bar")
+	assert.NoError(t, err)
+	assert.Equal(t, []string{"foo", "bar"}, path)
+
+	_, err = parseSubdocPath("foo[5]")
+	assert.Error(t, err)
+	_, err = parseSubdocPath(`foo\"quoted`)
+	assert.Error(t, err)
+}
+
+func TestEvalSubdocPaths(t *testing.T) {
+	rawJson := `{"one":1, "two":{"etc":2}, "array":[3,4]}`
+	var doc map[string]any
+	_ = json.Unmarshal([]byte(rawJson), &doc)
+
+	// Valid 1-level paths:
+	val, err := evalSubdocPath(doc, []string{"one"})
+	assert.NoError(t, err)
+	assert.EqualValues(t, 1, val)
+	val, err = evalSubdocPath(doc, []string{"two"})
+	assert.NoError(t, err)
+	assert.EqualValues(t, map[string]any{"etc": 2.0}, val)
+	val, err = evalSubdocPath(doc, []string{"array"})
+	assert.NoError(t, err)
+	assert.EqualValues(t, []any{3.0, 4.0}, val)
+
+	// Valid 2-level path:
+	val, err = evalSubdocPath(doc, []string{"two", "etc"})
+	assert.NoError(t, err)
+	assert.EqualValues(t, 2, val)
+
+	// Missing paths:
+	_, err = evalSubdocPath(doc, []string{"xxx"})
+	assert.Error(t, err)
+	_, err = evalSubdocPath(doc, []string{"two", "xxx", "yyy"})
+	assert.Error(t, err)
+
+	// Type mismatches:
+	_, err = evalSubdocPath(doc, []string{"one", "xxx"})
+	assert.Error(t, err)
+	_, err = evalSubdocPath(doc, []string{"array", "xxx"})
+	assert.Error(t, err)
+}
+
+func initSubDocTest(t *testing.T) sgbucket.DataStore {
 	ensureNoLeakedFeeds(t)
 
 	coll := makeTestBucket(t).DefaultDataStore()
@@ -144,15 +194,21 @@ func TestWriteSubDoc(t *testing.T) {
 
 	addToCollection(t, coll, "key", 0, rawJson)
 
-	var fullDoc map[string]interface{}
+	var fullDoc map[string]any
 	cas, err := coll.Get("key", &fullDoc)
 	assert.NoError(t, err)
 	assert.Equal(t, CAS(1), cas)
 
+	return coll
+}
+
+func TestWriteSubDoc(t *testing.T) {
+	coll := initSubDocTest(t)
+
 	// update json
-	rawJson = []byte(`"was here"`)
+	rawJson := []byte(`"was here"`)
 	// test update using incorrect cas value
-	cas, err = coll.WriteSubDoc("key", "rosmar", 10, rawJson)
+	cas, err := coll.WriteSubDoc("key", "rosmar", 10, rawJson)
 	assert.Error(t, err)
 
 	// test update using correct cas value
@@ -160,6 +216,7 @@ func TestWriteSubDoc(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Equal(t, CAS(2), cas)
 
+	var fullDoc map[string]any
 	cas, err = coll.Get("key", &fullDoc)
 	assert.NoError(t, err)
 	assert.Equal(t, CAS(2), cas)
@@ -170,7 +227,35 @@ func TestWriteSubDoc(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Equal(t, CAS(3), cas)
 }
-*/
+
+func TestInsertSubDoc(t *testing.T) {
+	coll := initSubDocTest(t)
+
+	rosmarMap := map[string]any{"foo": "lol", "bar": "baz"}
+	expectedDoc := map[string]any{"rosmar": rosmarMap}
+
+	// test incorrect cas value
+	err := coll.SubdocInsert("key", "rosmar.kilroy", 10, "was here")
+	assert.Error(t, err)
+
+	// test update
+	err = coll.SubdocInsert("key", "rosmar.kilroy", CAS(1), "was here")
+	assert.NoError(t, err)
+
+	var fullDoc map[string]any
+	cas, err := coll.Get("key", &fullDoc)
+	assert.NoError(t, err)
+	assert.Equal(t, CAS(2), cas)
+
+	rosmarMap["kilroy"] = "was here"
+	assert.EqualValues(t, expectedDoc, fullDoc)
+
+	// test failed update:
+	err = coll.SubdocInsert("key", "rosmar", cas, "wrong")
+	assert.Error(t, err)
+	err = coll.SubdocInsert("key", "rosmar.foo.xxx.yyy", cas, "wrong")
+	assert.Error(t, err)
+}
 
 func TestWriteCas(t *testing.T) {
 	ensureNoLeakedFeeds(t)

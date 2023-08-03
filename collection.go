@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"strconv"
-	"strings"
 	"sync"
 
 	sgbucket "github.com/couchbase/sg-bucket"
@@ -489,92 +488,6 @@ func (c *Collection) Incr(key string, amt, deflt uint64, exp Exp) (result uint64
 	return
 }
 
-//////// Interface SubdocStore
-
-func (c *Collection) SubdocInsert(key string, subdocKey string, cas CAS, value any) (err error) {
-	traceEnter("SubdocInsert", "%q, %q, %d", key, subdocKey, cas)
-	err = &ErrUnimplemented{reason: "Rosmar does not implement SubdocInsert"}
-	traceExit("SubdocInsert", err, "ok")
-	return
-}
-
-func (c *Collection) GetSubDocRaw(key string, subdocKey string) (value []byte, casOut uint64, err error) {
-	// TODO: Use SQLite JSON syntax to get the property
-	traceEnter("SubdocGetRaw", "%q, %q", key, subdocKey)
-	defer func() { traceExit("SubdocGetRaw", err, "0x%x, %s", casOut, value) }()
-
-	if subdocKeyNesting(subdocKey) {
-		err = &ErrUnimplemented{reason: "Rosmar does not support subdoc nesting"}
-		return
-	}
-
-	var fullDoc map[string]interface{}
-	casOut, err = c.Get(key, &fullDoc)
-	if err != nil {
-		return
-	}
-
-	subdoc, ok := fullDoc[subdocKey]
-	if !ok {
-		err = fmt.Errorf("subdoc key %q not found in doc %q, %w", subdocKey, key, &sgbucket.MissingError{Key: key})
-		return
-	}
-
-	value, err = json.Marshal(subdoc)
-	return value, casOut, err
-}
-
-func (c *Collection) WriteSubDoc(key string, subdocKey string, cas CAS, value []byte) (casOut CAS, err error) {
-	// TODO: Use SQLite JSON syntax to update the property
-	traceEnter("WriteSubDoc", "%q, %q, %d, %s", key, subdocKey, cas, value)
-	defer func() { traceExit("WriteSubDoc", err, "0x%x", casOut) }()
-
-	if subdocKeyNesting(subdocKey) {
-		err = &ErrUnimplemented{reason: "Rosmar does not support subdoc nesting"}
-		return
-	}
-
-	var subDocVal any
-	if len(value) > 0 {
-		if err = json.Unmarshal(value, &subDocVal); err != nil {
-			return
-		}
-	}
-
-	// Get doc (if it exists) to change sub doc value in
-	var fullDoc map[string]any
-	casOut, err = c.Get(key, &fullDoc)
-	if err != nil && !c.IsError(err, sgbucket.KeyNotFoundError) {
-		return 0, err
-	}
-	if cas != 0 && casOut != cas {
-		err = sgbucket.CasMismatchErr{Expected: cas, Actual: casOut}
-		return 0, err
-	}
-
-	// Set new subdoc value
-	if fullDoc == nil {
-		fullDoc = map[string]any{}
-	}
-	if subDocVal != nil {
-		fullDoc[subdocKey] = subDocVal
-	} else {
-		delete(fullDoc, subdocKey)
-	}
-
-	// Write full doc back to collection
-	casOut, err = c.WriteCas(key, 0, 0, casOut, fullDoc, 0)
-	if err != nil {
-		return 0, err
-	}
-	return casOut, nil
-}
-
-// Returns true if the subDocKey would be using nested sub docs
-func subdocKeyNesting(subDocKey string) (nesting bool) {
-	return strings.ContainsAny(subDocKey, ".|]")
-}
-
 //////// Interface TypedErrorStore
 
 func (c *Collection) IsError(err error, errorType sgbucket.DataStoreErrorType) bool {
@@ -683,5 +596,4 @@ var (
 	// Enforce interface conformance:
 	_ sgbucket.DataStore     = &Collection{}
 	_ sgbucket.DataStoreName = &Collection{}
-	_ sgbucket.ViewStore     = &Collection{}
 )
