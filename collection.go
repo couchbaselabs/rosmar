@@ -318,14 +318,13 @@ func (c *Collection) WriteCas(key string, flags int, exp Exp, cas CAS, val any, 
 			return nil, err
 		}
 		if nRows, _ := result.RowsAffected(); nRows == 0 {
-			if exists, err2 := c.exists(txn, key); exists && err2 == nil {
+			// SQLite didn't insert/update anything. Why not?
+			if _, existingCas, err2 := c.getRaw(txn, key); err2 == nil {
 				if opt&sgbucket.AddOnly != 0 {
 					err = sgbucket.ErrKeyExists
 				} else {
-					err = sgbucket.CasMismatchErr{Expected: cas, Actual: 0}
+					err = sgbucket.CasMismatchErr{Expected: cas, Actual: existingCas}
 				}
-			} else if err2 == nil {
-				err = sgbucket.MissingError{Key: key}
 			} else {
 				err = err2
 			}
