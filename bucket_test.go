@@ -23,8 +23,8 @@ import (
 )
 
 func init() {
-	if Logging == LevelNone {
-		Logging = LevelInfo
+	if GetLogLevel() == LevelNone {
+		SetLogLevel(LevelInfo)
 	}
 }
 
@@ -314,7 +314,6 @@ func TestGetPersistentMultiCollectionBucket(t *testing.T) {
 }
 
 func TestExpiration(t *testing.T) {
-	Logging = LevelTrace
 	bucket := makeTestBucket(t)
 	c := bucket.DefaultDataStore()
 

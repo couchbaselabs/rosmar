@@ -353,11 +353,6 @@ func (c *Collection) writeWithXattr(
 		} else if val != nil {
 			e.value = val
 			e.isJSON = true //???
-			if Logging >= LevelTrace {
-				trace("\t\tSet doc %q body = %s", key, val) // dump body; super verbose
-			} else {
-				trace("\t\tSet doc %q body", key)
-			}
 		}
 
 		if xattr.Value != nil {
