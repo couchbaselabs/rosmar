@@ -11,14 +11,14 @@ name: ci
 on:
   push:
     branches:
-      - 'master'
+      - 'main'
       - 'release/*'
       - 'CBG*'
       - 'ci-*'
       - 'feature*'
   pull_request:
     branches:
-      - 'master'
+      - 'main'
       - 'release/*'
 
 jobs:
