@@ -9,8 +9,8 @@
 package rosmar
 
 import (
+	"bytes"
 	"database/sql"
-	"encoding/json"
 	"fmt"
 	"hash/crc32"
 	"runtime"
@@ -20,6 +20,8 @@ import (
 	sgbucket "github.com/couchbase/sg-bucket"
 	sqlite3 "github.com/mattn/go-sqlite3"
 )
+
+//////// ERRORS:
 
 // Error returned from API calls on a closed Bucket.
 var ErrBucketClosed = fmt.Errorf("this Rosmar bucket has been closed")
@@ -91,48 +93,9 @@ func looksLikeJSON(data []byte) bool {
 	return len(data) >= 2 && data[0] == '{' && data[len(data)-1] == '}'
 }
 
-// Encodes an arbitrary value to raw bytes to be stored in a document.
-// If `isJSON` is true, the value will be marshaled to JSON, or used as-is if it's a
-// byte array or pointer to one. Otherwise it must be a byte array.
-func encodeAsRaw(val interface{}, isJSON bool) (data []byte, err error) {
-	if val != nil {
-		if isJSON {
-			// Check for already marshalled JSON
-			switch typedVal := val.(type) {
-			case []byte:
-				data = typedVal
-			case *[]byte:
-				data = *typedVal
-			default:
-				data, err = json.Marshal(val)
-			}
-		} else {
-			if typedVal, ok := val.([]byte); ok {
-				data = typedVal
-			} else {
-				err = fmt.Errorf("raw value must be []byte")
-			}
-		}
-	}
-	return
-}
+//////// ENCODING / DECODING VALUES:
 
-// Unmarshals a document's raw value to a return value.
-// If the return value is a pointer to []byte it will receive the raw value.
-func decodeRaw(raw []byte, rv any) error {
-	if raw == nil || rv == nil {
-		return nil
-	} else if bytesPtr, ok := rv.(*[]byte); ok {
-		*bytesPtr = raw
-		return nil
-	} else {
-		err := json.Unmarshal(raw, rv)
-		if err != nil {
-			logError("Error unmarshaling `%s` to %v : %s", raw, rv, err)
-		}
-		return err
-	}
-}
+//////// CRC32:
 
 // Returns a CRC32c checksum formatted as a hex string.
 func encodedCRC32c(data []byte) string {
@@ -140,6 +103,8 @@ func encodedCRC32c(data []byte) string {
 	checksum := crc32.Checksum(data, table)
 	return fmt.Sprintf("0x%08x", checksum)
 }
+
+//////// PARALLELIZE:
 
 // Feeds the input channel through a number of copies of the function in parallel.
 // This call is asynchronous. Output can be read from the returned channel.
@@ -165,6 +130,8 @@ func parallelize[IN any, OUT any](input <-chan IN, parallelism int, f func(input
 	return output
 }
 
+//////// EXPIRY:
+
 const kMaxDeltaTtl = 60 * 60 * 24 * 30 // Constant used by CBS
 
 // The current time, as an expiry value
@@ -185,6 +152,34 @@ func absoluteExpiry(exp Exp) Exp {
 func expDuration(exp Exp) time.Duration {
 	secs := int64(absoluteExpiry(exp)) - int64(nowAsExpiry())
 	return time.Duration(secs) * time.Second
+}
+
+var maxCallerStackDepth = 50
+
+func readableStackTrace(skip int) string {
+	callers := make([]uintptr, maxCallerStackDepth)
+	length := runtime.Callers(skip, callers[:])
+	callers = callers[:length]
+
+	var result bytes.Buffer
+	frames := callersToFrames(callers)
+	for _, frame := range frames {
+		result.WriteString(fmt.Sprintf("%s:%d (%#x)\n\t%s\n",
+			frame.File, frame.Line, frame.PC, frame.Function))
+	}
+	return result.String()
+}
+
+func callersToFrames(callers []uintptr) []runtime.Frame {
+	frames := make([]runtime.Frame, 0, len(callers))
+	framesPtr := runtime.CallersFrames(callers)
+	for {
+		frame, more := framesPtr.Next()
+		frames = append(frames, frame)
+		if !more {
+			return frames
+		}
+	}
 }
 
 var (
