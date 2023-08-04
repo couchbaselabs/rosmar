@@ -17,6 +17,9 @@ import (
 	"net/url"
 	"os"
 	"path"
+	"path/filepath"
+	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -97,6 +100,10 @@ func OpenBucket(urlStr string, mode OpenMode) (bucket *Bucket, err error) {
 		bucketName = "memory"
 	} else {
 		dir := u.Path
+		if runtime.GOOS == "windows" {
+			dir = strings.TrimPrefix(dir, "/")
+		}
+
 		if mode != ReOpenExisting {
 			if _, err = os.Stat(dir); err == nil {
 				if mode == CreateNew {
@@ -214,13 +221,18 @@ func DeleteBucketAt(urlStr string) (err error) {
 	}
 
 	// For safety's sake, don't delete just any directory. Ensure it contains a db file:
-	err = os.Remove(u.JoinPath(kDBFilename).Path)
+	dir := u.Path
+	if runtime.GOOS == "windows" {
+		dir = strings.TrimPrefix(dir, "/")
+	}
+
+	err = os.Remove(filepath.Join(dir, kDBFilename))
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil
 	} else if err != nil {
 		return err
 	} else {
-		return os.Remove(u.Path)
+		return os.Remove(dir)
 	}
 }
 
@@ -248,17 +260,18 @@ func encodeDBURL(urlStr string) (*url.URL, error) {
 }
 
 func parseDBFileURL(urlStr string) (*url.URL, error) {
-	if u, err := url.Parse(urlStr); err != nil {
+	u, err := url.Parse(urlStr)
+	if err != nil {
 		return nil, err
 	} else if u.Scheme != "" && u.Scheme != "file" && u.Scheme != URLScheme {
-		return nil, fmt.Errorf("rosmar requires rosmar: or file: URLs")
+		return nil, fmt.Errorf("rosmar requires rosmar: or file: URLs, not %+v", u)
 	} else if u.User != nil || u.Host != "" || u.Fragment != "" {
-		return nil, fmt.Errorf("rosmar URL may not have user, host or fragment")
+		return nil, fmt.Errorf("rosmar URL may not have user, host or fragment %+v", u)
 	} else if u.RawQuery != "" && u.RawQuery != "mode=memory" {
-		return nil, fmt.Errorf("unsupported query in rosmar URL")
-	} else {
-		return u, err
+		return nil, fmt.Errorf("unsupported query in rosmar URL: %+v", u)
 	}
+
+	return u, err
 }
 
 func (bucket *Bucket) initializeSchema(bucketName string) (err error) {

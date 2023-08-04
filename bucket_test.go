@@ -14,6 +14,8 @@ import (
 	"io/fs"
 	"log"
 	"os"
+	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -32,11 +34,19 @@ const testBucketDirName = "RosmarTest"
 
 func testBucketPath(t *testing.T) string {
 	dir := fmt.Sprintf("%s%c%s", t.TempDir(), os.PathSeparator, testBucketDirName)
-	return dir
+	return strings.ReplaceAll(dir, `\`, `/`)
+}
+
+func uriFromPath(path string) string {
+	uri := "rosmar://"
+	if runtime.GOOS == "windows" {
+		uri += "/"
+	}
+	return uri + path
 }
 
 func makeTestBucket(t *testing.T) *Bucket {
-	bucket, err := OpenBucket(testBucketPath(t), CreateNew)
+	bucket, err := OpenBucket(uriFromPath(testBucketPath(t)), CreateNew)
 	require.NoError(t, err)
 	t.Cleanup(bucket.Close)
 
@@ -70,10 +80,14 @@ func TestNewBucket(t *testing.T) {
 }
 
 func TestGetMissingBucket(t *testing.T) {
-	path := testBucketPath(t)
+	path := uriFromPath(testBucketPath(t))
 	require.NoError(t, DeleteBucketAt(path))
 	bucket, err := OpenBucket(path, ReOpenExisting)
-	assert.ErrorContains(t, err, "unable to open database file: no such file or directory")
+	if runtime.GOOS == "windows" {
+		assert.ErrorContains(t, err, "unable to open database file: The system cannot find the path specified")
+	} else {
+		assert.ErrorContains(t, err, "unable to open database file: no such file or directory")
+	}
 	assert.Nil(t, bucket)
 }
 
