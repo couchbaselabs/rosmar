@@ -36,13 +36,13 @@ func testBucketPath(t *testing.T) string {
 }
 
 func makeTestBucket(t *testing.T) *Bucket {
+	LoggingCallback = func(level LogLevel, fmt string, args ...any) {
+		t.Logf(logLevelNamesPrint[level]+fmt, args...)
+	}
 	bucket, err := OpenBucket(testBucketPath(t), CreateNew)
 	require.NoError(t, err)
 	t.Cleanup(bucket.Close)
 
-	LoggingCallback = func(level LogLevel, fmt string, args ...any) {
-		t.Logf(logLevelNamesPrint[level]+fmt, args...)
-	}
 	return bucket
 }
 
@@ -318,9 +318,8 @@ func TestExpiration(t *testing.T) {
 	c := bucket.DefaultDataStore()
 
 	exp, err := bucket.NextExpiration()
-	if assert.NoError(t, err) {
-		assert.Equal(t, Exp(0), exp)
-	}
+	require.NoError(t, err)
+	require.Equal(t, Exp(0), exp)
 
 	exp2 := Exp(time.Now().Add(-5 * time.Second).Unix())
 	exp4 := Exp(time.Now().Add(2 * time.Second).Unix())
@@ -332,7 +331,8 @@ func TestExpiration(t *testing.T) {
 
 	exp, err = bucket.NextExpiration()
 	require.NoError(t, err)
-	assert.Equal(t, exp2, exp)
+	// Usually this will return exp2, but if this is slow enough that the expiration goroutine runs to expire document k2, it can return exp4.
+	require.Contains(t, []Exp{exp2, exp4}, exp)
 
 	log.Printf("... waiting 1 sec ...")
 	time.Sleep(1 * time.Second)
