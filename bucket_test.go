@@ -15,7 +15,6 @@ import (
 	"log"
 	"os"
 	"runtime"
-	"strings"
 	"testing"
 	"time"
 
@@ -33,20 +32,11 @@ func init() {
 const testBucketDirName = "RosmarTest"
 
 func testBucketPath(t *testing.T) string {
-	dir := fmt.Sprintf("%s%c%s", t.TempDir(), os.PathSeparator, testBucketDirName)
-	return strings.ReplaceAll(dir, `\`, `/`)
-}
-
-func uriFromPath(path string) string {
-	uri := "rosmar://"
-	if runtime.GOOS == "windows" {
-		uri += "/"
-	}
-	return uri + path
+	return fmt.Sprintf("%s%c%s", t.TempDir(), os.PathSeparator, testBucketDirName)
 }
 
 func makeTestBucket(t *testing.T) *Bucket {
-	bucket, err := OpenBucket(uriFromPath(testBucketPath(t)), CreateNew)
+	bucket, err := OpenBucketFromPath(testBucketPath(t), CreateNew)
 	require.NoError(t, err)
 	t.Cleanup(bucket.Close)
 
@@ -377,4 +367,73 @@ func TestExpiration(t *testing.T) {
 	n, err := bucket.PurgeTombstones()
 	assert.NoError(t, err)
 	assert.Equal(t, int64(2), n)
+}
+
+func TestUriFromPathWindows(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("This test is only for windows")
+	}
+	testCases := []struct {
+		name   string
+		input  string
+		output string
+	}{
+		{
+			name:   "absolute path, backslash",
+			input:  `c:\foo\bar`,
+			output: `rosmar:///c:/foo/bar`,
+		},
+		{
+			name:   "absolute path, forward slash",
+			input:  `c:/foo/bar`,
+			output: `rosmar:///c:/foo/bar`,
+		},
+		{
+			name:   "relative path forward slash",
+			input:  "foo/bar",
+			output: "rosmar://foo/bar",
+		},
+		{
+			name:   "relative path black slash",
+			input:  `foo/bar`,
+			output: "rosmar://foo/bar",
+		},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			require.Equal(t, testCase.output, uriFromPath(testCase.input))
+		})
+	}
+}
+
+func TestUriFromPathNonWindows(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("This test is only for non-windows")
+	}
+	testCases := []struct {
+		name   string
+		input  string
+		output string
+	}{
+		{
+			name:   "absolute path",
+			input:  "/foo/bar",
+			output: "rosmar:///foo/bar",
+		},
+		{
+			name:   "relative path",
+			input:  "foo/bar",
+			output: "rosmar://foo/bar",
+		},
+		{
+			name:   "has blackslash",
+			input:  `foo\bar`,
+			output: `rosmar://foo\bar`,
+		},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			require.Equal(t, testCase.output, uriFromPath(testCase.input))
+		})
+	}
 }

@@ -76,6 +76,11 @@ const (
 	ReOpenExisting        // Open an existing bucket, or fail if none exists.
 )
 
+// OpenBucketFromPath opens a bucket from a filesystem path. See OpenBucket for details.
+func OpenBucketFromPath(path string, mode OpenMode) (*Bucket, error) {
+	return OpenBucket(uriFromPath(path), mode)
+}
+
 // Creates a new bucket, or opens an existing one.
 //
 // The URL should have the scheme 'rosmar' or 'file' and a filesystem path.
@@ -346,4 +351,17 @@ func (bucket *Bucket) inTransaction(fn func(txn *sql.Tx) error) error {
 		break
 	}
 	return remapError(err)
+}
+
+// uriFromPath converts a file path to a rosmar URI. On windows, these need to have forward slashes and drive letters will have an extra /, such as romsar://c:/foo/bar.
+func uriFromPath(path string) string {
+	uri := "rosmar://"
+	if runtime.GOOS != "windows" {
+		return uri + path
+	}
+	path = filepath.ToSlash(path)
+	if !filepath.IsAbs(path) {
+		return uri + path
+	}
+	return uri + "/" + path
 }
