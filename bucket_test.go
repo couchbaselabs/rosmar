@@ -14,6 +14,7 @@ import (
 	"io/fs"
 	"log"
 	"os"
+	"runtime"
 	"testing"
 	"time"
 
@@ -31,15 +32,14 @@ func init() {
 const testBucketDirName = "RosmarTest"
 
 func testBucketPath(t *testing.T) string {
-	dir := fmt.Sprintf("%s%c%s", t.TempDir(), os.PathSeparator, testBucketDirName)
-	return dir
+	return fmt.Sprintf("%s%c%s", t.TempDir(), os.PathSeparator, testBucketDirName)
 }
 
 func makeTestBucket(t *testing.T) *Bucket {
 	LoggingCallback = func(level LogLevel, fmt string, args ...any) {
 		t.Logf(logLevelNamesPrint[level]+fmt, args...)
 	}
-	bucket, err := OpenBucket(testBucketPath(t), CreateNew)
+	bucket, err := OpenBucketFromPath(testBucketPath(t), CreateNew)
 	require.NoError(t, err)
 	t.Cleanup(bucket.Close)
 
@@ -70,10 +70,14 @@ func TestNewBucket(t *testing.T) {
 }
 
 func TestGetMissingBucket(t *testing.T) {
-	path := testBucketPath(t)
+	path := uriFromPath(testBucketPath(t))
 	require.NoError(t, DeleteBucketAt(path))
 	bucket, err := OpenBucket(path, ReOpenExisting)
-	assert.ErrorContains(t, err, "unable to open database file: no such file or directory")
+	if runtime.GOOS == "windows" {
+		assert.ErrorContains(t, err, "unable to open database file: The system cannot find the path specified")
+	} else {
+		assert.ErrorContains(t, err, "unable to open database file: no such file or directory")
+	}
 	assert.Nil(t, bucket)
 }
 
@@ -363,4 +367,73 @@ func TestExpiration(t *testing.T) {
 	n, err := bucket.PurgeTombstones()
 	assert.NoError(t, err)
 	assert.Equal(t, int64(2), n)
+}
+
+func TestUriFromPathWindows(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("This test is only for windows")
+	}
+	testCases := []struct {
+		name   string
+		input  string
+		output string
+	}{
+		{
+			name:   "absolute path, backslash",
+			input:  `c:\foo\bar`,
+			output: `rosmar:///c:/foo/bar`,
+		},
+		{
+			name:   "absolute path, forward slash",
+			input:  `c:/foo/bar`,
+			output: `rosmar:///c:/foo/bar`,
+		},
+		{
+			name:   "relative path forward slash",
+			input:  "foo/bar",
+			output: "rosmar://foo/bar",
+		},
+		{
+			name:   "relative path black slash",
+			input:  `foo/bar`,
+			output: "rosmar://foo/bar",
+		},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			require.Equal(t, testCase.output, uriFromPath(testCase.input))
+		})
+	}
+}
+
+func TestUriFromPathNonWindows(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("This test is only for non-windows")
+	}
+	testCases := []struct {
+		name   string
+		input  string
+		output string
+	}{
+		{
+			name:   "absolute path",
+			input:  "/foo/bar",
+			output: "rosmar:///foo/bar",
+		},
+		{
+			name:   "relative path",
+			input:  "foo/bar",
+			output: "rosmar://foo/bar",
+		},
+		{
+			name:   "has blackslash",
+			input:  `foo\bar`,
+			output: `rosmar://foo\bar`,
+		},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			require.Equal(t, testCase.output, uriFromPath(testCase.input))
+		})
+	}
 }
