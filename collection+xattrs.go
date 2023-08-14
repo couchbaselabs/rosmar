@@ -20,6 +20,15 @@ import (
 
 type semiParsedXattrs = map[string]json.RawMessage
 
+// PersistedHybridLogicalVector is the persisted representation of the Hybrid Logical Vector, needed to update _sync xattrs
+type PersistedHybridLogicalVector struct {
+	CurrentVersionCAS string            `json:"cvCas,omitempty"`
+	SourceID          string            `json:"src,omitempty"`
+	Version           string            `json:"vrs,omitempty"`
+	MergeVersions     map[string]string `json:"mv,omitempty"`
+	PreviousVersions  map[string]string `json:"pv,omitempty"`
+}
+
 //////// SGBUCKET XATTR STORE INTERFACE
 
 // Get a single xattr value.
@@ -619,14 +628,19 @@ func removeUserXattrs(xattrs semiParsedXattrs) {
 }
 
 // Sets JSON properties "cas" to the given `cas`, and "value_crc" to CRC checksum of `docValue`.
-func (e *event) expandSyncXattrMacros(xattr any) {
+func (e *event) expandSyncXattrMacros(xattr any, bucketUUID string) {
+	hlv := PersistedHybridLogicalVector{}
 	if xattrMap, ok := xattr.(map[string]any); ok {
 		// For some reason Server encodes `cas` as 8 hex bytes in little-endian order...
 		casBytes := make([]byte, 8)
 		binary.LittleEndian.PutUint64(casBytes, e.cas)
-		xattrMap["cas"] = fmt.Sprintf("0x%x", casBytes)
+		casServerFormat := fmt.Sprintf("0x%x", casBytes)
+		xattrMap["cas"] = casServerFormat
+		hlv.SourceID = bucketUUID
+		hlv.Version = casServerFormat
 
 		xattrMap["value_crc32c"] = encodedCRC32c(e.value)
+		xattrMap["_vv"] = hlv
 	}
 }
 

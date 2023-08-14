@@ -26,7 +26,7 @@ import (
 
 	sgbucket "github.com/couchbase/sg-bucket"
 	"github.com/google/uuid"
-	sqlite3 "github.com/mattn/go-sqlite3"
+	"github.com/mattn/go-sqlite3"
 )
 
 // Rosmar implementation of a collection-aware bucket.
@@ -41,6 +41,7 @@ type Bucket struct {
 	nextExp     uint32         // Timestamp when expTimer will run (0 if never)
 	serial      uint32         // Serial number for logging
 	inMemory    bool           // True if it's an in-memory database
+	uuid        string         // unique identifier for bucket
 }
 
 type collectionsMap = map[sgbucket.DataStoreNameImpl]*Collection
@@ -281,6 +282,7 @@ func parseDBFileURL(urlStr string) (*url.URL, error) {
 
 func (bucket *Bucket) initializeSchema(bucketName string) (err error) {
 	uuid := uuid.New().String()
+	bucket.uuid = uuid
 	_, err = bucket.db().Exec(kSchema,
 		sql.Named("NAME", bucketName),
 		sql.Named("UUID", uuid),
