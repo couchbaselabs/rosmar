@@ -108,7 +108,12 @@ func OpenBucket(urlStr string, mode OpenMode) (bucket *Bucket, err error) {
 		if runtime.GOOS == "windows" {
 			dir = strings.TrimPrefix(dir, "/")
 		}
-
+		if dir == "" {
+			dir, err = os.Getwd()
+			if err != nil {
+				return nil, err
+			}
+		}
 		if mode != ReOpenExisting {
 			if _, err = os.Stat(dir); err == nil {
 				if mode == CreateNew {
