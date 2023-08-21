@@ -530,7 +530,7 @@ func (c *Collection) writeWithXattr(
 			}
 			if xattrKey == "_sync" {
 				// The "_sync" xattr has two properties that get macro-expanded:
-				e.expandSyncXattrMacros(parsedXattr)
+				e.expandSyncXattrMacros(parsedXattrc, c.bucket.uuid, opts)
 				xattrVal.setParsed(parsedXattr)
 			}
 			var rawXattr []byte
@@ -627,21 +627,69 @@ func removeUserXattrs(xattrs semiParsedXattrs) {
 	}
 }
 
+// macroExpand takes the macro and assigned 'value' the correct value based on what the macro is provided (this is gocb macro format)
+func (e *event) macroExpand(value string, casServerFormat string, bucketUUID string) string {
+	if value == "\"${Mutation.CAS}\"" {
+		value = casServerFormat
+	} else if value == "\"${Mutation.value_crc32c}\"" {
+		value = encodedCRC32c(e.value)
+	} else {
+		// if the value isn't to be macro expanded to CAS or CRC hash then it is a source ID
+		value = bucketUUID
+	}
+	return value
+}
+
 // Sets JSON properties "cas" to the given `cas`, and "value_crc" to CRC checksum of `docValue`.
-func (e *event) expandSyncXattrMacros(xattr any, bucketUUID string) {
-	hlv := PersistedHybridLogicalVector{}
+func (e *event) expandSyncXattrMacros(xattr any, bucketUUID string, mutateSpec *sgbucket.MutateInOptions) error {
+	var err error
 	if xattrMap, ok := xattr.(map[string]any); ok {
-		// For some reason Server encodes `cas` as 8 hex bytes in little-endian order...
+		// create server format of cas value
 		casBytes := make([]byte, 8)
 		binary.LittleEndian.PutUint64(casBytes, e.cas)
 		casServerFormat := fmt.Sprintf("0x%x", casBytes)
-		xattrMap["cas"] = casServerFormat
-		hlv.SourceID = bucketUUID
-		hlv.Version = casServerFormat
 
-		xattrMap["value_crc32c"] = encodedCRC32c(e.value)
-		xattrMap["_vv"] = hlv
+		// loop through provided mutate in spec and macro expand and insert into xattr
+		for _, v := range mutateSpec.Spec {
+			str := fmt.Sprint(v.Value)
+			v.Value = e.macroExpand(str, casServerFormat, bucketUUID)
+			err = addToXattr(xattrMap, v.Path, v.Value)
+			if err != nil {
+				fmt.Errorf("error during macro expansion process: %v", err)
+			}
+		}
 	}
+	return nil
+}
+
+// addToXattr will take the xattr provdied and a path, evaluate that path exists in the xattr provided and if so will add
+// the value to the path specified
+func addToXattr(xattr any, subdocKey string, value interface{}) error {
+	path, err := parseSubdocPath(subdocKey)
+	if err != nil {
+		return err
+	}
+	// we provide the full xattr path from sync gateway, so here we need to cut the leading value from the path provided to rosmar
+	// For example we provide full path `_sync.cas` but here we are only working with `_sync` xattrs thus we need to remove `_sync` from the path
+	path = path[1:]
+	// eval path exists
+	subdoc, err := evalSubdocPath(xattr, path[0:len(path)-1])
+	if err != nil {
+		return err
+	}
+
+	parent, ok := subdoc.(map[string]any)
+	if !ok {
+		return sgbucket.ErrPathMismatch
+	}
+	// add value to map:
+	lastPath := path[len(path)-1]
+	if value != nil {
+		parent[lastPath] = value
+	} else {
+		delete(parent, lastPath)
+	}
+	return nil
 }
 
 var (
