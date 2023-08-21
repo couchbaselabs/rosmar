@@ -20,15 +20,6 @@ import (
 
 type semiParsedXattrs = map[string]json.RawMessage
 
-// PersistedHybridLogicalVector is the persisted representation of the Hybrid Logical Vector, needed to update _sync xattrs
-type PersistedHybridLogicalVector struct {
-	CurrentVersionCAS string            `json:"cvCas,omitempty"`
-	SourceID          string            `json:"src,omitempty"`
-	Version           string            `json:"vrs,omitempty"`
-	MergeVersions     map[string]string `json:"mv,omitempty"`
-	PreviousVersions  map[string]string `json:"pv,omitempty"`
-}
-
 //////// SGBUCKET XATTR STORE INTERFACE
 
 // Get a single xattr value.
@@ -643,6 +634,10 @@ func (e *event) macroExpand(value string, casServerFormat string, bucketUUID str
 // Sets JSON properties "cas" to the given `cas`, and "value_crc" to CRC checksum of `docValue`.
 func (e *event) expandSyncXattrMacros(xattr any, bucketUUID string, mutateSpec *sgbucket.MutateInOptions) error {
 	var err error
+	if mutateSpec == nil {
+		return fmt.Errorf("nil mutate spec provided to macro expansion")
+	}
+
 	if xattrMap, ok := xattr.(map[string]any); ok {
 		// create server format of cas value
 		casBytes := make([]byte, 8)
