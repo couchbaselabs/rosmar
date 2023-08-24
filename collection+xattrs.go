@@ -150,7 +150,7 @@ func (c *Collection) WriteWithXattr(
 	opts *sgbucket.MutateInOptions,
 	value []byte,
 	xv []byte,
-	isDelete bool, // ignored ... no idea what it does
+	isDelete bool, // ignored; unnecessary in Rosmar though it has meaning in CBS
 	deleteBody bool,
 ) (casOut CAS, err error) {
 	traceEnter("WriteWithXattr", "%q, %q, cas=%d, exp=%d, isDelete=%v, deleteBody=%v ...", key, xattrKey, cas, exp, isDelete, deleteBody)
