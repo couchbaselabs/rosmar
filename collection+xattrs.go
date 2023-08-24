@@ -265,7 +265,7 @@ func (c *Collection) InsertXattr(
 	return c.writeWithXattr(key, nil, xattrKey, payload{parsed: xv}, &cas, &exp, xInsertDoc+xInsertXattr)
 }
 
-// Creates a document, with an xattr, only if it doesn't already exist. (?)
+// Creates a document, with an xattr, only if it doesn't already exist.
 func (c *Collection) InsertBodyAndXattr(
 	key string,
 	xattrKey string,
@@ -278,7 +278,7 @@ func (c *Collection) InsertBodyAndXattr(
 	return c.writeWithXattr(key, &payload{parsed: v}, xattrKey, payload{parsed: xv}, nil, &exp, xInsertDoc)
 }
 
-// Updates a document's xattr. (?)
+// Updates a document's xattr.
 func (c *Collection) UpdateXattr(
 	key string,
 	xattrKey string,
@@ -291,7 +291,7 @@ func (c *Collection) UpdateXattr(
 	return c.writeWithXattr(key, nil, xattrKey, payload{parsed: xv}, &cas, &exp, xNoOpts)
 }
 
-// Updates a document's value and an xattr. (?)
+// Updates a document's value and an xattr.
 func (c *Collection) UpdateBodyAndXattr(
 	key string,
 	xattrKey string,
@@ -311,7 +311,7 @@ func (c *Collection) UpdateBodyAndXattr(
 	return c.writeWithXattr(key, vp, xattrKey, payload{parsed: xv}, &cas, expP, xNoOpts)
 }
 
-// Updates an xattr and deletes the body (making the doc a tombstone.) (?)
+// Updates an xattr and deletes the body (making the doc a tombstone.)
 func (c *Collection) UpdateXattrDeleteBody(
 	key string,
 	xattrKey string,
@@ -336,6 +336,8 @@ func (c *Collection) DeleteBody(
 	return c.writeWithXattr(key, &payload{}, xattrKey, payload{}, &cas, &exp, xPreserveXattr)
 }
 
+// Deletes the document's body and an xattr.
+// Unlike DeleteWithXattr, this fails if the doc is a tombstone (no body).
 func (c *Collection) DeleteBodyAndXattr(key string, xattrKey string) (err error) {
 	traceEnter("DeleteBodyAndXattr", "%q, %q", key, xattrKey)
 	defer func() { traceExit("DeleteBodyAndXattr", err, "ok") }()
@@ -499,6 +501,9 @@ func (c *Collection) writeWithXattr(
 
 		if (opts & xPreserveXattr) != 0 {
 			// The xPreserveXattr flag means to keep the xattr's value (but do macro expansion.)
+			if opts&xInsertXattr != 0 {
+				return nil, fmt.Errorf("illegal options to rosmar.Collection.writeWithXattr")
+			}
 			existingVal, ok := xattrs[xattrKey]
 			if !ok {
 				existingVal = json.RawMessage(`{}`)
