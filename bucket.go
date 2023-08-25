@@ -343,7 +343,7 @@ func (bucket *Bucket) inTransaction(fn func(txn *sql.Tx) error) error {
 			if sqliteErrCode(err) == sqlite3.ErrBusy || sqliteErrCode(err) == sqlite3.ErrLocked {
 				continue // retry
 			} else {
-				logError("Transaction aborted with error %T %v", err, err)
+				debug("Transaction aborted with error %T %v", err, err)
 			}
 		} else if attempt > 0 {
 			warn("Transaction: COMMIT successful on attempt #%d", attempt+1)
