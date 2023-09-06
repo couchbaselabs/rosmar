@@ -299,6 +299,9 @@ func (bucket *Bucket) initializeSchema(bucketName string) (err error) {
 // If the bucket has been closed, it returns a special `closedDB` value that will return
 // ErrBucketClosed from any call.
 func (bucket *Bucket) db() queryable {
+	bucket.mutex.Lock()
+	defer bucket.mutex.Unlock()
+
 	if db := bucket._db; db != nil {
 		return db
 	} else {
