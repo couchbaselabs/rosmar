@@ -36,7 +36,7 @@ type Bucket struct {
 	name        string         // Bucket name
 	collections collectionsMap // Collections, indexed by DataStoreName
 	mutex       sync.Mutex     // mutex for synchronized access to Bucket
-	_db         *sql.DB        // SQLite database handle (do not access; call db() instead)
+	sqliteDB    *sql.DB        // SQLite database handle (do not access; call db() instead)
 	expTimer    *time.Timer    // Schedules expiration of docs
 	nextExp     uint32         // Timestamp when expTimer will run (0 if never)
 	serial      uint32         // Serial number for logging
@@ -161,7 +161,7 @@ func OpenBucket(urlStr string, mode OpenMode) (bucket *Bucket, err error) {
 
 	bucket = &Bucket{
 		url:         urlStr,
-		_db:         db,
+		sqliteDB:    db,
 		collections: make(map[sgbucket.DataStoreNameImpl]*Collection),
 		inMemory:    inMemory,
 		serial:      serial,
@@ -301,8 +301,12 @@ func (bucket *Bucket) initializeSchema(bucketName string) (err error) {
 func (bucket *Bucket) db() queryable {
 	bucket.mutex.Lock()
 	defer bucket.mutex.Unlock()
+	return bucket._db()
+}
 
-	if db := bucket._db; db != nil {
+// Returns the database handle as a `queryable` interface value. This is the same as `db()` without locking. This is not safe to call without bucket.mutex being locked the caller.
+func (bucket *Bucket) _db() queryable {
+	if db := bucket.sqliteDB; db != nil {
 		return db
 	} else {
 		return closedDB{}
@@ -318,7 +322,7 @@ func (bucket *Bucket) inTransaction(fn func(txn *sql.Tx) error) error {
 	bucket.mutex.Lock()
 	defer bucket.mutex.Unlock()
 
-	if bucket._db == nil {
+	if bucket.sqliteDB == nil {
 		return ErrBucketClosed
 	}
 
@@ -330,7 +334,7 @@ func (bucket *Bucket) inTransaction(fn func(txn *sql.Tx) error) error {
 		}
 
 		var txn *sql.Tx
-		txn, err = bucket._db.Begin()
+		txn, err = bucket.sqliteDB.Begin()
 		if err != nil {
 			break
 		}

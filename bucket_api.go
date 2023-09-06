@@ -62,9 +62,9 @@ func (bucket *Bucket) Close() {
 	for _, c := range bucket.collections {
 		c.close()
 	}
-	if bucket._db != nil {
-		bucket._db.Close()
-		bucket._db = nil
+	if bucket.sqliteDB != nil {
+		bucket.sqliteDB.Close()
+		bucket.sqliteDB = nil
 		bucket.collections = nil
 	}
 }
@@ -194,8 +194,8 @@ func (bucket *Bucket) ListDataStores() (result []sgbucket.DataStoreName, err err
 
 //////// COLLECTION INTERNALS:
 
-func (bucket *Bucket) getCollectionID(scope, collection string) (id CollectionID, err error) {
-	row := bucket.db().QueryRow(`SELECT id FROM collections WHERE scope=?1 AND name=?2`, scope, collection)
+func (bucket *Bucket) _getCollectionID(scope, collection string) (id CollectionID, err error) {
+	row := bucket._db().QueryRow(`SELECT id FROM collections WHERE scope=?1 AND name=?2`, scope, collection)
 	err = scan(row, &id)
 	return
 }
@@ -209,7 +209,7 @@ func (bucket *Bucket) createCollection(name sgbucket.DataStoreNameImpl) (*Collec
 
 // caller must hold bucket mutex
 func (bucket *Bucket) _createCollection(name sgbucket.DataStoreNameImpl) (*Collection, error) {
-	result, err := bucket.db().Exec(`INSERT INTO collections (scope, name) VALUES (?, ?)`, name.Scope, name.Collection)
+	result, err := bucket._db().Exec(`INSERT INTO collections (scope, name) VALUES (?, ?)`, name.Scope, name.Collection)
 	if err != nil {
 		return nil, err
 	}
@@ -238,7 +238,7 @@ func (bucket *Bucket) getOrCreateCollection(name sgbucket.DataStoreNameImpl, orC
 		return collection, nil
 	}
 
-	id, err := bucket.getCollectionID(name.Scope, name.Collection)
+	id, err := bucket._getCollectionID(name.Scope, name.Collection)
 	if err == nil {
 		return bucket._initCollection(name, id), nil
 	} else if err == sql.ErrNoRows {
@@ -299,7 +299,7 @@ func (bucket *Bucket) dropCollection(name sgbucket.DataStoreNameImpl) error {
 		delete(bucket.collections, name)
 	}
 
-	_, err := bucket.db().Exec(`DELETE FROM collections WHERE scope=? AND name=?`, name.ScopeName(), name.CollectionName())
+	_, err := bucket._db().Exec(`DELETE FROM collections WHERE scope=? AND name=?`, name.ScopeName(), name.CollectionName())
 	if err != nil {
 		return err
 	}
