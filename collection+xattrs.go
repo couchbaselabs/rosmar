@@ -633,5 +633,4 @@ func (e *event) expandSyncXattrMacros(xattr any) {
 var (
 	// Enforce interface conformance:
 	_ sgbucket.UserXattrStore = &Collection{}
-	_ sgbucket.XattrStore2    = &Collection{}
 )
