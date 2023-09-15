@@ -11,6 +11,7 @@ package rosmar
 import (
 	"testing"
 
+	sgbucket "github.com/couchbase/sg-bucket"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -31,4 +32,46 @@ func TestSetXattr(t *testing.T) {
 	assert.Equal(t, cas, gotCas)
 	assert.Equal(t, "value", val)
 	assert.Equal(t, map[string]any{"truth": "out_there"}, xval)
+}
+
+func TestMacroExpansion(t *testing.T) {
+	ensureNoLeakedFeeds(t)
+	coll := makeTestBucket(t).DefaultDataStore()
+
+	// Successful case - sets cas and crc32c in the _sync xattr
+	opts := &sgbucket.MutateInOptions{}
+	opts.MacroExpansion = []sgbucket.MacroExpansionSpec{
+		{Path: "_sync.testcas", Type: sgbucket.MacroCas},
+		{Path: "_sync.testcrc32c", Type: sgbucket.MacroCrc32c},
+	}
+	bodyBytes := []byte(`{"a":123}`)
+	xattrBytes := []byte(`{"x":456}`)
+
+	casOut, err := coll.WriteWithXattr("key", "_sync", 0, 0, opts, bodyBytes, xattrBytes, false, false)
+	require.NoError(t, err)
+
+	var val, xval map[string]any
+	getCas, err := coll.GetWithXattr("key", "_sync", "", &val, &xval, nil)
+	require.NoError(t, err)
+	require.Equal(t, getCas, casOut)
+
+	casVal, ok := xval["testcas"]
+	require.True(t, ok)
+	require.Equal(t, casAsString(casOut), casVal)
+
+	_, ok = xval["testcrc32c"]
+	require.True(t, ok)
+
+	// Unsuccessful - target unknown xattr
+	opts.MacroExpansion = []sgbucket.MacroExpansionSpec{
+		{Path: "_unknown.testcas", Type: sgbucket.MacroCas},
+	}
+	_, err = coll.WriteWithXattr("xattrMismatch", "_sync", 0, 0, opts, bodyBytes, xattrBytes, false, false)
+	require.Error(t, err)
+
+	opts.MacroExpansion = []sgbucket.MacroExpansionSpec{
+		{Path: "_sync.unknownPath.testcas", Type: sgbucket.MacroCas},
+	}
+	_, err = coll.WriteWithXattr("pathError", "_sync", 0, 0, opts, bodyBytes, xattrBytes, false, false)
+	require.Error(t, err)
 }

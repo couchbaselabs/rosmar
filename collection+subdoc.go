@@ -146,6 +146,30 @@ func evalSubdocPath(subdoc any, path []string) (any, error) {
 	return subdoc, nil
 }
 
+// Upserts the value at the specified JSON path in the source.
+// Returns ErrPathMismatch if non-leaf path entries do not exist.
+func upsertSubdocValue(source any, path []string, value interface{}) error {
+
+	// eval path exists
+	subdoc, err := evalSubdocPath(source, path[0:len(path)-1])
+	if err != nil {
+		return err
+	}
+
+	parent, ok := subdoc.(map[string]any)
+	if !ok {
+		return sgbucket.ErrPathMismatch
+	}
+	// add value to map:
+	lastPath := path[len(path)-1]
+	if value != nil {
+		parent[lastPath] = value
+	} else {
+		delete(parent, lastPath)
+	}
+	return nil
+}
+
 var (
 	// Enforce interface conformance:
 	_ sgbucket.SubdocStore = &Collection{}
