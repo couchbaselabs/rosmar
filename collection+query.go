@@ -10,6 +10,7 @@ package rosmar
 
 import (
 	"bytes"
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -203,7 +204,7 @@ func (iter *queryIterator) NextBytes() []byte {
 }
 
 // unmarshals the query row into the pointed-to struct.
-func (iter *queryIterator) Next(valuePtr any) bool {
+func (iter *queryIterator) Next(_ context.Context, valuePtr any) bool {
 	bytes := iter.NextBytes()
 	if bytes == nil {
 		return false
@@ -215,8 +216,8 @@ func (iter *queryIterator) Next(valuePtr any) bool {
 	return true
 }
 
-func (iter *queryIterator) One(valuePtr any) error {
-	if !iter.Next(valuePtr) {
+func (iter *queryIterator) One(ctx context.Context, valuePtr any) error {
+	if !iter.Next(ctx, valuePtr) {
 		iter.err = sgbucket.ErrNoRows
 	}
 	return iter.Close()
@@ -263,7 +264,7 @@ func (iter *preRecordedQueryIterator) NextBytes() []byte {
 	return result
 }
 
-func (iter *preRecordedQueryIterator) Next(valuePtr any) bool {
+func (iter *preRecordedQueryIterator) Next(_ context.Context, valuePtr any) bool {
 	bytes := iter.NextBytes()
 	if bytes == nil {
 		return false
@@ -275,8 +276,8 @@ func (iter *preRecordedQueryIterator) Next(valuePtr any) bool {
 	return true
 }
 
-func (iter *preRecordedQueryIterator) One(valuePtr any) error {
-	if !iter.Next(valuePtr) {
+func (iter *preRecordedQueryIterator) One(ctx context.Context, valuePtr any) error {
+	if !iter.Next(ctx, valuePtr) {
 		iter.err = sgbucket.ErrNoRows
 	}
 	return iter.Close()

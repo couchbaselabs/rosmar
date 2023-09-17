@@ -203,16 +203,17 @@ func initSubDocTest(t *testing.T) sgbucket.DataStore {
 }
 
 func TestWriteSubDoc(t *testing.T) {
+	ctx := testCtx(t)
 	coll := initSubDocTest(t)
 
 	// update json
 	rawJson := []byte(`"was here"`)
 	// test update using incorrect cas value
-	cas, err := coll.WriteSubDoc("key", "rosmar", 10, rawJson)
+	cas, err := coll.WriteSubDoc(ctx, "key", "rosmar", 10, rawJson)
 	assert.Error(t, err)
 
 	// test update using correct cas value
-	cas, err = coll.WriteSubDoc("key", "rosmar", cas, rawJson)
+	cas, err = coll.WriteSubDoc(ctx, "key", "rosmar", cas, rawJson)
 	assert.NoError(t, err)
 	assert.Equal(t, CAS(2), cas)
 
@@ -223,23 +224,24 @@ func TestWriteSubDoc(t *testing.T) {
 	assert.EqualValues(t, map[string]any{"rosmar": "was here"}, fullDoc)
 
 	// test update using 0 cas value
-	cas, err = coll.WriteSubDoc("key", "rosmar", 0, rawJson)
+	cas, err = coll.WriteSubDoc(ctx, "key", "rosmar", 0, rawJson)
 	assert.NoError(t, err)
 	assert.Equal(t, CAS(3), cas)
 }
 
 func TestInsertSubDoc(t *testing.T) {
+	ctx := testCtx(t)
 	coll := initSubDocTest(t)
 
 	rosmarMap := map[string]any{"foo": "lol", "bar": "baz"}
 	expectedDoc := map[string]any{"rosmar": rosmarMap}
 
 	// test incorrect cas value
-	err := coll.SubdocInsert("key", "rosmar.kilroy", 10, "was here")
+	err := coll.SubdocInsert(ctx, "key", "rosmar.kilroy", 10, "was here")
 	assert.Error(t, err)
 
 	// test update
-	err = coll.SubdocInsert("key", "rosmar.kilroy", CAS(1), "was here")
+	err = coll.SubdocInsert(ctx, "key", "rosmar.kilroy", CAS(1), "was here")
 	assert.NoError(t, err)
 
 	var fullDoc map[string]any
@@ -251,9 +253,9 @@ func TestInsertSubDoc(t *testing.T) {
 	assert.EqualValues(t, expectedDoc, fullDoc)
 
 	// test failed update:
-	err = coll.SubdocInsert("key", "rosmar", cas, "wrong")
+	err = coll.SubdocInsert(ctx, "key", "rosmar", cas, "wrong")
 	assert.Error(t, err)
-	err = coll.SubdocInsert("key", "rosmar.foo.xxx.yyy", cas, "wrong")
+	err = coll.SubdocInsert(ctx, "key", "rosmar.foo.xxx.yyy", cas, "wrong")
 	assert.Error(t, err)
 }
 
@@ -371,6 +373,7 @@ func TestRemove(t *testing.T) {
 
 // Test read and write of json as []byte
 func TestNonRawBytes(t *testing.T) {
+	ctx := testCtx(t)
 	ensureNoLeakedFeeds(t)
 
 	coll := makeTestBucket(t).DefaultDataStore()
@@ -421,11 +424,11 @@ func TestNonRawBytes(t *testing.T) {
 
 	// Verify values are stored as JSON and can be retrieved via view
 	ddoc := sgbucket.DesignDoc{Views: sgbucket.ViewMap{"view1": sgbucket.ViewDef{Map: `function(doc){if (doc.value) emit(doc.key,doc.value)}`}}}
-	err = coll.(*Collection).PutDDoc("docname", &ddoc)
+	err = coll.(*Collection).PutDDoc(ctx, "docname", &ddoc)
 	assert.NoError(t, err, "PutDDoc failed")
 
 	options := map[string]interface{}{"stale": false}
-	result, err := coll.(*Collection).View("docname", "view1", options)
+	result, err := coll.(*Collection).View(ctx, "docname", "view1", options)
 	assert.NoError(t, err, "View call failed")
 	assert.Equal(t, len(keySet), result.TotalRows)
 }

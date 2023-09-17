@@ -9,6 +9,7 @@
 package rosmar
 
 import (
+	"context"
 	"database/sql"
 	"reflect"
 
@@ -67,7 +68,7 @@ func (c *Collection) getDDoc(q queryable, designDoc string) (ddoc sgbucket.Desig
 	return
 }
 
-func (c *Collection) PutDDoc(designDoc string, ddoc *sgbucket.DesignDoc) error {
+func (c *Collection) PutDDoc(_ context.Context, designDoc string, ddoc *sgbucket.DesignDoc) error {
 	traceEnter("PutDDoc", "%q, %d views", designDoc, len(ddoc.Views))
 	err := c.bucket.inTransaction(func(txn *sql.Tx) error {
 		if existing, err := c.getDDoc(txn, designDoc); err == nil {

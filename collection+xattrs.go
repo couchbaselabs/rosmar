@@ -9,6 +9,7 @@
 package rosmar
 
 import (
+	"context"
 	"database/sql"
 	"encoding/binary"
 	"encoding/json"
@@ -24,6 +25,7 @@ type semiParsedXattrs = map[string]json.RawMessage
 
 // Get a single xattr value.
 func (c *Collection) GetXattr(
+	_ context.Context,
 	key string,
 	xattrKey string,
 	xv interface{},
@@ -39,6 +41,7 @@ func (c *Collection) GetXattr(
 
 // Set a single xattr value.
 func (c *Collection) SetXattr(
+	_ context.Context,
 	key string,
 	xattrKey string,
 	xv []byte,
@@ -51,6 +54,7 @@ func (c *Collection) SetXattr(
 
 // Remove a single xattr.
 func (c *Collection) RemoveXattr(
+	_ context.Context,
 	key string,
 	xattrKey string,
 	cas CAS,
@@ -63,6 +67,7 @@ func (c *Collection) RemoveXattr(
 
 // Remove one or more xattrs.
 func (c *Collection) DeleteXattrs(
+	_ context.Context,
 	key string,
 	xattrKeys ...string,
 ) error {
@@ -117,6 +122,7 @@ func (c *Collection) DeleteUserXattr(
 
 // Get the document's body and an xattr and a user xattr(?)
 func (c *Collection) GetWithXattr(
+	_ context.Context,
 	key string,
 	xattrKey string,
 	userXattrKey string,
@@ -143,6 +149,7 @@ func (c *Collection) GetWithXattr(
 // Single attempt to update a document and xattr.
 // Setting isDelete=true and value=nil will delete the document body.
 func (c *Collection) WriteWithXattr(
+	_ context.Context,
 	key string,
 	xattrKey string,
 	exp Exp,
@@ -163,6 +170,7 @@ func (c *Collection) WriteWithXattr(
 
 // CAS-safe write of a document and its associated named xattr
 func (c *Collection) WriteCasWithXattr(
+	_ context.Context,
 	key string,
 	xattrKey string,
 	exp Exp,
@@ -187,6 +195,7 @@ func (c *Collection) WriteCasWithXattr(
 // failure.  If `previous` is provided, will pass those values to the callback on the first
 // iteration instead of retrieving from the c.
 func (c *Collection) WriteUpdateWithXattr(
+	ctx context.Context,
 	key string,
 	xattrKey string,
 	userXattrKey string,
@@ -227,7 +236,7 @@ func (c *Collection) WriteUpdateWithXattr(
 		}
 
 		// Update body and/or xattr:
-		casOut, err = c.WriteWithXattr(key, xattrKey, exp, previous.Cas, opts, updatedDoc, updatedXattr, false, deleteDoc)
+		casOut, err = c.WriteWithXattr(ctx, key, xattrKey, exp, previous.Cas, opts, updatedDoc, updatedXattr, false, deleteDoc)
 
 		if _, ok := err.(sgbucket.CasMismatchErr); !ok {
 			// Exit loop on success or failure
@@ -242,6 +251,7 @@ func (c *Collection) WriteUpdateWithXattr(
 
 // Delete a document's body and an xattr simultaneously.
 func (c *Collection) DeleteWithXattr(
+	ctx context.Context,
 	key string,
 	xattrKey string,
 ) (err error) {
@@ -254,6 +264,7 @@ func (c *Collection) DeleteWithXattr(
 
 // Creates a tombstone doc (no value) with an xattr.
 func (c *Collection) InsertXattr(
+	_ context.Context,
 	key string,
 	xattrKey string,
 	exp uint32,
@@ -267,6 +278,7 @@ func (c *Collection) InsertXattr(
 
 // Creates a document, with an xattr, only if it doesn't already exist.
 func (c *Collection) InsertBodyAndXattr(
+	_ context.Context,
 	key string,
 	xattrKey string,
 	exp uint32,
@@ -280,6 +292,7 @@ func (c *Collection) InsertBodyAndXattr(
 
 // Updates a document's xattr.
 func (c *Collection) UpdateXattr(
+	_ context.Context,
 	key string,
 	xattrKey string,
 	exp uint32,
@@ -293,6 +306,7 @@ func (c *Collection) UpdateXattr(
 
 // Updates a document's value and an xattr.
 func (c *Collection) UpdateBodyAndXattr(
+	_ context.Context,
 	key string,
 	xattrKey string,
 	exp uint32,
@@ -313,6 +327,7 @@ func (c *Collection) UpdateBodyAndXattr(
 
 // Updates an xattr and deletes the body (making the doc a tombstone.)
 func (c *Collection) UpdateXattrDeleteBody(
+	_ context.Context,
 	key string,
 	xattrKey string,
 	exp uint32,
@@ -326,6 +341,7 @@ func (c *Collection) UpdateXattrDeleteBody(
 
 // Deletes the document's body, and updates the CAS & CRC32 macros in the xattr.
 func (c *Collection) DeleteBody(
+	_ context.Context,
 	key string,
 	xattrKey string,
 	exp uint32,
@@ -338,7 +354,7 @@ func (c *Collection) DeleteBody(
 
 // Deletes the document's body and an xattr.
 // Unlike DeleteWithXattr, this fails if the doc is a tombstone (no body).
-func (c *Collection) DeleteBodyAndXattr(key string, xattrKey string) (err error) {
+func (c *Collection) DeleteBodyAndXattr(_ context.Context, key string, xattrKey string) (err error) {
 	traceEnter("DeleteBodyAndXattr", "%q, %q", key, xattrKey)
 	defer func() { traceExit("DeleteBodyAndXattr", err, "ok") }()
 	return c._deleteBodyAndXattr(key, xattrKey, true)

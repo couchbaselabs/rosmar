@@ -9,6 +9,7 @@
 package rosmar
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -48,7 +49,7 @@ func (bucket *Bucket) UUID() (string, error) {
 }
 
 // Closes a bucket.
-func (bucket *Bucket) Close() {
+func (bucket *Bucket) Close(_ context.Context) {
 	traceEnter("Bucket.Close", "%s", bucket)
 
 	unregisterBucket(bucket)
@@ -71,7 +72,7 @@ func (bucket *Bucket) Close() {
 
 // Closes a bucket and deletes its directory and files (unless it's in-memory.)
 func (bucket *Bucket) CloseAndDelete() (err error) {
-	bucket.Close()
+	bucket.Close(context.TODO())
 
 	bucket.mutex.Lock()
 	defer bucket.mutex.Unlock()
@@ -154,7 +155,7 @@ func (bucket *Bucket) NamedDataStore(name sgbucket.DataStoreName) (sgbucket.Data
 	return collection, nil
 }
 
-func (bucket *Bucket) CreateDataStore(name sgbucket.DataStoreName) error {
+func (bucket *Bucket) CreateDataStore(_ context.Context, name sgbucket.DataStoreName) error {
 	traceEnter("CreateDataStore", "%s.%s", bucket, name)
 	sc, err := validateName(name)
 	if err != nil {

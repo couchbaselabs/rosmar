@@ -19,6 +19,7 @@ import (
 )
 
 func TestQuery(t *testing.T) {
+	ctx := testCtx(t)
 	ensureNoLeakedFeeds(t)
 	coll := makeTestBucket(t).DefaultDataStore().(*Collection)
 	require.NoError(t, setJSON(coll, "doc1", `{"key": "k1", "value": "v1"}`))
@@ -50,7 +51,7 @@ func TestQuery(t *testing.T) {
 
 	n := 0
 	var row map[string]any
-	for rows.Next(&row) {
+	for rows.Next(ctx, &row) {
 		log.Printf("Row = %+v", row)
 		require.Less(t, n, 3)
 		assert.EqualValues(t, expectedDocs[n], row["id"])
