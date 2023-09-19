@@ -256,7 +256,6 @@ func (c *Collection) updateView(ctx context.Context, designDoc string, viewName 
 		// Another goroutine pool calls the map function on the docs:
 		mapOutputChan := parallelize(mapInputChan, 0, func(input *mapInput) (out mapOutput) {
 			// Call the map function:
-			fmt.Printf("\tMAP %+v\n", input)
 			viewRows, err := view.mapFunction.CallFunction(ctx, &input.JSMapFunctionInput)
 			if err == nil {
 				// Marshal each key and value:
