@@ -9,6 +9,7 @@
 package rosmar
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -38,20 +39,20 @@ const kMapFnTimeout = 5 * time.Second
 
 //////// API:
 
-func (c *Collection) View(designDoc string, viewName string, params map[string]interface{}) (result sgbucket.ViewResult, err error) {
+func (c *Collection) View(ctx context.Context, designDoc string, viewName string, params map[string]interface{}) (result sgbucket.ViewResult, err error) {
 	debug("View(%q, %q, %+v)", designDoc, viewName, params)
-	return c.view(designDoc, viewName, params)
+	return c.view(ctx, designDoc, viewName, params)
 }
 
-func (c *Collection) ViewQuery(designDoc string, viewName string, params map[string]interface{}) (sgbucket.QueryResultIterator, error) {
+func (c *Collection) ViewQuery(ctx context.Context, designDoc string, viewName string, params map[string]interface{}) (sgbucket.QueryResultIterator, error) {
 	debug("ViewQuery(%q, %q, %+v)", designDoc, viewName, params)
-	viewResult, err := c.view(designDoc, viewName, params)
+	viewResult, err := c.view(ctx, designDoc, viewName, params)
 	return &viewResult, err
 }
 
-func (c *Collection) ViewCustom(designDoc string, viewName string, params map[string]interface{}, vres interface{}) error {
+func (c *Collection) ViewCustom(ctx context.Context, designDoc string, viewName string, params map[string]interface{}, vres interface{}) error {
 	debug("ViewCustom(%q, %q, %+v)", designDoc, viewName, params)
-	result, err := c.view(designDoc, viewName, params)
+	result, err := c.view(ctx, designDoc, viewName, params)
 	if err != nil {
 		return err
 	}
@@ -67,6 +68,7 @@ func (c *Collection) GetStatsVbSeqno(maxVbno uint16, useAbsHighSeqNo bool) (uuid
 //////// IMPLEMENTATION:
 
 func (c *Collection) view(
+	ctx context.Context,
 	designDoc string,
 	viewName string,
 	jsonParams map[string]interface{},
@@ -76,7 +78,7 @@ func (c *Collection) view(
 		return
 	}
 	// Look up the view and its index:
-	view, err := c.findView(c.db(), designDoc, viewName)
+	view, err := c.findView(ctx, c.db(), designDoc, viewName)
 	if err != nil {
 		return result, err
 	}
@@ -93,11 +95,11 @@ func (c *Collection) view(
 		if staleVal == "updateAfter" {
 			go func() {
 				debug("\t{updating view in background...}")
-				_, _ = c.updateView(designDoc, viewName)
+				_, _ = c.updateView(ctx, designDoc, viewName)
 				debug("\t{...done updating view in background}")
 			}()
 		} else if staleVal != true && staleVal != "ok" {
-			if view, err = c.updateView(designDoc, viewName); err != nil {
+			if view, err = c.updateView(ctx, designDoc, viewName); err != nil {
 				return
 			}
 		}
@@ -113,7 +115,7 @@ func (c *Collection) view(
 }
 
 // Returns an up-to-date `rosmarView` for a given view name.
-func (c *Collection) findView(q queryable, designDoc string, viewName string) (view *rosmarView, err error) {
+func (c *Collection) findView(ctx context.Context, q queryable, designDoc string, viewName string) (view *rosmarView, err error) {
 	key := viewKey{designDoc, viewName}
 	row := q.QueryRow(`SELECT views.id, views.mapFn, views.reduceFn, views.lastCas
 							FROM views JOIN designDocs ON views.designDoc=designDocs.id
@@ -141,7 +143,7 @@ func (c *Collection) findView(q queryable, designDoc string, viewName string) (v
 		}
 	}
 	if view.mapFunction == nil {
-		view.mapFunction = sgbucket.NewJSMapFunction(view.mapFnSource, kMapFnTimeout)
+		view.mapFunction = sgbucket.NewJSMapFunction(ctx, view.mapFnSource, kMapFnTimeout)
 	}
 
 	// Cache it:
@@ -178,10 +180,10 @@ type mapRow struct {
 }
 
 // Updates the view index if necessary.
-func (c *Collection) updateView(designDoc string, viewName string) (view *rosmarView, err error) {
+func (c *Collection) updateView(ctx context.Context, designDoc string, viewName string) (view *rosmarView, err error) {
 	err = c.bucket.inTransaction(func(txn *sql.Tx) error {
 		// Read the view to ensure we get the current lastCas, mapFn, reduceFn:
-		view, err = c.findView(txn, designDoc, viewName)
+		view, err = c.findView(ctx, txn, designDoc, viewName)
 		if err != nil {
 			return err
 		}
@@ -254,8 +256,8 @@ func (c *Collection) updateView(designDoc string, viewName string) (view *rosmar
 		// Another goroutine pool calls the map function on the docs:
 		mapOutputChan := parallelize(mapInputChan, 0, func(input *mapInput) (out mapOutput) {
 			// Call the map function:
-			//trace("\tMAP %v", input)
-			viewRows, err := view.mapFunction.CallFunction(&input.JSMapFunctionInput)
+			fmt.Printf("\tMAP %+v\n", input)
+			viewRows, err := view.mapFunction.CallFunction(ctx, &input.JSMapFunctionInput)
 			if err == nil {
 				// Marshal each key and value:
 				jsonRows := make([]mapRow, len(viewRows))

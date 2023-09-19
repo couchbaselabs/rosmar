@@ -74,7 +74,7 @@ func TestMutations(t *testing.T) {
 	e.TimeReceived = time.Time{}
 	assert.Equal(t, sgbucket.FeedEvent{Opcode: sgbucket.FeedOpDeletion, Key: []byte("eskimo"), Cas: 7, DataType: sgbucket.FeedDataTypeRaw}, e)
 
-	bucket.Close()
+	bucket.Close(testCtx(t))
 
 	_, ok := <-doneChan
 	assert.False(t, ok)
@@ -192,7 +192,9 @@ func TestCrossBucketEvents(t *testing.T) {
 	// Open a 2nd bucket on the same file, to receive events:
 	bucket2, err := OpenBucket(bucket.url, ReOpenExisting)
 	require.NoError(t, err)
-	t.Cleanup(bucket2.Close)
+	t.Cleanup(func() {
+		bucket2.Close(testCtx(t))
+	})
 
 	events, doneChan := startFeed(t, bucket)
 	events2, doneChan2 := startFeed(t, bucket2)
@@ -209,8 +211,8 @@ func TestCrossBucketEvents(t *testing.T) {
 	readExpectedEventsDEF(t, events, 4)
 	readExpectedEventsDEF(t, events2, 4)
 
-	bucket.Close()
-	bucket2.Close()
+	bucket.Close(testCtx(t))
+	bucket2.Close(testCtx(t))
 
 	_, ok := <-doneChan
 	assert.False(t, ok)
@@ -223,7 +225,7 @@ func TestCollectionMutations(t *testing.T) {
 	ensureNoLeakedFeeds(t)
 
 	huddle := makeTestBucket(t)
-	defer huddle.Close()
+	defer huddle.Close(testCtx(t))
 
 	collection1, err := huddle.NamedDataStore(dsName("scope1", "collection1"))
 	require.NoError(t, err)

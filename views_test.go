@@ -18,13 +18,14 @@ import (
 )
 
 func TestGetDDocs(t *testing.T) {
+	ctx := testCtx(t)
 	ensureNoLeakedFeeds(t)
 
 	ddoc := sgbucket.DesignDoc{Views: sgbucket.ViewMap{"view1": sgbucket.ViewDef{Map: `function(doc){if (doc.key) emit(doc.key,doc.value)}`}}}
 	coll := makeTestBucket(t).DefaultDataStore().(*Collection)
-	err := coll.PutDDoc("docname", &ddoc)
+	err := coll.PutDDoc(ctx, "docname", &ddoc)
 	assert.NoError(t, err, "PutDDoc docnamefailed")
-	err = coll.PutDDoc("docname2", &ddoc)
+	err = coll.PutDDoc(ctx, "docname2", &ddoc)
 	assert.NoError(t, err, "PutDDoc docname2failed")
 
 	ddocs, getErr := coll.GetDDocs()
@@ -34,11 +35,12 @@ func TestGetDDocs(t *testing.T) {
 
 // Create a simple view and run it on some documents
 func TestView(t *testing.T) {
+	ctx := testCtx(t)
 	ensureNoLeakedFeeds(t)
 	coll := makeTestBucket(t).DefaultDataStore().(*Collection)
 
 	ddoc := sgbucket.DesignDoc{Language: "javascript", Views: sgbucket.ViewMap{"view1": sgbucket.ViewDef{Map: `function(doc){if (doc.key) emit(doc.key,doc.value)}`}}}
-	err := coll.PutDDoc("docname", &ddoc)
+	err := coll.PutDDoc(ctx, "docname", &ddoc)
 	assert.NoError(t, err, "PutDDoc failed")
 
 	var echo sgbucket.DesignDoc
@@ -59,7 +61,7 @@ func TestView(t *testing.T) {
 	require.NoError(t, err)
 
 	options := map[string]interface{}{"stale": false}
-	result, err := coll.View("docname", "view1", options)
+	result, err := coll.View(ctx, "docname", "view1", options)
 	assert.NoError(t, err, "View call failed")
 	require.Equal(t, 5, result.TotalRows)
 	assert.Equal(t, &sgbucket.ViewRow{ID: "doc3", Key: 17.0, Value: []interface{}{"v3"}}, result.Rows[0])
@@ -71,7 +73,7 @@ func TestView(t *testing.T) {
 	// Try a startkey:
 	options["startkey"] = "k2"
 	options["include_docs"] = true
-	result, err = coll.View("docname", "view1", options)
+	result, err = coll.View(ctx, "docname", "view1", options)
 	assert.NoError(t, err, "View call failed")
 	assert.Equal(t, 3, result.TotalRows)
 	var expectedDoc interface{} = map[string]interface{}{"key": "k2", "value": "v2"}
@@ -80,7 +82,7 @@ func TestView(t *testing.T) {
 
 	// Try descending:
 	options["descending"] = true
-	result, err = coll.View("docname", "view1", options)
+	result, err = coll.View(ctx, "docname", "view1", options)
 	assert.NoError(t, err, "View call failed")
 	assert.Equal(t, 3, result.TotalRows)
 	assert.Equal(t, "doc2", result.Rows[0].ID)
@@ -90,7 +92,7 @@ func TestView(t *testing.T) {
 
 	// Try an endkey:
 	options["endkey"] = "k2"
-	result, err = coll.View("docname", "view1", options)
+	result, err = coll.View(ctx, "docname", "view1", options)
 	assert.NoError(t, err, "View call failed")
 	assert.Equal(t, 1, result.TotalRows)
 	assert.Equal(t, &sgbucket.ViewRow{ID: "doc2", Key: "k2", Value: "v2",
@@ -98,7 +100,7 @@ func TestView(t *testing.T) {
 
 	// Try an endkey out of range:
 	options["endkey"] = "k999"
-	result, err = coll.View("docname", "view1", options)
+	result, err = coll.View(ctx, "docname", "view1", options)
 	assert.NoError(t, err, "View call failed")
 	assert.Equal(t, 1, result.TotalRows)
 	assert.Equal(t, &sgbucket.ViewRow{ID: "doc2", Key: "k2", Value: "v2",
@@ -107,13 +109,13 @@ func TestView(t *testing.T) {
 	// Try without inclusive_end:
 	options["endkey"] = "k2"
 	options["inclusive_end"] = false
-	result, err = coll.View("docname", "view1", options)
+	result, err = coll.View(ctx, "docname", "view1", options)
 	assert.NoError(t, err, "View call failed")
 	assert.Equal(t, 0, result.TotalRows)
 
 	// Try a single key:
 	options = map[string]interface{}{"stale": false, "key": "k2", "include_docs": true}
-	result, err = coll.View("docname", "view1", options)
+	result, err = coll.View(ctx, "docname", "view1", options)
 	assert.NoError(t, err, "View call failed")
 	assert.Equal(t, 1, result.TotalRows)
 	assert.Equal(t, &sgbucket.ViewRow{ID: "doc2", Key: "k2", Value: "v2",

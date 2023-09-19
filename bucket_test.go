@@ -9,6 +9,7 @@
 package rosmar
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -29,6 +30,10 @@ func init() {
 	}
 }
 
+func testCtx(t *testing.T) context.Context {
+	return context.Background() // match sync gateway interfaces for logging
+}
+
 const testBucketDirName = "RosmarTest"
 
 func testBucketPath(t *testing.T) string {
@@ -41,7 +46,9 @@ func makeTestBucket(t *testing.T) *Bucket {
 	}
 	bucket, err := OpenBucketFromPath(testBucketPath(t), CreateNew)
 	require.NoError(t, err)
-	t.Cleanup(bucket.Close)
+	t.Cleanup(func() {
+		bucket.Close(testCtx(t))
+	})
 
 	return bucket
 }
@@ -65,7 +72,7 @@ func TestNewBucket(t *testing.T) {
 	buckets := bucketsAtURL(url)
 	assert.Contains(t, buckets, bucket)
 
-	bucket.Close()
+	bucket.Close(testCtx(t))
 	assert.Empty(t, bucketsAtURL(url))
 }
 
@@ -84,7 +91,7 @@ func TestGetMissingBucket(t *testing.T) {
 func TestCallClosedBucket(t *testing.T) {
 	bucket := makeTestBucket(t)
 	c := bucket.DefaultDataStore()
-	bucket.Close()
+	bucket.Close(testCtx(t))
 	_, err := bucket.ListDataStores()
 	assert.ErrorContains(t, err, "bucket has been closed")
 	_, _, err = c.GetRaw("foo")
@@ -123,14 +130,16 @@ func TestTwoBucketsOneURL(t *testing.T) {
 
 	bucket2, err = OpenBucket(url, ReOpenExisting)
 	require.NoError(t, err)
-	t.Cleanup(bucket2.Close)
+	t.Cleanup(func() {
+		bucket2.Close(testCtx(t))
+	})
 
 	buckets := bucketsAtURL(url)
 	assert.Len(t, buckets, 2)
 	assert.Contains(t, buckets, bucket1)
 	assert.Contains(t, buckets, bucket2)
 
-	bucket1.Close()
+	bucket1.Close(testCtx(t))
 	buckets = bucketsAtURL(url)
 	assert.Len(t, buckets, 1)
 	assert.Contains(t, buckets, bucket2)
@@ -138,7 +147,7 @@ func TestTwoBucketsOneURL(t *testing.T) {
 	err = DeleteBucketAt(url)
 	assert.ErrorContains(t, err, "there is a Bucket open at that URL")
 
-	bucket2.Close()
+	bucket2.Close(testCtx(t))
 	assert.Empty(t, bucketsAtURL(url))
 
 	err = DeleteBucketAt(url)
@@ -162,7 +171,7 @@ func TestCreateCollection(t *testing.T) {
 	bucket := makeTestBucket(t)
 
 	collName := dsName("_default", "foo")
-	err := bucket.CreateDataStore(collName)
+	err := bucket.CreateDataStore(testCtx(t), collName)
 	assert.NoError(t, err)
 
 	coll, err := bucket.NamedDataStore(collName)
@@ -249,7 +258,7 @@ func TestGetPersistentMultiCollectionBucket(t *testing.T) {
 	assert.Equal(t, "c1_value", value)
 
 	// Close collection bucket
-	huddle.Close()
+	huddle.Close(testCtx(t))
 
 	// Reopen persisted collection bucket
 	loadedHuddle, loadedErr := OpenBucket(huddleURL, ReOpenExisting)
@@ -279,7 +288,7 @@ func TestGetPersistentMultiCollectionBucket(t *testing.T) {
 	assert.Equal(t, "c2_value", loadedValue)
 
 	// Close collection bucket
-	loadedHuddle.Close()
+	loadedHuddle.Close(testCtx(t))
 
 	// Reopen persisted collection bucket again to ensure dropped collection is not present
 	reloadedHuddle, reloadedErr := OpenBucket(huddleURL, ReOpenExisting)

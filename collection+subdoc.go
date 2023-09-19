@@ -9,6 +9,7 @@
 package rosmar
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -16,7 +17,7 @@ import (
 	sgbucket "github.com/couchbase/sg-bucket"
 )
 
-func (c *Collection) GetSubDocRaw(key string, subdocKey string) (value []byte, casOut uint64, err error) {
+func (c *Collection) GetSubDocRaw(_ context.Context, key string, subdocKey string) (value []byte, casOut uint64, err error) {
 	// TODO: Use SQLite JSON syntax to get the property
 	traceEnter("SubdocGetRaw", "%q, %q", key, subdocKey)
 	defer func() { traceExit("SubdocGetRaw", err, "0x%x, %s", casOut, value) }()
@@ -41,14 +42,14 @@ func (c *Collection) GetSubDocRaw(key string, subdocKey string) (value []byte, c
 	return value, casOut, err
 }
 
-func (c *Collection) SubdocInsert(key string, subdocKey string, cas CAS, value any) (err error) {
+func (c *Collection) SubdocInsert(_ context.Context, key string, subdocKey string, cas CAS, value any) (err error) {
 	traceEnter("SubdocInsert", "%q, %q, %d", key, subdocKey, cas)
 	_, err = c.subdocWrite(key, subdocKey, cas, value, true)
 	traceExit("SubdocInsert", err, "ok")
 	return
 }
 
-func (c *Collection) WriteSubDoc(key string, subdocKey string, cas CAS, rawValue []byte) (casOut CAS, err error) {
+func (c *Collection) WriteSubDoc(_ context.Context, key string, subdocKey string, cas CAS, rawValue []byte) (casOut CAS, err error) {
 	traceEnter("WriteSubDoc", "%q, %q, %d, %s", key, subdocKey, cas, rawValue)
 	var value any
 	if len(rawValue) > 0 {

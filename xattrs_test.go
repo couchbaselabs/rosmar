@@ -16,16 +16,17 @@ import (
 )
 
 func TestSetXattr(t *testing.T) {
+	ctx := testCtx(t)
 	ensureNoLeakedFeeds(t)
 	coll := makeTestBucket(t).DefaultDataStore()
 
 	addToCollection(t, coll, "key", 0, "value")
 
-	cas, err := coll.SetXattr("key", "xfiles", []byte(`{"truth":"out_there"}`))
+	cas, err := coll.SetXattr(ctx, "key", "xfiles", []byte(`{"truth":"out_there"}`))
 	require.NoError(t, err)
 
 	var val, xval any
-	gotCas, err := coll.GetWithXattr("key", "xfiles", "", &val, &xval, nil)
+	gotCas, err := coll.GetWithXattr(ctx, "key", "xfiles", "", &val, &xval, nil)
 	require.NoError(t, err)
 	assert.Equal(t, cas, gotCas)
 	assert.Equal(t, "value", val)

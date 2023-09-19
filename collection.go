@@ -9,6 +9,7 @@
 package rosmar
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -248,7 +249,7 @@ func (c *Collection) get(q queryable, key string, outVal any) (cas CAS, err erro
 	return
 }
 
-func (c *Collection) GetExpiry(key string) (exp Exp, err error) {
+func (c *Collection) GetExpiry(_ context.Context, key string) (exp Exp, err error) {
 	traceEnter("GetExpiry", "%q", key)
 	row := c.db().QueryRow("SELECT exp FROM documents WHERE collection=? AND key=?", c.id, key)
 	err = scan(row, &exp)
