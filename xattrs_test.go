@@ -35,6 +35,7 @@ func TestSetXattr(t *testing.T) {
 }
 
 func TestMacroExpansion(t *testing.T) {
+	ctx := testCtx(t)
 	ensureNoLeakedFeeds(t)
 	coll := makeTestBucket(t).DefaultDataStore()
 
@@ -47,11 +48,11 @@ func TestMacroExpansion(t *testing.T) {
 	bodyBytes := []byte(`{"a":123}`)
 	xattrBytes := []byte(`{"x":456}`)
 
-	casOut, err := coll.WriteWithXattr("key", "_sync", 0, 0, opts, bodyBytes, xattrBytes, false, false)
+	casOut, err := coll.WriteWithXattr(ctx, "key", "_sync", 0, 0, bodyBytes, xattrBytes, false, false, opts)
 	require.NoError(t, err)
 
 	var val, xval map[string]any
-	getCas, err := coll.GetWithXattr("key", "_sync", "", &val, &xval, nil)
+	getCas, err := coll.GetWithXattr(ctx, "key", "_sync", "", &val, &xval, nil)
 	require.NoError(t, err)
 	require.Equal(t, getCas, casOut)
 
@@ -66,12 +67,12 @@ func TestMacroExpansion(t *testing.T) {
 	opts.MacroExpansion = []sgbucket.MacroExpansionSpec{
 		{Path: "_unknown.testcas", Type: sgbucket.MacroCas},
 	}
-	_, err = coll.WriteWithXattr("xattrMismatch", "_sync", 0, 0, opts, bodyBytes, xattrBytes, false, false)
+	_, err = coll.WriteWithXattr(ctx, "xattrMismatch", "_sync", 0, 0, bodyBytes, xattrBytes, false, false, opts)
 	require.Error(t, err)
 
 	opts.MacroExpansion = []sgbucket.MacroExpansionSpec{
 		{Path: "_sync.unknownPath.testcas", Type: sgbucket.MacroCas},
 	}
-	_, err = coll.WriteWithXattr("pathError", "_sync", 0, 0, opts, bodyBytes, xattrBytes, false, false)
+	_, err = coll.WriteWithXattr(ctx, "pathError", "_sync", 0, 0, bodyBytes, xattrBytes, false, false, opts)
 	require.Error(t, err)
 }
