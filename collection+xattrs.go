@@ -222,7 +222,7 @@ func (c *Collection) WriteUpdateWithXattr(
 		}
 
 		// Invoke the callback:
-		updatedDoc, updatedXattr, deleteDoc, newExp, err := callback(previous.Body, previous.Xattr, previous.UserXattr, previous.Cas)
+		updatedDoc, updatedXattr, deleteDoc, newExp, macroOpts, err := callback(previous.Body, previous.Xattr, previous.UserXattr, previous.Cas)
 		if err != nil {
 			if err == sgbucket.ErrCasFailureShouldRetry {
 				// Callback wants us to retry:
@@ -233,6 +233,9 @@ func (c *Collection) WriteUpdateWithXattr(
 		}
 		if newExp != nil {
 			exp = *newExp
+		}
+		if len(macroOpts) != 0 {
+			opts.MacroExpansion = append(opts.MacroExpansion, macroOpts...)
 		}
 
 		// Update body and/or xattr:
