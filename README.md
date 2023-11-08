@@ -21,10 +21,6 @@ Rosmar supports:
 
 ## 1. Building and Using It
 
-Rosmar requires an updated version of sg-bucket -- this is on the `feature/walrus-xattrs` branch. Rosmar's `go.mod` file points to the appropriate commit.
-
-To use Rosmar in Sync Gateway, check out the latter's `feature/walrus_xattrs` branch, in which Walrus has been replaced with Rosmar.
-
 To run SG normally with a Rosmar bucket, use a non-persistent SG config file like this one:
 
 ```json
@@ -125,6 +121,10 @@ A Bucket is identified by a URL with the scheme `rosmar:` and a path. The path i
 The special URL `rosmar:/?mode=memory` opens an ephemeral in-memory database. Don't hardcode that URL; use the constant `InMemoryURL` instead.
 
 > Note: The directory contains the SQLite database file `rosmar.sqlite` plus SQLite side files. But its contents should be considered opaque.
+
+### Bucket Persistence
+
+For in memory buckets, closing a bucket does not delete the bucket from memory, representing how Couchbase Server would not delete the bucket. In order to delete the bucket from memory, call `Bucket.CloseAndDelete`.
 
 ### Metadata Purging
 

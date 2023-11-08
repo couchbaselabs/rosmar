@@ -8,6 +8,9 @@
 
 # config file for golangci-lint
 
+run:
+  timeout: 3m
+
 linters:
   enable:
     #- bodyclose # checks whether HTTP response body is closed successfully

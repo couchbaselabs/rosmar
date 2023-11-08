@@ -11,6 +11,7 @@ package rosmar
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -74,7 +75,7 @@ func TestMutations(t *testing.T) {
 	e.TimeReceived = time.Time{}
 	assert.Equal(t, sgbucket.FeedEvent{Opcode: sgbucket.FeedOpDeletion, Key: []byte("eskimo"), Cas: 7, DataType: sgbucket.FeedDataTypeRaw}, e)
 
-	bucket.Close(testCtx(t))
+	require.NoError(t, bucket.CloseAndDelete(testCtx(t)))
 
 	_, ok := <-doneChan
 	assert.False(t, ok)
@@ -190,7 +191,7 @@ func TestCrossBucketEvents(t *testing.T) {
 	addToCollection(t, c, "charlie", 0, "C")
 
 	// Open a 2nd bucket on the same file, to receive events:
-	bucket2, err := OpenBucket(bucket.url, ReOpenExisting)
+	bucket2, err := OpenBucket(bucket.url, strings.ToLower(t.Name()), ReOpenExisting)
 	require.NoError(t, err)
 	t.Cleanup(func() {
 		bucket2.Close(testCtx(t))
@@ -212,7 +213,7 @@ func TestCrossBucketEvents(t *testing.T) {
 	readExpectedEventsDEF(t, events2, 4)
 
 	bucket.Close(testCtx(t))
-	bucket2.Close(testCtx(t))
+	require.NoError(t, bucket2.CloseAndDelete(testCtx(t)))
 
 	_, ok := <-doneChan
 	assert.False(t, ok)

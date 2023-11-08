@@ -9,9 +9,9 @@
 package rosmar
 
 import (
+	"context"
+	"slices"
 	"sync"
-
-	"golang.org/x/exp/slices"
 )
 
 // The bucket registry tracks all open Buckets (except in-memory ones) by their URL.
@@ -29,54 +29,117 @@ import (
 // `realpath` or `fcntl(F_GETPATH)`) and use the canonical path as the key.
 // Unfortunately Go doesn't seem to have an API for that.
 
-var bucketRegistry = map[string][]*Bucket{} // Maps URL to slice of Buckets at that URL
-var bucketRegistryMutex sync.Mutex          // Thread-safe access to bucketRegistry
+type bucketRegistry struct {
+	byURL       map[string][]*Bucket
+	inMemoryRef map[string]*Bucket
+	lock        sync.Mutex
+}
 
-// Adds a newly opened Bucket to the registry.
-func registerBucket(bucket *Bucket) {
-	url := bucket.url
-	if isInMemoryURL(url) {
-		return
+var cluster *bucketRegistry // global cluster registry
+func init() {
+	cluster = &bucketRegistry{
+		byURL:       make(map[string][]*Bucket),
+		inMemoryRef: make(map[string]*Bucket),
 	}
-	debug("registerBucket %v at %s", bucket, url)
-	bucketRegistryMutex.Lock()
-	bucketRegistry[url] = append(bucketRegistry[url], bucket)
-	bucketRegistryMutex.Unlock()
+}
+
+// registryBucket adds a newly opened Bucket to the registry.
+func (r *bucketRegistry) registerBucket(bucket *Bucket) {
+	url := bucket.url
+	name := bucket.GetName()
+	debug("registerBucket %v %s at %s", bucket, name, url)
+	r.lock.Lock()
+	defer r.lock.Unlock()
+	_, ok := r.inMemoryRef[name]
+	if !ok {
+		b := bucket.copy()
+		r.inMemoryRef[name] = b
+	}
+	r.byURL[url] = append(r.byURL[url], bucket)
+}
+
+func (r *bucketRegistry) getInMemoryBucket(name string) *Bucket {
+	r.lock.Lock()
+	defer r.lock.Unlock()
+	return r.inMemoryRef[name]
 }
 
 // Removes a Bucket from the registry. Must be called before closing.
-func unregisterBucket(bucket *Bucket) {
+func (r *bucketRegistry) unregisterBucket(bucket *Bucket) {
 	url := bucket.url
-	if isInMemoryURL(url) {
-		return
-	}
-	debug("UNregisterBucket %v at %s", bucket, url)
-	bucketRegistryMutex.Lock()
-	defer bucketRegistryMutex.Unlock()
+	name := bucket.name
+	debug("UNregisterBucket %v at %s", bucket, name, url)
+	r.lock.Lock()
+	defer r.lock.Unlock()
 
-	buckets := bucketRegistry[url]
+	buckets := r.byURL[url]
 	i := slices.Index(buckets, bucket)
 	if i < 0 {
 		warn("unregisterBucket couldn't find %v", bucket)
 		return
 	}
 	if len(buckets) == 1 {
-		delete(bucketRegistry, url)
-	} else {
-		// Copy the slice before mutating, in case a client is iterating it:
-		buckets = slices.Clone(buckets)
-		buckets[i] = nil // remove ptr that might be left in the underlying array, for gc
-		buckets = slices.Delete(buckets, i, i+1)
-		bucketRegistry[url] = buckets
+		delete(r.byURL, url)
+		if !bucket.inMemory {
+			bucket._closeAllInstances()
+			delete(r.inMemoryRef, name)
+		}
+		return
 	}
+	// Copy the slice before mutating, in case a client is iterating it:
+	buckets = slices.Clone(buckets)
+	buckets[i] = nil // remove ptr that might be left in the underlying array, for gc
+	buckets = slices.Delete(buckets, i, i+1)
+	r.byURL[url] = buckets
+	return
 }
 
-// Returns the array of Bucket instances open on a given URL.
-func bucketsAtURL(url string) (buckets []*Bucket) {
-	if !isInMemoryURL(url) {
-		bucketRegistryMutex.Lock()
-		buckets = bucketRegistry[url]
-		bucketRegistryMutex.Unlock()
+// Delete bucket from the registry and disk. Closes all existing buckets.
+func (r *bucketRegistry) deleteBucket(ctx context.Context, bucket *Bucket) error {
+	url := bucket.url
+	name := bucket.name
+	r.lock.Lock()
+	defer r.lock.Unlock()
+
+	_, ok := r.inMemoryRef[name]
+	if ok {
+		delete(r.inMemoryRef, name)
 	}
-	return
+	delete(r.byURL, url)
+	return DeleteBucketAt(url)
+}
+
+func (r *bucketRegistry) getBucketNames() []string {
+	r.lock.Lock()
+	defer r.lock.Unlock()
+
+	names := make([]string, 0, len(r.inMemoryRef))
+	for name := range r.inMemoryRef {
+		names = append(names, name)
+	}
+	return names
+}
+
+// getInMemoryBucket returns an instance of a bucket. If there are other copies of this bucket already in memory, it will return this version. If this is an in memory bucket, the bucket will not be removed until deleteBucket is called.
+func getInMemoryBucket(name string) *Bucket {
+	return cluster.getInMemoryBucket(name)
+}
+
+func registerBucket(bucket *Bucket) {
+	cluster.registerBucket(bucket)
+}
+
+// eeregisterBucket removes a Bucket from the registry. Must be called before closing.
+func unregisterBucket(bucket *Bucket) {
+	cluster.unregisterBucket(bucket)
+}
+
+// deleteBucket will delete a bucket from the registry and from disk.
+func deleteBucket(ctx context.Context, bucket *Bucket) error {
+	return cluster.deleteBucket(ctx, bucket)
+}
+
+// getBucketNames returns a list of all bucket names.
+func getBucketNames() []string {
+	return cluster.getBucketNames()
 }
