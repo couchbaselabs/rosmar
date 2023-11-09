@@ -60,7 +60,8 @@ func (bucket *Bucket) Close(_ context.Context) {
 	bucket.closed = true
 }
 
-func (bucket *Bucket) _closeAllInstances() {
+// _closeSqliteDB closes the underlying sqlite database and shuts down dcpFeeds. Must have a lock to call this function.
+func (bucket *Bucket) _closeSqliteDB() {
 	if bucket.expTimer != nil {
 		bucket.expTimer.Stop()
 	}
@@ -78,7 +79,7 @@ func (bucket *Bucket) _closeAllInstances() {
 func (bucket *Bucket) CloseAndDelete(ctx context.Context) (err error) {
 	bucket.mutex.Lock()
 	defer bucket.mutex.Unlock()
-	bucket._closeAllInstances()
+	bucket._closeSqliteDB()
 	return deleteBucket(ctx, bucket)
 }
 

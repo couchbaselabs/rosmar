@@ -93,7 +93,7 @@ func OpenBucket(urlStr string, bucketName string, mode OpenMode) (b *Bucket, err
 	}
 	urlStr = u.String()
 
-	bucket := getInMemoryBucket(bucketName)
+	bucket := getCachedBucket(bucketName)
 	if bucket != nil {
 		if mode == CreateNew {
 			return nil, fs.ErrExist
@@ -101,9 +101,8 @@ func OpenBucket(urlStr string, bucketName string, mode OpenMode) (b *Bucket, err
 		if urlStr != bucket.url {
 			return nil, fmt.Errorf("bucket %q already exists at %q, will not open at %q", bucketName, bucket.url, urlStr)
 		}
-		b = bucket.copy()
-		registerBucket(b)
-		return b, nil
+		registerBucket(bucket)
+		return bucket, nil
 
 	}
 

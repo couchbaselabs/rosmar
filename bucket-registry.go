@@ -10,126 +10,117 @@ package rosmar
 
 import (
 	"context"
-	"slices"
 	"sync"
 )
 
-// The bucket registry tracks all open Buckets (except in-memory ones) by their URL.
-// This is used by feeds, to forward events from the Bucket that created them to other Buckets on
-// the same file that should also be notified.
+// The bucket registry tracks all open Buckets and refcounts them.
+// The canonical version of the bucket is in the buckets member of the bucketRegistry. This will remain in memory for the following length of time:
 //
-// The registry is not bulletproof; it can be fooled into thinking Buckets on the same file aren't,
-// if their URLs aren't identical. This can happen if:
-//
-// * one of the file paths goes through (different) symlinks
-// * the paths are capitalized differently, on a case-preserving filesystem like macOS or Windows
-// * there's some kind of character-encoding difference that the filesystem ignores
-//
-// The way to fix this is to ask the filesystem to canonicalize the path (e.g. by calling
-// `realpath` or `fcntl(F_GETPATH)`) and use the canonical path as the key.
-// Unfortunately Go doesn't seem to have an API for that.
+// * In Memory bucket: bucket is not deleted until any Bucket's CloseAndDelete is closed.
+// * On disk bucket: bucket is deleted from registry when all there are no open copies of the bucket in memory. Unlike in memory bucket, the bucket will stay persisted on disk to be reopened.
 
+// bucketRegistry tracks all open buckets
 type bucketRegistry struct {
-	byURL       map[string][]*Bucket
-	inMemoryRef map[string]*Bucket
+	bucketCount map[string]uint    // stores a reference count of open buckets
+	buckets     map[string]*Bucket // stores a reference to each open bucket
 	lock        sync.Mutex
 }
 
 var cluster *bucketRegistry // global cluster registry
 func init() {
 	cluster = &bucketRegistry{
-		byURL:       make(map[string][]*Bucket),
-		inMemoryRef: make(map[string]*Bucket),
+		bucketCount: make(map[string]uint),
+		buckets:     make(map[string]*Bucket),
 	}
 }
 
 // registryBucket adds a newly opened Bucket to the registry.
 func (r *bucketRegistry) registerBucket(bucket *Bucket) {
-	url := bucket.url
 	name := bucket.GetName()
-	debug("registerBucket %v %s at %s", bucket, name, url)
+	debug("registerBucket %v %s at %s", bucket, name, bucket.url)
 	r.lock.Lock()
 	defer r.lock.Unlock()
-	_, ok := r.inMemoryRef[name]
+	_, ok := r.buckets[name]
 	if !ok {
 		b := bucket.copy()
-		r.inMemoryRef[name] = b
+		r.buckets[name] = b
 	}
-	r.byURL[url] = append(r.byURL[url], bucket)
+	r.bucketCount[name] += 1
 }
 
-func (r *bucketRegistry) getInMemoryBucket(name string) *Bucket {
+// getCachedBucket returns a bucket from the registry if it exists.
+func (r *bucketRegistry) getCachedBucket(name string) *Bucket {
 	r.lock.Lock()
 	defer r.lock.Unlock()
-	return r.inMemoryRef[name]
+	bucket := r.buckets[name]
+	if bucket == nil {
+		return nil
+	}
+	return bucket.copy()
 }
 
-// Removes a Bucket from the registry. Must be called before closing.
+// unregisterBucket removes a Bucket from the registry. Must be called before closing.
 func (r *bucketRegistry) unregisterBucket(bucket *Bucket) {
-	url := bucket.url
 	name := bucket.name
-	debug("UNregisterBucket %v at %s", bucket, name, url)
+	debug("UNregisterBucket %v at %s", bucket, name, bucket.url)
 	r.lock.Lock()
 	defer r.lock.Unlock()
 
-	buckets := r.byURL[url]
-	i := slices.Index(buckets, bucket)
-	if i < 0 {
+	bucketCount := r.bucketCount[name]
+	if bucketCount < 0 {
 		warn("unregisterBucket couldn't find %v", bucket)
 		return
 	}
-	if len(buckets) == 1 {
-		delete(r.byURL, url)
+	if bucketCount == 1 {
+		delete(r.bucketCount, name)
+		// if an in memory bucket, don't close the sqlite db since it will vanish
 		if !bucket.inMemory {
-			bucket._closeAllInstances()
-			delete(r.inMemoryRef, name)
+			bucket._closeSqliteDB()
+			delete(r.buckets, name)
 		}
 		return
 	}
-	// Copy the slice before mutating, in case a client is iterating it:
-	buckets = slices.Clone(buckets)
-	buckets[i] = nil // remove ptr that might be left in the underlying array, for gc
-	buckets = slices.Delete(buckets, i, i+1)
-	r.byURL[url] = buckets
+	r.bucketCount[name] -= 1
 	return
 }
 
-// Delete bucket from the registry and disk. Closes all existing buckets.
+// deleteBucket deletes a bucket from the registry and disk. Closes all existing buckets of the same name.
 func (r *bucketRegistry) deleteBucket(ctx context.Context, bucket *Bucket) error {
-	url := bucket.url
 	name := bucket.name
 	r.lock.Lock()
 	defer r.lock.Unlock()
 
-	_, ok := r.inMemoryRef[name]
+	_, ok := r.buckets[name]
 	if ok {
-		delete(r.inMemoryRef, name)
+		delete(r.buckets, name)
 	}
-	delete(r.byURL, url)
-	return DeleteBucketAt(url)
+	delete(r.bucketCount, name)
+	return DeleteBucketAt(bucket.url)
 }
 
+// getBucketNames returns a list of all bucket names in the bucketRegistry.
 func (r *bucketRegistry) getBucketNames() []string {
 	r.lock.Lock()
 	defer r.lock.Unlock()
 
-	names := make([]string, 0, len(r.inMemoryRef))
-	for name := range r.inMemoryRef {
+	names := make([]string, 0, len(r.buckets))
+	for name := range r.buckets {
 		names = append(names, name)
 	}
 	return names
 }
 
-// getInMemoryBucket returns an instance of a bucket. If there are other copies of this bucket already in memory, it will return this version. If this is an in memory bucket, the bucket will not be removed until deleteBucket is called.
-func getInMemoryBucket(name string) *Bucket {
-	return cluster.getInMemoryBucket(name)
+// getCachedBucket returns an instance of a bucket. If there are other copies of this bucket already in memory, it will return this version. If this is an in memory bucket, the bucket will not be removed until deleteBucket is called.
+func getCachedBucket(name string) *Bucket {
+	return cluster.getCachedBucket(name)
 }
 
+// registryBucket adds a newly opened Bucket to the registry.
 func registerBucket(bucket *Bucket) {
 	cluster.registerBucket(bucket)
 }
 
-// eeregisterBucket removes a Bucket from the registry. Must be called before closing.
+// unregisterBucket removes a Bucket from the registry. Must be called before closing.
 func unregisterBucket(bucket *Bucket) {
 	cluster.unregisterBucket(bucket)
 }
@@ -139,7 +130,7 @@ func deleteBucket(ctx context.Context, bucket *Bucket) error {
 	return cluster.deleteBucket(ctx, bucket)
 }
 
-// getBucketNames returns a list of all bucket names.
-func getBucketNames() []string {
+// GetBucketNames returns a list of all bucket names.
+func GetBucketNames() []string {
 	return cluster.getBucketNames()
 }

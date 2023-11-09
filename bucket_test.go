@@ -63,24 +63,23 @@ func requireAddRaw(t *testing.T, c sgbucket.DataStore, key string, exp Exp, valu
 	require.True(t, added, "Doc was not added")
 }
 
-func bucketsAtURL(url string) []*Bucket {
+func bucketCount(name string) uint {
 	cluster.lock.Lock()
 	defer cluster.lock.Unlock()
-	return cluster.byURL[url]
+	return cluster.bucketCount[name]
 }
 
 func TestNewBucket(t *testing.T) {
 	ensureNoLeaks(t)
 	bucket := makeTestBucket(t)
-	assert.Equal(t, strings.ToLower(t.Name()), bucket.GetName())
+	bucketName := strings.ToLower(t.Name())
+	assert.Equal(t, bucketName, bucket.GetName())
 	assert.Contains(t, bucket.GetURL(), testBucketDirName)
 
-	url := bucket.url
-	buckets := bucketsAtURL(url)
-	assert.Contains(t, buckets, bucket)
+	require.Equal(t, uint(1), bucketCount(bucketName))
 
 	require.NoError(t, bucket.CloseAndDelete(testCtx(t)))
-	assert.Empty(t, bucketsAtURL(url))
+	require.Equal(t, uint(0), bucketCount(bucketName))
 }
 
 func TestGetMissingBucket(t *testing.T) {
@@ -133,12 +132,12 @@ func TestNewBucketInMemory(t *testing.T) {
 			require.NoError(t, err)
 			require.NotNil(t, bucket)
 
-			assert.Len(t, bucketsAtURL(bucket.url), 1)
+			require.Equal(t, uint(1), bucketCount(bucket.GetName()))
 
 			err = bucket.CloseAndDelete(testCtx(t))
 			assert.NoError(t, err)
 
-			assert.Empty(t, bucketsAtURL(bucket.url))
+			assert.Empty(t, bucketCount(bucket.GetName()))
 		})
 	}
 }
@@ -150,31 +149,27 @@ func TestTwoBucketsOneURL(t *testing.T) {
 	bucket1 := makeTestBucket(t)
 	url := bucket1.url
 
-	bucket2, err := OpenBucket(url, strings.ToLower(t.Name()), CreateNew)
+	bucketName := strings.ToLower(t.Name())
+	bucket2, err := OpenBucket(url, bucketName, CreateNew)
 	require.ErrorContains(t, err, "already exists")
 	require.Nil(t, bucket2)
 
-	bucket2, err = OpenBucket(url, strings.ToLower(t.Name()), ReOpenExisting)
+	bucket2, err = OpenBucket(url, bucketName, ReOpenExisting)
 	require.NoError(t, err)
 	t.Cleanup(func() {
 		assert.NoError(t, bucket2.CloseAndDelete(testCtx(t)))
 	})
 
-	buckets := bucketsAtURL(url)
-	assert.Len(t, buckets, 2)
-	assert.Contains(t, buckets, bucket1)
-	assert.Contains(t, buckets, bucket2)
+	require.Equal(t, uint(2), bucketCount(bucketName))
 
 	bucket1.Close(testCtx(t))
-	buckets = bucketsAtURL(url)
-	assert.Len(t, buckets, 1)
-	assert.Contains(t, buckets, bucket2)
+	require.Equal(t, uint(1), bucketCount(bucketName))
 
 	err = DeleteBucketAt(url)
 	require.Error(t, err)
 
 	require.NoError(t, bucket2.CloseAndDelete(testCtx(t)))
-	assert.Empty(t, bucketsAtURL(url))
+	assert.Empty(t, bucketCount(bucketName))
 
 	err = DeleteBucketAt(url)
 	assert.NoError(t, err)

@@ -455,7 +455,7 @@ func addToCollection(t *testing.T, coll sgbucket.DataStore, key string, exp uint
 }
 
 func ensureNoLeaks(t *testing.T) {
-	t.Cleanup(func() { assert.Len(t, getBucketNames(), 0) })
+	t.Cleanup(func() { assert.Len(t, GetBucketNames(), 0) })
 	ensureNoLeakedFeeds(t)
 }
 
