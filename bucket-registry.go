@@ -62,7 +62,7 @@ func (r *bucketRegistry) getCachedBucket(name string) *Bucket {
 // unregisterBucket removes a Bucket from the registry. Must be called before closing.
 func (r *bucketRegistry) unregisterBucket(bucket *Bucket) {
 	name := bucket.name
-	debug("UNregisterBucket %v at %s", bucket, name, bucket.url)
+	debug("UNregisterBucket %v %s at %s", bucket, name, bucket.url)
 	r.lock.Lock()
 	defer r.lock.Unlock()
 
