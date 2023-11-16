@@ -13,11 +13,12 @@ import (
 	"sync"
 )
 
-// The bucket registry tracks all open Buckets and refcounts them.
-// The canonical version of the bucket is in the buckets member of the bucketRegistry. This will remain in memory for the following length of time:
-//
+// The bucket registry tracks all open Buckets and refcounts them. This represents a cluster of buckets, one per bucket name. When OpenBucket is called, a Bucket instance is added to bucketRegistry, representing the canonical bucket object. This object will not be removed from the bucket registry until:
+
 // * In Memory bucket: bucket is not deleted until any Bucket's CloseAndDelete is closed.
 // * On disk bucket: bucket is deleted from registry when all there are no open copies of the bucket in memory. Unlike in memory bucket, the bucket will stay persisted on disk to be reopened.
+//
+// Any Buckets returned by OpenBucket will be a copy of the canonical bucket object, which shares pointers to all mutable objects and copies of immutable objects. The difference between the canonical copy of the bucket is the `closed` state, representing when the bucket is no longer writeable. Sharing the data structures allows a single DCP prodcuer and expiry framework.
 
 // bucketRegistry tracks all open buckets
 type bucketRegistry struct {
