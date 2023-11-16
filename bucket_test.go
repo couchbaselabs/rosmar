@@ -12,10 +12,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io/fs"
 	"log"
 	"os"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -44,10 +44,10 @@ func makeTestBucket(t *testing.T) *Bucket {
 	LoggingCallback = func(level LogLevel, fmt string, args ...any) {
 		t.Logf(logLevelNamesPrint[level]+fmt, args...)
 	}
-	bucket, err := OpenBucketFromPath(testBucketPath(t), CreateNew)
+	bucket, err := OpenBucket(uriFromPath(testBucketPath(t)), strings.ToLower(t.Name()), CreateNew)
 	require.NoError(t, err)
 	t.Cleanup(func() {
-		bucket.Close(testCtx(t))
+		assert.NoError(t, bucket.CloseAndDelete(testCtx(t)))
 	})
 
 	return bucket
@@ -63,23 +63,30 @@ func requireAddRaw(t *testing.T, c sgbucket.DataStore, key string, exp Exp, valu
 	require.True(t, added, "Doc was not added")
 }
 
+func bucketCount(name string) uint {
+	cluster.lock.Lock()
+	defer cluster.lock.Unlock()
+	return cluster.bucketCount[name]
+}
+
 func TestNewBucket(t *testing.T) {
+	ensureNoLeaks(t)
 	bucket := makeTestBucket(t)
-	assert.Equal(t, testBucketDirName, bucket.GetName())
+	bucketName := strings.ToLower(t.Name())
+	assert.Equal(t, bucketName, bucket.GetName())
 	assert.Contains(t, bucket.GetURL(), testBucketDirName)
 
-	url := bucket.url
-	buckets := bucketsAtURL(url)
-	assert.Contains(t, buckets, bucket)
+	require.Equal(t, uint(1), bucketCount(bucketName))
 
-	bucket.Close(testCtx(t))
-	assert.Empty(t, bucketsAtURL(url))
+	require.NoError(t, bucket.CloseAndDelete(testCtx(t)))
+	require.Equal(t, uint(0), bucketCount(bucketName))
 }
 
 func TestGetMissingBucket(t *testing.T) {
+	ensureNoLeaks(t)
 	path := uriFromPath(testBucketPath(t))
 	require.NoError(t, DeleteBucketAt(path))
-	bucket, err := OpenBucket(path, ReOpenExisting)
+	bucket, err := OpenBucket(path, strings.ToLower(t.Name()), ReOpenExisting)
 	if runtime.GOOS == "windows" {
 		assert.ErrorContains(t, err, "unable to open database file: The system cannot find the path specified")
 	} else {
@@ -89,9 +96,13 @@ func TestGetMissingBucket(t *testing.T) {
 }
 
 func TestCallClosedBucket(t *testing.T) {
+	ensureNoLeaks(t)
 	bucket := makeTestBucket(t)
 	c := bucket.DefaultDataStore()
 	bucket.Close(testCtx(t))
+	defer func() {
+		assert.NoError(t, bucket.CloseAndDelete(testCtx(t)))
+	}()
 	_, err := bucket.ListDataStores()
 	assert.ErrorContains(t, err, "bucket has been closed")
 	_, _, err = c.GetRaw("foo")
@@ -99,62 +110,73 @@ func TestCallClosedBucket(t *testing.T) {
 }
 
 func TestNewBucketInMemory(t *testing.T) {
+	ensureNoLeaks(t)
 	assert.NoError(t, DeleteBucketAt(InMemoryURL))
 
-	modes := []OpenMode{CreateNew, CreateOrOpen}
-	for _, mode := range modes {
-		bucket, err := OpenBucket(InMemoryURL, mode)
-		require.NoError(t, err)
-		require.NotNil(t, bucket)
-
-		assert.Empty(t, bucketsAtURL(bucket.url))
-
-		err = bucket.CloseAndDelete()
-		assert.NoError(t, err)
+	testCases := []struct {
+		name string
+		mode OpenMode
+	}{
+		{
+			name: "CreateNew",
+			mode: CreateNew,
+		},
+		{
+			name: "CreateOrOpen",
+			mode: CreateOrOpen,
+		},
 	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			bucket, err := OpenBucket(InMemoryURL, strings.ToLower(t.Name()), testCase.mode)
+			require.NoError(t, err)
+			require.NotNil(t, bucket)
 
-	_, err := OpenBucket(InMemoryURL, ReOpenExisting)
-	assert.Error(t, err)
-	assert.Equal(t, err, fs.ErrNotExist)
+			require.Equal(t, uint(1), bucketCount(bucket.GetName()))
+
+			err = bucket.CloseAndDelete(testCtx(t))
+			assert.NoError(t, err)
+
+			assert.Empty(t, bucketCount(bucket.GetName()))
+		})
+	}
 }
 
 var defaultCollection = dsName("_default", "_default")
 
 func TestTwoBucketsOneURL(t *testing.T) {
+	ensureNoLeaks(t)
 	bucket1 := makeTestBucket(t)
 	url := bucket1.url
 
-	bucket2, err := OpenBucket(url, CreateNew)
+	bucketName := strings.ToLower(t.Name())
+	bucket2, err := OpenBucket(url, bucketName, CreateNew)
 	require.ErrorContains(t, err, "already exists")
 	require.Nil(t, bucket2)
 
-	bucket2, err = OpenBucket(url, ReOpenExisting)
+	bucket2, err = OpenBucket(url, bucketName, ReOpenExisting)
 	require.NoError(t, err)
 	t.Cleanup(func() {
-		bucket2.Close(testCtx(t))
+		assert.NoError(t, bucket2.CloseAndDelete(testCtx(t)))
 	})
 
-	buckets := bucketsAtURL(url)
-	assert.Len(t, buckets, 2)
-	assert.Contains(t, buckets, bucket1)
-	assert.Contains(t, buckets, bucket2)
+	require.Equal(t, uint(2), bucketCount(bucketName))
 
 	bucket1.Close(testCtx(t))
-	buckets = bucketsAtURL(url)
-	assert.Len(t, buckets, 1)
-	assert.Contains(t, buckets, bucket2)
+	require.Equal(t, uint(1), bucketCount(bucketName))
 
 	err = DeleteBucketAt(url)
-	assert.ErrorContains(t, err, "there is a Bucket open at that URL")
+	require.Error(t, err)
 
-	bucket2.Close(testCtx(t))
-	assert.Empty(t, bucketsAtURL(url))
+	require.NoError(t, bucket2.CloseAndDelete(testCtx(t)))
+	assert.Empty(t, bucketCount(bucketName))
 
 	err = DeleteBucketAt(url)
 	assert.NoError(t, err)
 }
 
 func TestDefaultCollection(t *testing.T) {
+	ensureNoLeaks(t)
 	bucket := makeTestBucket(t)
 
 	// Initially one collection:
@@ -164,10 +186,11 @@ func TestDefaultCollection(t *testing.T) {
 
 	coll := bucket.DefaultDataStore()
 	assert.NotNil(t, coll)
-	assert.Equal(t, "RosmarTest._default._default", coll.GetName())
+	assert.Equal(t, strings.ToLower(t.Name())+"._default._default", coll.GetName())
 }
 
 func TestCreateCollection(t *testing.T) {
+	ensureNoLeaks(t)
 	bucket := makeTestBucket(t)
 
 	collName := dsName("_default", "foo")
@@ -177,7 +200,7 @@ func TestCreateCollection(t *testing.T) {
 	coll, err := bucket.NamedDataStore(collName)
 	assert.NoError(t, err)
 	assert.NotNil(t, coll)
-	assert.Equal(t, "RosmarTest._default.foo", coll.GetName())
+	assert.Equal(t, strings.ToLower(t.Name())+"._default.foo", coll.GetName())
 
 	colls, err := bucket.ListDataStores()
 	assert.NoError(t, err)
@@ -187,6 +210,7 @@ func TestCreateCollection(t *testing.T) {
 //////// MULTI-COLLECTION:
 
 func TestMultiCollectionBucket(t *testing.T) {
+	ensureNoLeaks(t)
 	ensureNoLeakedFeeds(t)
 
 	huddle := makeTestBucket(t)
@@ -261,8 +285,8 @@ func TestGetPersistentMultiCollectionBucket(t *testing.T) {
 	huddle.Close(testCtx(t))
 
 	// Reopen persisted collection bucket
-	loadedHuddle, loadedErr := OpenBucket(huddleURL, ReOpenExisting)
-	assert.NoError(t, loadedErr)
+	loadedHuddle, loadedErr := OpenBucket(huddleURL, strings.ToLower(t.Name()), ReOpenExisting)
+	require.NoError(t, loadedErr)
 
 	// validate contents
 	var loadedValue interface{}
@@ -291,8 +315,8 @@ func TestGetPersistentMultiCollectionBucket(t *testing.T) {
 	loadedHuddle.Close(testCtx(t))
 
 	// Reopen persisted collection bucket again to ensure dropped collection is not present
-	reloadedHuddle, reloadedErr := OpenBucket(huddleURL, ReOpenExisting)
-	assert.NoError(t, reloadedErr)
+	reloadedHuddle, reloadedErr := OpenBucket(huddleURL, strings.ToLower(t.Name()), ReOpenExisting)
+	require.NoError(t, reloadedErr)
 
 	// reopen dropped collection, verify that previous data is not present
 	var reloadedValue interface{}
@@ -308,14 +332,14 @@ func TestGetPersistentMultiCollectionBucket(t *testing.T) {
 	assert.Equal(t, "c2_value", reloadedValue)
 
 	// Close and Delete the bucket, should delete underlying collections
-	require.NoError(t, reloadedHuddle.CloseAndDelete())
+	require.NoError(t, reloadedHuddle.CloseAndDelete(testCtx(t)))
 
 	// Attempt to reopen deleted bucket
-	_, err = OpenBucket(huddleURL, ReOpenExisting)
+	_, err = OpenBucket(huddleURL, strings.ToLower(t.Name()), ReOpenExisting)
 	assert.Error(t, err)
 
 	// Create new bucket at same path:
-	postDeleteHuddle, err := OpenBucket(huddleURL, CreateNew)
+	postDeleteHuddle, err := OpenBucket(huddleURL, strings.ToLower(t.Name()), CreateNew)
 	require.NoError(t, err)
 	var postDeleteValue interface{}
 	postDeleteC2, err := postDeleteHuddle.NamedDataStore(dsName("scope1", "collection2"))
@@ -323,10 +347,11 @@ func TestGetPersistentMultiCollectionBucket(t *testing.T) {
 	_, err = postDeleteC2.Get("doc1", &postDeleteValue)
 	require.Error(t, err)
 	require.True(t, errors.As(err, &sgbucket.MissingError{}))
-	require.NoError(t, postDeleteHuddle.CloseAndDelete())
+	require.NoError(t, postDeleteHuddle.CloseAndDelete(testCtx(t)))
 }
 
 func TestExpiration(t *testing.T) {
+	ensureNoLeaks(t)
 	bucket := makeTestBucket(t)
 	c := bucket.DefaultDataStore()
 
@@ -379,6 +404,7 @@ func TestExpiration(t *testing.T) {
 }
 
 func TestUriFromPathWindows(t *testing.T) {
+	ensureNoLeaks(t)
 	if runtime.GOOS != "windows" {
 		t.Skip("This test is only for windows")
 	}
@@ -416,6 +442,7 @@ func TestUriFromPathWindows(t *testing.T) {
 }
 
 func TestUriFromPathNonWindows(t *testing.T) {
+	ensureNoLeaks(t)
 	if runtime.GOOS == "windows" {
 		t.Skip("This test is only for non-windows")
 	}

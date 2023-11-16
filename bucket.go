@@ -9,6 +9,7 @@
 package rosmar
 
 import (
+	"context"
 	"database/sql"
 	_ "embed"
 	"errors"
@@ -16,7 +17,6 @@ import (
 	"io/fs"
 	"net/url"
 	"os"
-	"path"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -32,15 +32,17 @@ import (
 // Rosmar implementation of a collection-aware bucket.
 // Implements sgbucket interfaces BucketStore, DynamicDataStoreBucket, DeletableStore, MutationFeedStore2.
 type Bucket struct {
-	url         string         // Filesystem path or other URL
-	name        string         // Bucket name
-	collections collectionsMap // Collections, indexed by DataStoreName
-	mutex       sync.Mutex     // mutex for synchronized access to Bucket
-	sqliteDB    *sql.DB        // SQLite database handle (do not access; call db() instead)
-	expTimer    *time.Timer    // Schedules expiration of docs
-	nextExp     uint32         // Timestamp when expTimer will run (0 if never)
-	serial      uint32         // Serial number for logging
-	inMemory    bool           // True if it's an in-memory database
+	url             string         // Filesystem path or other URL
+	name            string         // Bucket name
+	collections     collectionsMap // Collections, indexed by DataStoreName
+	collectionFeeds map[sgbucket.DataStoreNameImpl][]*dcpFeed
+	mutex           *sync.Mutex // mutex for synchronized access to Bucket
+	sqliteDB        *sql.DB     // SQLite database handle (do not access; call db() instead)
+	expTimer        *time.Timer // Schedules expiration of docs
+	nextExp         *uint32     // Timestamp when expTimer will run (0 if never)
+	serial          uint32      // Serial number for logging
+	inMemory        bool        // True if it's an in-memory database
+	closed          bool        // represents state when it is closed
 }
 
 type collectionsMap = map[sgbucket.DataStoreNameImpl]*Collection
@@ -76,33 +78,41 @@ const (
 	ReOpenExisting        // Open an existing bucket, or fail if none exists.
 )
 
-// OpenBucketFromPath opens a bucket from a filesystem path. See OpenBucket for details.
-func OpenBucketFromPath(path string, mode OpenMode) (*Bucket, error) {
-	return OpenBucket(uriFromPath(path), mode)
-}
-
 // Creates a new bucket, or opens an existing one.
 //
 // The URL should have the scheme 'rosmar' or 'file' and a filesystem path.
 // The path represents a directory; the SQLite database files will be created inside it.
 // Alternatively, the `InMemoryURL` can be given, to create an in-memory bucket with no file.
-func OpenBucket(urlStr string, mode OpenMode) (bucket *Bucket, err error) {
+func OpenBucket(urlStr string, bucketName string, mode OpenMode) (b *Bucket, err error) {
 	traceEnter("OpenBucket", "%q, %d", urlStr, mode)
 	defer func() { traceExit("OpenBucket", err, "ok") }()
+
 	u, err := encodeDBURL(urlStr)
 	if err != nil {
 		return nil, err
 	}
 	urlStr = u.String()
 
+	bucket := getCachedBucket(bucketName)
+	if bucket != nil {
+		if mode == CreateNew {
+			return nil, fs.ErrExist
+		}
+		if urlStr != bucket.url {
+			return nil, fmt.Errorf("bucket %q already exists at %q, will not open at %q", bucketName, bucket.url, urlStr)
+		}
+		registerBucket(bucket)
+		return bucket, nil
+
+	}
+
 	query := u.Query()
 	inMemory := query.Get("mode") == "memory"
-	var bucketName string
 	if inMemory {
 		if mode == ReOpenExisting {
 			return nil, fs.ErrNotExist
 		}
-		bucketName = "memory"
+		u = u.JoinPath(bucketName)
 	} else {
 		dir := u.Path
 		if runtime.GOOS == "windows" {
@@ -124,7 +134,6 @@ func OpenBucket(urlStr string, mode OpenMode) (bucket *Bucket, err error) {
 
 		query.Set("mode", ifelse(mode == ReOpenExisting, "rw", "rwc"))
 		u = u.JoinPath(kDBFilename)
-		bucketName = path.Base(dir)
 	}
 
 	// See https://github.com/mattn/go-sqlite3#connection-string
@@ -160,12 +169,20 @@ func OpenBucket(urlStr string, mode OpenMode) (bucket *Bucket, err error) {
 	db.SetMaxOpenConns(ifelse(inMemory, 1, kMaxOpenConnections))
 
 	bucket = &Bucket{
-		url:         urlStr,
-		sqliteDB:    db,
-		collections: make(map[sgbucket.DataStoreNameImpl]*Collection),
-		inMemory:    inMemory,
-		serial:      serial,
+		url:             urlStr,
+		sqliteDB:        db,
+		collections:     make(map[sgbucket.DataStoreNameImpl]*Collection),
+		collectionFeeds: make(map[sgbucket.DataStoreNameImpl][]*dcpFeed),
+		mutex:           &sync.Mutex{},
+		nextExp:         new(uint32),
+		inMemory:        inMemory,
+		serial:          serial,
 	}
+	defer func() {
+		if err != nil {
+			_ = bucket.CloseAndDelete(context.TODO())
+		}
+	}()
 
 	// Initialize the schema if necessary:
 	var vers int
@@ -180,6 +197,10 @@ func OpenBucket(urlStr string, mode OpenMode) (bucket *Bucket, err error) {
 	} else {
 		bucket.scheduleExpiration()
 	}
+	err = bucket.setName(bucketName)
+	if err != nil {
+		return nil, err
+	}
 
 	registerBucket(bucket)
 	return bucket, err
@@ -190,18 +211,14 @@ func OpenBucket(urlStr string, mode OpenMode) (bucket *Bucket, err error) {
 // bucket name. The bucket will be opened in a subdirectory of the directory URL.
 func OpenBucketIn(dirUrlStr string, bucketName string, mode OpenMode) (*Bucket, error) {
 	if isInMemoryURL(dirUrlStr) {
-		bucket, err := OpenBucket(dirUrlStr, mode)
-		if err == nil {
-			err = bucket.SetName(bucketName)
-		}
-		return bucket, err
+		return OpenBucket(dirUrlStr, bucketName, mode)
 	}
 
 	u, err := parseDBFileURL(dirUrlStr)
 	if err != nil {
 		return nil, err
 	}
-	return OpenBucket(u.JoinPath(bucketName).String(), mode)
+	return OpenBucket(u.JoinPath(bucketName).String(), bucketName, mode)
 }
 
 // Deletes the bucket at the given URL, i.e. the filesystem directory at its path, if it exists.
@@ -219,10 +236,6 @@ func DeleteBucketAt(urlStr string) (err error) {
 		return err
 	} else if u.Query().Get("mode") == "memory" {
 		return nil
-	}
-
-	if len(bucketsAtURL(u.String())) > 0 {
-		return fmt.Errorf("there is a Bucket open at that URL")
 	}
 
 	// For safety's sake, don't delete just any directory. Ensure it contains a db file:
@@ -288,8 +301,7 @@ func (bucket *Bucket) initializeSchema(bucketName string) (err error) {
 		sql.Named("COLL", sgbucket.DefaultCollection),
 	)
 	if err != nil {
-		_ = bucket.CloseAndDelete()
-		panic("Rosmar SQL schema is invalid: " + err.Error())
+		return fmt.Errorf("Rosmar SQL schema is invalid: %w", err)
 	}
 	bucket.name = bucketName
 	return
@@ -306,11 +318,10 @@ func (bucket *Bucket) db() queryable {
 
 // Returns the database handle as a `queryable` interface value. This is the same as `db()` without locking. This is not safe to call without bucket.mutex being locked the caller.
 func (bucket *Bucket) _db() queryable {
-	if db := bucket.sqliteDB; db != nil {
-		return db
-	} else {
+	if bucket.closed {
 		return closedDB{}
 	}
+	return bucket.sqliteDB
 }
 
 // Runs a function within a SQLite transaction.
@@ -322,7 +333,7 @@ func (bucket *Bucket) inTransaction(fn func(txn *sql.Tx) error) error {
 	bucket.mutex.Lock()
 	defer bucket.mutex.Unlock()
 
-	if bucket.sqliteDB == nil {
+	if bucket.closed {
 		return ErrBucketClosed
 	}
 
@@ -358,6 +369,23 @@ func (bucket *Bucket) inTransaction(fn func(txn *sql.Tx) error) error {
 		break
 	}
 	return remapError(err)
+}
+
+// Make a copy of the bucket, but it holds the same underlying structures.
+func (b *Bucket) copy() *Bucket {
+	r := &Bucket{
+		url:             b.url,
+		name:            b.name,
+		collectionFeeds: b.collectionFeeds,
+		collections:     make(collectionsMap),
+		mutex:           b.mutex,
+		sqliteDB:        b.sqliteDB,
+		expTimer:        b.expTimer,
+		nextExp:         b.nextExp,
+		serial:          b.serial,
+		inMemory:        b.inMemory,
+	}
+	return r
 }
 
 // uriFromPath converts a file path to a rosmar URI. On windows, these need to have forward slashes and drive letters will have an extra /, such as romsar://c:/foo/bar.

@@ -24,7 +24,7 @@ import (
 )
 
 func TestDeleteThenAdd(t *testing.T) {
-	ensureNoLeakedFeeds(t)
+	ensureNoLeaks(t)
 	coll := makeTestBucket(t).DefaultDataStore()
 
 	var value interface{}
@@ -41,7 +41,7 @@ func TestDeleteThenAdd(t *testing.T) {
 }
 
 func TestIncr(t *testing.T) {
-	ensureNoLeakedFeeds(t)
+	ensureNoLeaks(t)
 	coll := makeTestBucket(t).DefaultDataStore()
 	count, err := coll.Incr("count1", 1, 100, 0)
 	assert.NoError(t, err, "Incr")
@@ -62,7 +62,7 @@ func TestIncr(t *testing.T) {
 
 // Spawns 1000 goroutines that 'simultaneously' use Incr to increment the same counter by 1.
 func TestIncrAtomic(t *testing.T) {
-	ensureNoLeakedFeeds(t)
+	ensureNoLeaks(t)
 	coll := makeTestBucket(t).DefaultDataStore()
 	var waiters sync.WaitGroup
 	numIncrements := 5
@@ -82,7 +82,7 @@ func TestIncrAtomic(t *testing.T) {
 }
 
 func TestAppend(t *testing.T) {
-	ensureNoLeakedFeeds(t)
+	ensureNoLeaks(t)
 	coll := makeTestBucket(t).DefaultDataStore()
 
 	exists, err := coll.Exists("key")
@@ -105,7 +105,7 @@ func TestAppend(t *testing.T) {
 }
 
 func TestGets(t *testing.T) {
-	ensureNoLeakedFeeds(t)
+	ensureNoLeaks(t)
 
 	coll := makeTestBucket(t).DefaultDataStore()
 
@@ -181,7 +181,7 @@ func TestEvalSubdocPaths(t *testing.T) {
 }
 
 func initSubDocTest(t *testing.T) sgbucket.DataStore {
-	ensureNoLeakedFeeds(t)
+	ensureNoLeaks(t)
 
 	coll := makeTestBucket(t).DefaultDataStore()
 	require.True(t, coll.IsSupported(sgbucket.BucketStoreFeatureSubdocOperations))
@@ -260,7 +260,7 @@ func TestInsertSubDoc(t *testing.T) {
 }
 
 func TestWriteCas(t *testing.T) {
-	ensureNoLeakedFeeds(t)
+	ensureNoLeaks(t)
 
 	coll := makeTestBucket(t).DefaultDataStore()
 
@@ -336,7 +336,7 @@ func TestWriteCas(t *testing.T) {
 }
 
 func TestRemove(t *testing.T) {
-	ensureNoLeakedFeeds(t)
+	ensureNoLeaks(t)
 
 	coll := makeTestBucket(t).DefaultDataStore()
 
@@ -452,6 +452,11 @@ func addToCollection(t *testing.T, coll sgbucket.DataStore, key string, exp uint
 	added, err := coll.Add(key, exp, value)
 	require.NoError(t, err)
 	require.True(t, added, "Expected doc to be added")
+}
+
+func ensureNoLeaks(t *testing.T) {
+	t.Cleanup(func() { assert.Len(t, GetBucketNames(), 0) })
+	ensureNoLeakedFeeds(t)
 }
 
 func ensureNoLeakedFeeds(t *testing.T) {

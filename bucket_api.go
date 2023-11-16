@@ -31,7 +31,7 @@ func (bucket *Bucket) GetURL() string { return bucket.url }
 func (bucket *Bucket) GetName() string { return bucket.name }
 
 // Renames the bucket. This doesn't affect its URL, only the value returned by GetName.
-func (bucket *Bucket) SetName(name string) error {
+func (bucket *Bucket) setName(name string) error {
 	info("Bucket %s is now named %q", bucket, name)
 	_, err := bucket.db().Exec(`UPDATE bucket SET name=?1`, name)
 	if err == nil {
@@ -57,6 +57,11 @@ func (bucket *Bucket) Close(_ context.Context) {
 	bucket.mutex.Lock()
 	defer bucket.mutex.Unlock()
 
+	bucket.closed = true
+}
+
+// _closeSqliteDB closes the underlying sqlite database and shuts down dcpFeeds. Must have a lock to call this function.
+func (bucket *Bucket) _closeSqliteDB() {
 	if bucket.expTimer != nil {
 		bucket.expTimer.Stop()
 	}
@@ -71,16 +76,11 @@ func (bucket *Bucket) Close(_ context.Context) {
 }
 
 // Closes a bucket and deletes its directory and files (unless it's in-memory.)
-func (bucket *Bucket) CloseAndDelete() (err error) {
-	bucket.Close(context.TODO())
-
+func (bucket *Bucket) CloseAndDelete(ctx context.Context) (err error) {
 	bucket.mutex.Lock()
 	defer bucket.mutex.Unlock()
-	if bucket.url != "" {
-		err = DeleteBucketAt(bucket.url)
-		bucket.url = ""
-	}
-	return err
+	bucket._closeSqliteDB()
+	return deleteBucket(ctx, bucket)
 }
 
 func (bucket *Bucket) IsSupported(feature sgbucket.BucketStoreFeature) bool {
@@ -349,8 +349,8 @@ func (bucket *Bucket) scheduleExpirationAtOrBefore(exp uint32) {
 	if exp > 0 {
 		bucket.mutex.Lock()
 		defer bucket.mutex.Unlock()
-		if exp < bucket.nextExp || bucket.nextExp == 0 {
-			bucket.nextExp = exp
+		if exp < *bucket.nextExp || *bucket.nextExp == 0 {
+			bucket.nextExp = &exp
 			dur := expDuration(exp)
 			if dur < 0 {
 				dur = 0
@@ -367,7 +367,7 @@ func (bucket *Bucket) scheduleExpirationAtOrBefore(exp uint32) {
 
 func (bucket *Bucket) doExpiration() {
 	bucket.mutex.Lock()
-	bucket.nextExp = 0
+	bucket.nextExp = func(x uint32) *uint32 { return &x }(0)
 	bucket.mutex.Unlock()
 
 	debug("EXP: Running scheduled expiration...")

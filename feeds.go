@@ -134,9 +134,9 @@ func (c *Collection) StartDCPFeed(
 		feed.events.push(nil) // push an eof
 	} else {
 		// Register the feed with the collection for future notifications:
-		c.mutex.Lock()
-		c.feeds = append(c.feeds, feed)
-		c.mutex.Unlock()
+		c.bucket.mutex.Lock()
+		c.bucket.collectionFeeds[c.DataStoreNameImpl] = append(c.bucket.collectionFeeds[c.DataStoreNameImpl], feed)
+		c.bucket.mutex.Unlock()
 	}
 	go feed.run()
 	return nil
@@ -170,20 +170,22 @@ func (c *Collection) postNewEvent(e *event) {
 	c.postEvent(feedEvent)
 	c.bucket.scheduleExpirationAtOrBefore(e.exp)
 
-	// Tell collections of other buckets on the same db file to post the event too:
-	for _, otherBucket := range bucketsAtURL(c.bucket.url) {
-		if otherBucket != c.bucket {
-			if otherCollection := otherBucket.getOpenCollectionByID(c.id); otherCollection != nil {
-				otherCollection.postEvent(feedEvent)
+	/*
+		// Tell collections of other buckets on the same db file to post the event too:
+		for _, otherBucket := range bucketsAtURL(c.bucket.url) {
+			if otherBucket != c.bucket {
+				if otherCollection := otherBucket.getOpenCollectionByID(c.id); otherCollection != nil {
+					otherCollection.postEvent(feedEvent)
+				}
 			}
 		}
-	}
+	*/
 }
 
 func (c *Collection) postEvent(event *sgbucket.FeedEvent) {
-	c.mutex.Lock()
-	feeds := c.feeds
-	c.mutex.Unlock()
+	c.bucket.mutex.Lock()
+	feeds := c.bucket.collectionFeeds[c.DataStoreNameImpl]
+	c.bucket.mutex.Unlock()
 
 	for _, feed := range feeds {
 		if feed != nil {
@@ -200,10 +202,10 @@ func (c *Collection) postEvent(event *sgbucket.FeedEvent) {
 
 // stops all feeds. Caller MUST hold the bucket's lock.
 func (c *Collection) _stopFeeds() {
-	for _, feed := range c.feeds {
+	for _, feed := range c.bucket.collectionFeeds[c.DataStoreNameImpl] {
 		feed.close()
 	}
-	c.feeds = nil
+	c.bucket.collectionFeeds = nil
 }
 
 //////// DCPFEED:

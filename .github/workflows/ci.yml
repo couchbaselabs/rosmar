@@ -61,11 +61,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
+      - uses: actions/setup-go@v4
+        with:
+          go-version: 1.21.3
+          cache: false
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v3
         with:
-          version: v1.52.0
-          args: --timeout 3m # this is slow only in github actions
+          version: v1.55.0
 
   test-race:
     runs-on: ubuntu-latest

@@ -30,7 +30,6 @@ type Collection struct {
 	bucket                     *Bucket
 	id                         CollectionID // Row ID in collections table; public ID + 1
 	mutex                      sync.Mutex
-	feeds                      []*dcpFeed
 	viewCache                  map[viewKey]*rosmarView
 }
 
