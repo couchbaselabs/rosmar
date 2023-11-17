@@ -79,6 +79,9 @@ func (e *expiryManager) _setNext(exp uint32) {
 
 // scheduleExpirationAtOrBefore schedules the next expiration of documents to occur, from the minimum expiration value in the bucket.
 func (e *expiryManager) scheduleExpirationAtOrBefore(exp uint32) {
+	if exp == 0 {
+		return
+	}
 	e.mutex.Lock()
 	defer e.mutex.Unlock()
 	e._scheduleExpirationAtOrBefore(exp)
