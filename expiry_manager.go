@@ -13,17 +13,17 @@ import (
 	"time"
 )
 
-// expirationManager handles expiration for a given bucket. It stores a timer which will call expirationFunc to delete documents. The value of when the timer
-type expirationManager struct {
-	mutex          *sync.Mutex // mutex for synchronized access to expirationManager
+// expiryManager handles expiration for a given bucket. It stores a timer which will call expirationFunc to delete documents. The value of when the timer
+type expiryManager struct {
+	mutex          *sync.Mutex // mutex for synchronized access to expiryManager
 	timer          *time.Timer // Schedules expiration of docs
 	nextExp        *uint32     // Timestamp when expTimer will run (0 if never)
 	expirationFunc func()      // Function to call when timer expires
 }
 
-func newExpirationManager(expiractionFunc func()) *expirationManager {
+func newExpirationManager(expiractionFunc func()) *expiryManager {
 	var nextExp uint32
-	return &expirationManager{
+	return &expiryManager{
 		mutex:          &sync.Mutex{},
 		nextExp:        &nextExp,
 		expirationFunc: expiractionFunc,
@@ -31,7 +31,7 @@ func newExpirationManager(expiractionFunc func()) *expirationManager {
 }
 
 // stop stops existing timers and waits for any expiration processes to complete
-func (e *expirationManager) stop() {
+func (e *expiryManager) stop() {
 	e.mutex.Lock()
 	defer e.mutex.Unlock()
 	if e.timer != nil {
@@ -40,25 +40,25 @@ func (e *expirationManager) stop() {
 }
 
 // _getNext returns the next expiration time, 0 if there is no scheduled expiration.
-func (e *expirationManager) _getNext() uint32 {
+func (e *expiryManager) _getNext() uint32 {
 	return *e.nextExp
 }
 
 // setNext sets the next expiration time and schedules an expiration to occur after that time.
-func (e *expirationManager) setNext(exp uint32) {
+func (e *expiryManager) setNext(exp uint32) {
 	e.mutex.Lock()
 	defer e.mutex.Unlock()
 	e._setNext(exp)
 }
 
 // _clearNext clears the next expiration time.
-func (e *expirationManager) _clearNext() {
+func (e *expiryManager) _clearNext() {
 	var exp uint32
 	e.nextExp = &exp
 }
 
 // setNext sets the next expiration time and schedules an expiration to occur after that time. Requires caller to have acquired mutex.
-func (e *expirationManager) _setNext(exp uint32) {
+func (e *expiryManager) _setNext(exp uint32) {
 	info("_setNext ", exp)
 	e.nextExp = &exp
 	if exp == 0 {
@@ -78,14 +78,14 @@ func (e *expirationManager) _setNext(exp uint32) {
 }
 
 // scheduleExpirationAtOrBefore schedules the next expiration of documents to occur, from the minimum expiration value in the bucket.
-func (e *expirationManager) scheduleExpirationAtOrBefore(exp uint32) {
+func (e *expiryManager) scheduleExpirationAtOrBefore(exp uint32) {
 	e.mutex.Lock()
 	defer e.mutex.Unlock()
 	e._scheduleExpirationAtOrBefore(exp)
 }
 
 // _scheduleExpirationAtOrBefore schedules the next expiration of documents to occur, from the minimum expiration value in the bucket. Requires the mutext to be held.
-func (e *expirationManager) _scheduleExpirationAtOrBefore(exp uint32) {
+func (e *expiryManager) _scheduleExpirationAtOrBefore(exp uint32) {
 	if exp == 0 {
 		return
 	}
@@ -97,7 +97,7 @@ func (e *expirationManager) _scheduleExpirationAtOrBefore(exp uint32) {
 }
 
 // runExpiry is called when the timer expires. It calls the expirationFunc and then reschedules the timer if necessary.
-func (e *expirationManager) runExpiry() {
+func (e *expiryManager) runExpiry() {
 	e.mutex.Lock()
 	defer e.mutex.Unlock()
 	e.expirationFunc()

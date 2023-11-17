@@ -36,12 +36,12 @@ type Bucket struct {
 	name            string         // Bucket name
 	collections     collectionsMap // Collections, indexed by DataStoreName
 	collectionFeeds map[sgbucket.DataStoreNameImpl][]*dcpFeed
-	mutex           *sync.Mutex        // mutex for synchronized access to Bucket
-	sqliteDB        *sql.DB            // SQLite database handle (do not access; call db() instead)
-	expManager      *expirationManager // expiration manager for bucket
-	serial          uint32             // Serial number for logging
-	inMemory        bool               // True if it's an in-memory database
-	closed          bool               // represents state when it is closed
+	mutex           *sync.Mutex    // mutex for synchronized access to Bucket
+	sqliteDB        *sql.DB        // SQLite database handle (do not access; call db() instead)
+	expManager      *expiryManager // expiration manager for bucket
+	serial          uint32         // Serial number for logging
+	inMemory        bool           // True if it's an in-memory database
+	closed          bool           // represents state when it is closed
 }
 
 type collectionsMap = map[sgbucket.DataStoreNameImpl]*Collection
