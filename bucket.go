@@ -202,7 +202,7 @@ func OpenBucket(urlStr string, bucketName string, mode OpenMode) (b *Bucket, err
 	}
 
 	registerBucket(bucket)
-	return bucket, err
+	return bucket.copy(), err
 }
 
 // Creates or re-opens a bucket, like OpenBucket.
@@ -323,17 +323,8 @@ func (bucket *Bucket) _db() queryable {
 	return bucket.sqliteDB
 }
 
-// _underlyingDB returns the database handle as a `queryable` interface value. This should only be used for bucket maintanence operations that should occur regardless of if bucket is open or closed. This is not safe to call without bucket.mutex being locked the caller.
-func (bucket *Bucket) _underlyingDB() queryable {
-	if bucket.sqliteDB == nil {
-		logError("bucket.sqliteDB is nil for _underlyingDB call. This function is being called after bucket is closed.")
-		return closedDB{}
-	}
-	return bucket.sqliteDB
-}
-
 // Runs a function within a SQLite transaction.
-func (bucket *Bucket) inTransaction(fn func(txn *sql.Tx) error, checkClosedBucket bucketClosedCheck) error {
+func (bucket *Bucket) inTransaction(fn func(txn *sql.Tx) error) error {
 	// SQLite allows only a single writer, so use a mutex to avoid BUSY and LOCKED errors.
 	// However, these errors can still occur (somehow?), so we retry if we get one.
 	// --Update, 25 July 2023: After adding "_txlock=immediate" to the DB options when opening,
@@ -341,7 +332,7 @@ func (bucket *Bucket) inTransaction(fn func(txn *sql.Tx) error, checkClosedBucke
 	bucket.mutex.Lock()
 	defer bucket.mutex.Unlock()
 
-	if checkClosedBucket == true && bucket.closed {
+	if bucket.closed {
 		return ErrBucketClosed
 	}
 

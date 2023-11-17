@@ -43,8 +43,7 @@ func (r *bucketRegistry) registerBucket(bucket *Bucket) {
 	defer r.lock.Unlock()
 	_, ok := r.buckets[name]
 	if !ok {
-		b := bucket.copy()
-		r.buckets[name] = b
+		r.buckets[name] = bucket
 	}
 	r.bucketCount[name] += 1
 }

@@ -360,7 +360,7 @@ func (c *Collection) WriteCas(key string, flags int, exp Exp, cas CAS, val any, 
 // Remove creates a document tombstone. It removes the document's value and user xattrs.
 func (c *Collection) Remove(key string, cas CAS) (casOut CAS, err error) {
 	traceEnter("Remove", "%q, 0x%x", key, cas)
-	casOut, err = c.remove(key, &cas, checkBucketClosed)
+	casOut, err = c.remove(key, &cas)
 	traceExit("Remove", err, "0x%x", casOut)
 	return
 }
@@ -368,15 +368,14 @@ func (c *Collection) Remove(key string, cas CAS) (casOut CAS, err error) {
 // Delete creates a document tombstone. It removes the document's value and user xattrs. Equivalent to Remove without a CAS check.
 func (c *Collection) Delete(key string) (err error) {
 	traceEnter("Delete", "%q", key)
-	_, err = c.remove(key, nil, checkBucketClosed)
+	_, err = c.remove(key, nil)
 	traceExit("Delete", err, "ok")
 	return err
 }
 
 // remove creates a document tombstone. It removes the document's value and user xattrs. checkClosed will allow removing the document even the bucket instance is "closed".
-func (c *Collection) remove(key string, ifCas *CAS, checkClosed bucketClosedCheck) (casOut CAS, err error) {
-	fmt.Println("remove", checkClosed)
-	err = c.withNewCasAndBucketClosedCheck(func(txn *sql.Tx, newCas CAS) (e *event, err error) {
+func (c *Collection) remove(key string, ifCas *CAS) (casOut CAS, err error) {
+	err = c.withNewCas(func(txn *sql.Tx, newCas CAS) (e *event, err error) {
 		// Get the doc, possibly checking cas:
 		var cas CAS
 		var rawXattrs []byte
@@ -420,7 +419,7 @@ func (c *Collection) remove(key string, ifCas *CAS, checkClosed bucketClosedChec
 		}
 		casOut = newCas
 		return
-	}, checkClosed)
+	})
 	return
 }
 
@@ -529,7 +528,7 @@ func (c *Collection) expireDocuments() (count int64, err error) {
 
 	// First find all the expired docs and collect their keys:
 	exp := nowAsExpiry()
-	rows, err := c.bucket._underlyingDB().Query(`SELECT key FROM documents
+	rows, err := c.db().Query(`SELECT key FROM documents
 								WHERE collection = ?1 AND exp > 0 AND exp <= ?2`, c.id, exp)
 	if err != nil {
 		return
@@ -550,10 +549,8 @@ func (c *Collection) expireDocuments() (count int64, err error) {
 	// will get its own db connection, and if the db only supports one connection (i.e. in-memory)
 	// having both queries active would deadlock.)
 	for _, key := range keys {
-		_, err = c.remove(key, nil, skipCheckBucketClosed)
-		if err == nil {
+		if c.Delete(key) == nil {
 			count++
-		} else {
 		}
 	}
 	return
@@ -587,11 +584,6 @@ func (c *Collection) setLastCas(txn *sql.Tx, cas CAS) (err error) {
 // Runs a function within a SQLite transaction, passing it a new CAS to assign to the
 // document being modified. The function returns an event to be posted.
 func (c *Collection) withNewCas(fn func(txn *sql.Tx, newCas CAS) (*event, error)) error {
-	return c.withNewCasAndBucketClosedCheck(fn, checkBucketClosed)
-}
-
-// withNewCasAndBucketClosedCheck runs a function within a SQLite transaction like withNewCas. This allows the caller to bypass the bucket closed status, suitable for functions that need to run on the underlying bucket object.
-func (c *Collection) withNewCasAndBucketClosedCheck(fn func(txn *sql.Tx, newCas CAS) (*event, error), checkClosed bucketClosedCheck) error {
 	var e *event
 	err := c.bucket.inTransaction(func(txn *sql.Tx) error {
 		newCas, err := c.bucket.getLastCas(txn)
@@ -603,7 +595,7 @@ func (c *Collection) withNewCasAndBucketClosedCheck(fn func(txn *sql.Tx, newCas 
 			}
 		}
 		return err
-	}, checkClosed)
+	})
 	if err == nil && e != nil {
 		c.postNewEvent(e)
 	}

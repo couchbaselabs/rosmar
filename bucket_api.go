@@ -17,13 +17,6 @@ import (
 	sgbucket "github.com/couchbase/sg-bucket"
 )
 
-type bucketClosedCheck bool
-
-const (
-	checkBucketClosed     bucketClosedCheck = true
-	skipCheckBucketClosed bucketClosedCheck = false
-)
-
 func (bucket *Bucket) String() string {
 	return fmt.Sprintf("B#%d", bucket.serial)
 }
@@ -180,14 +173,9 @@ func (bucket *Bucket) DropDataStore(name sgbucket.DataStoreName) error {
 
 // ListDataStores returns a list of the names of all data stores in the bucket.
 func (bucket *Bucket) ListDataStores() (result []sgbucket.DataStoreName, err error) {
-	return bucket.listDataStores(bucket.db())
-}
-
-// listDataStores returns a list of the names of all data stores in the bucket, given a specific db handle.
-func (bucket *Bucket) listDataStores(db queryable) (result []sgbucket.DataStoreName, err error) {
-	traceEnter("listDataStores", "%s", bucket)
-	defer func() { traceExit("listDataStores", err, "%v", result) }()
-	rows, err := db.Query(`SELECT id, scope, name FROM collections ORDER BY id`)
+	traceEnter("ListDataStores", "%s", bucket)
+	defer func() { traceExit("ListDataStores", err, "%v", result) }()
+	rows, err := bucket.db().Query(`SELECT id, scope, name FROM collections ORDER BY id`)
 	if err != nil {
 		return nil, err
 	}
@@ -332,7 +320,7 @@ func (bucket *Bucket) nextExpiration() (exp Exp, err error) {
 
 // expireDocuments immediately deletes all expired documents in this bucket.
 func (bucket *Bucket) expireDocuments() (int64, error) {
-	names, err := bucket.listDataStores(bucket._underlyingDB())
+	names, err := bucket.ListDataStores()
 	if err != nil {
 		return 0, err
 	}
@@ -379,7 +367,7 @@ func (bucket *Bucket) PurgeTombstones() (count int64, err error) {
 			count, err = result.RowsAffected()
 		}
 		return err
-	}, true)
+	})
 	traceExit("PurgeTombstones", err, "%d", count)
 	return
 }
