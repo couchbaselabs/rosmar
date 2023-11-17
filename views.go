@@ -306,7 +306,7 @@ func (c *Collection) updateView(ctx context.Context, designDoc string, viewName 
 			view.lastCas = latestCas
 		}
 		return err
-	})
+	}, checkBucketClosed)
 	return view, err
 }
 

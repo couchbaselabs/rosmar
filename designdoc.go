@@ -103,7 +103,7 @@ func (c *Collection) PutDDoc(_ context.Context, designDoc string, ddoc *sgbucket
 		}
 		c.forgetCachedViews(designDoc)
 		return nil
-	})
+	}, checkBucketClosed)
 	traceExit("PutDDoc", err, "ok")
 	return err
 }
@@ -121,7 +121,7 @@ func (c *Collection) DeleteDDoc(designDoc string) error {
 			}
 		}
 		return err
-	})
+	}, checkBucketClosed)
 	traceExit("DeleteDDoc", err, "ok")
 	return err
 }

@@ -355,7 +355,7 @@ func TestExpiration(t *testing.T) {
 	bucket := makeTestBucket(t)
 	c := bucket.DefaultDataStore()
 
-	exp, err := bucket.NextExpiration()
+	exp, err := bucket.nextExpiration()
 	require.NoError(t, err)
 	require.Equal(t, Exp(0), exp)
 
@@ -367,7 +367,7 @@ func TestExpiration(t *testing.T) {
 	requireAddRaw(t, c, "k3", 0, []byte("v3"))
 	requireAddRaw(t, c, "k4", exp4, []byte("v4"))
 
-	exp, err = bucket.NextExpiration()
+	exp, err = bucket.nextExpiration()
 	require.NoError(t, err)
 	// Usually this will return exp2, but if this is slow enough that the expiration goroutine runs to expire document k2, it can return exp4.
 	require.Contains(t, []Exp{exp2, exp4}, exp)
@@ -375,9 +375,9 @@ func TestExpiration(t *testing.T) {
 	log.Printf("... waiting 1 sec ...")
 	time.Sleep(1 * time.Second)
 
-	exp, err = bucket.NextExpiration()
+	exp, err = bucket.nextExpiration()
 	require.NoError(t, err)
-	assert.Equal(t, exp4, exp)
+	require.Equal(t, int(exp4), int(exp))
 
 	_, _, err = c.GetRaw("k1")
 	assert.NoError(t, err)
@@ -391,7 +391,7 @@ func TestExpiration(t *testing.T) {
 	log.Printf("... waiting 2 secs ...")
 	time.Sleep(2 * time.Second)
 
-	exp, err = bucket.NextExpiration()
+	exp, err = bucket.nextExpiration()
 	require.NoError(t, err)
 	assert.Equal(t, uint32(0), exp)
 
@@ -401,6 +401,23 @@ func TestExpiration(t *testing.T) {
 	n, err := bucket.PurgeTombstones()
 	assert.NoError(t, err)
 	assert.Equal(t, int64(2), n)
+}
+
+func TestExpirationAfterClose(t *testing.T) {
+	bucket, err := OpenBucket(InMemoryURL, strings.ToLower(t.Name()), CreateNew)
+	ctx := testCtx(t)
+	defer func() {
+		assert.NoError(t, bucket.CloseAndDelete(ctx))
+	}()
+	require.NoError(t, err)
+	c := bucket.DefaultDataStore()
+
+	// set expiry long enough that Close will happen first
+	exp := Exp(time.Now().Add(1 * time.Second).Unix())
+	requireAddRaw(t, c, "docID", exp, []byte("v1"))
+	bucket.Close(ctx)
+	// sleep to ensure we won't panic
+	time.Sleep(2 * time.Second)
 }
 
 func TestUriFromPathWindows(t *testing.T) {

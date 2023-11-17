@@ -36,13 +36,12 @@ type Bucket struct {
 	name            string         // Bucket name
 	collections     collectionsMap // Collections, indexed by DataStoreName
 	collectionFeeds map[sgbucket.DataStoreNameImpl][]*dcpFeed
-	mutex           *sync.Mutex // mutex for synchronized access to Bucket
-	sqliteDB        *sql.DB     // SQLite database handle (do not access; call db() instead)
-	expTimer        *time.Timer // Schedules expiration of docs
-	nextExp         *uint32     // Timestamp when expTimer will run (0 if never)
-	serial          uint32      // Serial number for logging
-	inMemory        bool        // True if it's an in-memory database
-	closed          bool        // represents state when it is closed
+	mutex           *sync.Mutex        // mutex for synchronized access to Bucket
+	sqliteDB        *sql.DB            // SQLite database handle (do not access; call db() instead)
+	expManager      *expirationManager // expiration manager for bucket
+	serial          uint32             // Serial number for logging
+	inMemory        bool               // True if it's an in-memory database
+	closed          bool               // represents state when it is closed
 }
 
 type collectionsMap = map[sgbucket.DataStoreNameImpl]*Collection
@@ -174,10 +173,10 @@ func OpenBucket(urlStr string, bucketName string, mode OpenMode) (b *Bucket, err
 		collections:     make(map[sgbucket.DataStoreNameImpl]*Collection),
 		collectionFeeds: make(map[sgbucket.DataStoreNameImpl][]*dcpFeed),
 		mutex:           &sync.Mutex{},
-		nextExp:         new(uint32),
 		inMemory:        inMemory,
 		serial:          serial,
 	}
+	bucket.expManager = newExpirationManager(bucket.doExpiration)
 	defer func() {
 		if err != nil {
 			_ = bucket.CloseAndDelete(context.TODO())
@@ -307,7 +306,7 @@ func (bucket *Bucket) initializeSchema(bucketName string) (err error) {
 	return
 }
 
-// Returns the database handle as a `queryable` interface value.
+// db returns the database handle as a `queryable` interface value.
 // If the bucket has been closed, it returns a special `closedDB` value that will return
 // ErrBucketClosed from any call.
 func (bucket *Bucket) db() queryable {
@@ -316,7 +315,7 @@ func (bucket *Bucket) db() queryable {
 	return bucket._db()
 }
 
-// Returns the database handle as a `queryable` interface value. This is the same as `db()` without locking. This is not safe to call without bucket.mutex being locked the caller.
+// db returns the database handle as a `queryable` interface value. This is the same as `db()` without locking. This is not safe to call without bucket.mutex being locked the caller.
 func (bucket *Bucket) _db() queryable {
 	if bucket.closed {
 		return closedDB{}
@@ -324,8 +323,17 @@ func (bucket *Bucket) _db() queryable {
 	return bucket.sqliteDB
 }
 
+// _underlyingDB returns the database handle as a `queryable` interface value. This should only be used for bucket maintanence operations that should occur regardless of if bucket is open or closed. This is not safe to call without bucket.mutex being locked the caller.
+func (bucket *Bucket) _underlyingDB() queryable {
+	if bucket.sqliteDB == nil {
+		logError("bucket.sqliteDB is nil for _underlyingDB call. This function is being called after bucket is closed.")
+		return closedDB{}
+	}
+	return bucket.sqliteDB
+}
+
 // Runs a function within a SQLite transaction.
-func (bucket *Bucket) inTransaction(fn func(txn *sql.Tx) error) error {
+func (bucket *Bucket) inTransaction(fn func(txn *sql.Tx) error, checkClosedBucket bucketClosedCheck) error {
 	// SQLite allows only a single writer, so use a mutex to avoid BUSY and LOCKED errors.
 	// However, these errors can still occur (somehow?), so we retry if we get one.
 	// --Update, 25 July 2023: After adding "_txlock=immediate" to the DB options when opening,
@@ -333,7 +341,7 @@ func (bucket *Bucket) inTransaction(fn func(txn *sql.Tx) error) error {
 	bucket.mutex.Lock()
 	defer bucket.mutex.Unlock()
 
-	if bucket.closed {
+	if checkClosedBucket == true && bucket.closed {
 		return ErrBucketClosed
 	}
 
@@ -380,8 +388,7 @@ func (b *Bucket) copy() *Bucket {
 		collections:     make(collectionsMap),
 		mutex:           b.mutex,
 		sqliteDB:        b.sqliteDB,
-		expTimer:        b.expTimer,
-		nextExp:         b.nextExp,
+		expManager:      b.expManager,
 		serial:          b.serial,
 		inMemory:        b.inMemory,
 	}

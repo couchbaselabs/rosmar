@@ -13,9 +13,15 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"time"
 
 	sgbucket "github.com/couchbase/sg-bucket"
+)
+
+type bucketClosedCheck bool
+
+const (
+	checkBucketClosed     bucketClosedCheck = true
+	skipCheckBucketClosed bucketClosedCheck = false
 )
 
 func (bucket *Bucket) String() string {
@@ -62,9 +68,7 @@ func (bucket *Bucket) Close(_ context.Context) {
 
 // _closeSqliteDB closes the underlying sqlite database and shuts down dcpFeeds. Must have a lock to call this function.
 func (bucket *Bucket) _closeSqliteDB() {
-	if bucket.expTimer != nil {
-		bucket.expTimer.Stop()
-	}
+	bucket.expManager.stop()
 	for _, c := range bucket.collections {
 		c.close()
 	}
@@ -174,10 +178,16 @@ func (bucket *Bucket) DropDataStore(name sgbucket.DataStoreName) error {
 	return bucket.dropCollection(sc)
 }
 
+// ListDataStores returns a list of the names of all data stores in the bucket.
 func (bucket *Bucket) ListDataStores() (result []sgbucket.DataStoreName, err error) {
-	traceEnter("ListDataStores", "%s", bucket)
-	defer func() { traceExit("ListDataStores", err, "%v", result) }()
-	rows, err := bucket.db().Query(`SELECT id, scope, name FROM collections ORDER BY id`)
+	return bucket.listDataStores(bucket.db())
+}
+
+// listDataStores returns a list of the names of all data stores in the bucket, given a specific db handle.
+func (bucket *Bucket) listDataStores(db queryable) (result []sgbucket.DataStoreName, err error) {
+	traceEnter("listDataStores", "%s", bucket)
+	defer func() { traceExit("listDataStores", err, "%v", result) }()
+	rows, err := db.Query(`SELECT id, scope, name FROM collections ORDER BY id`)
 	if err != nil {
 		return nil, err
 	}
@@ -309,8 +319,8 @@ func (bucket *Bucket) dropCollection(name sgbucket.DataStoreNameImpl) error {
 
 //////// EXPIRATION (CUSTOM API):
 
-// Returns the earliest expiration time of any document, or 0 if none.
-func (bucket *Bucket) NextExpiration() (exp Exp, err error) {
+// nextExpiration returns the earliest expiration time of any document, or 0 if none.
+func (bucket *Bucket) nextExpiration() (exp Exp, err error) {
 	var expVal sql.NullInt64
 	row := bucket.db().QueryRow(`SELECT min(exp) FROM documents WHERE exp > 0`)
 	err = scan(row, &expVal)
@@ -320,9 +330,9 @@ func (bucket *Bucket) NextExpiration() (exp Exp, err error) {
 	return
 }
 
-// Immediately deletes all expired documents in this bucket.
-func (bucket *Bucket) ExpireDocuments() (int64, error) {
-	names, err := bucket.ListDataStores()
+// expireDocuments immediately deletes all expired documents in this bucket.
+func (bucket *Bucket) expireDocuments() (int64, error) {
+	names, err := bucket.listDataStores(bucket._underlyingDB())
 	if err != nil {
 		return 0, err
 	}
@@ -330,7 +340,7 @@ func (bucket *Bucket) ExpireDocuments() (int64, error) {
 	for _, name := range names {
 		if coll, err := bucket.getCollection(name.(sgbucket.DataStoreNameImpl)); err != nil {
 			return 0, err
-		} else if n, err := coll.ExpireDocuments(); err != nil {
+		} else if n, err := coll.expireDocuments(); err != nil {
 			return 0, err
 		} else {
 			count += n
@@ -339,40 +349,20 @@ func (bucket *Bucket) ExpireDocuments() (int64, error) {
 	return count, nil
 }
 
+// scheduleExpiration schedules the next expiration of documents to occur, from the minimum expiration value in the bucket.
 func (bucket *Bucket) scheduleExpiration() {
-	if nextExp, err := bucket.NextExpiration(); err == nil && nextExp > 0 {
-		bucket.scheduleExpirationAtOrBefore(nextExp)
-	}
-}
-
-func (bucket *Bucket) scheduleExpirationAtOrBefore(exp uint32) {
-	if exp > 0 {
-		bucket.mutex.Lock()
-		defer bucket.mutex.Unlock()
-		if exp < *bucket.nextExp || *bucket.nextExp == 0 {
-			bucket.nextExp = &exp
-			dur := expDuration(exp)
-			if dur < 0 {
-				dur = 0
-			}
-			debug("EXP: Scheduling in %s", dur)
-			if bucket.expTimer == nil {
-				bucket.expTimer = time.AfterFunc(dur, bucket.doExpiration)
-			} else {
-				bucket.expTimer.Reset(dur)
-			}
-		}
+	if nextExp, err := bucket.nextExpiration(); err == nil && nextExp > 0 {
+		bucket.expManager._scheduleExpirationAtOrBefore(nextExp)
 	}
 }
 
 func (bucket *Bucket) doExpiration() {
-	bucket.mutex.Lock()
-	bucket.nextExp = func(x uint32) *uint32 { return &x }(0)
-	bucket.mutex.Unlock()
+	bucket.expManager._clearNext()
 
 	debug("EXP: Running scheduled expiration...")
-	if n, err := bucket.ExpireDocuments(); err != nil {
-		logError("Bucket %s error expiring docs: %v", bucket, err)
+	if n, err := bucket.expireDocuments(); err != nil {
+		// If there's an error expiring docs, it means there is a programming error of a leaked expiration goroutine.
+		panic("Error expiring docs: " + err.Error())
 	} else if n > 0 {
 		info("Bucket %s expired %d docs", bucket, n)
 	}
@@ -389,7 +379,7 @@ func (bucket *Bucket) PurgeTombstones() (count int64, err error) {
 			count, err = result.RowsAffected()
 		}
 		return err
-	})
+	}, true)
 	traceExit("PurgeTombstones", err, "%d", count)
 	return
 }
