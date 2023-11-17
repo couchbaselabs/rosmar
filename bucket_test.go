@@ -404,6 +404,7 @@ func TestExpiration(t *testing.T) {
 }
 
 func TestExpirationAfterClose(t *testing.T) {
+	t.Skip("Slow test useful for debugging issues with expiration")
 	bucket, err := OpenBucket(InMemoryURL, strings.ToLower(t.Name()), CreateNew)
 	ctx := testCtx(t)
 	defer func() {
