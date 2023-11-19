@@ -23,6 +23,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+const syncXattrName = "_sync" // name of xattr used for sync gateway metadata
+
 func TestDeleteThenAdd(t *testing.T) {
 	ensureNoLeaks(t)
 	coll := makeTestBucket(t).DefaultDataStore()
@@ -326,7 +328,7 @@ func TestWriteCas(t *testing.T) {
 	err = coll.Delete("keyraw1")
 	assert.True(t, err == nil, "Delete failed")
 	newCas, err = coll.WriteCas("keyraw1", 0, 0, 0, []byte("resurrectValue"), sgbucket.Raw)
-	assert.NoError(t, err, "Recreate with cas=0 should succeed.")
+	require.NoError(t, err, "Recreate with cas=0 should succeed.")
 	assert.True(t, cas > 0, "Cas value should be greater than zero")
 	value, getCas, err = coll.GetRaw("keyraw1")
 	assert.NoError(t, err, "GetRaw")
@@ -476,4 +478,125 @@ func ensureNoLeakedFeeds(t *testing.T) {
 		}
 		assert.Equal(t, int32(0), count, "Not all feed goroutines finished")
 	})
+}
+
+func TestNoCasOnResurrection(t *testing.T) {
+	col := makeTestBucket(t).DefaultDataStore()
+	const docID = "doc1"
+	const exp = 0
+	const flags = 0
+	casOut, err := col.WriteCas(docID, flags, exp, 0, []byte("{}"), sgbucket.Raw)
+	require.NoError(t, err)
+	require.NotEqual(t, 0, casOut)
+	require.NoError(t, col.Delete(docID))
+
+	ressurectedCasOut, err := col.WriteCas(docID, flags, exp, casOut, []byte("{}"), sgbucket.AddOnly)
+	require.NoError(t, err)
+	require.NotEqual(t, 0, ressurectedCasOut)
+}
+
+func TestWriteCasWithXattrExistingXattr(t *testing.T) {
+	col := makeTestBucket(t).DefaultDataStore()
+
+	const docID = "DocExistsXattrExists"
+
+	val := make(map[string]interface{})
+	val["type"] = docID
+
+	xattrVal := make(map[string]interface{})
+	xattrVal["seq"] = 123
+	xattrVal["rev"] = "1-1234"
+
+	ctx := testCtx(t)
+	cas := uint64(0)
+	cas, err := col.WriteCasWithXattr(ctx, docID, syncXattrName, 0, cas, val, xattrVal, nil)
+	require.NoError(t, err)
+
+	updatedXattrVal := make(map[string]interface{})
+	updatedXattrVal["seq"] = 123
+	updatedXattrVal["rev"] = "2-1234"
+	xattrValBytes, err := json.Marshal(updatedXattrVal)
+	require.NoError(t, err)
+
+	const deleteBody = true
+	// First attempt to update with a bad cas value, and ensure we're getting the expected error
+	_, err = col.WriteWithXattr(ctx, docID, syncXattrName, 0, uint64(1234), nil, xattrValBytes, true, deleteBody, nil)
+
+	require.ErrorAs(t, err, &sgbucket.CasMismatchErr{})
+
+	_, err = col.WriteWithXattr(ctx, docID, syncXattrName, 0, cas, nil, xattrValBytes, true, deleteBody, nil)
+	require.NoError(t, err)
+
+	verifyEmptyBodyAndSyncXattr(t, col, docID)
+
+}
+
+func TestWriteCasWithXattrNoXattr(t *testing.T) {
+	col := makeTestBucket(t).DefaultDataStore()
+	const docID = "DocExistsNoXattr"
+	val := make(map[string]interface{})
+	val["type"] = docID
+	cas, err := col.WriteCas(docID, 0, 0, 0, val, 0)
+	require.NoError(t, err)
+
+	updatedXattrVal := make(map[string]interface{})
+	updatedXattrVal["seq"] = 123
+	updatedXattrVal["rev"] = "2-1234"
+	xattrValBytes, err := json.Marshal(updatedXattrVal)
+	ctx := testCtx(t)
+	const deleteBody = true
+	_, err = col.WriteWithXattr(ctx, docID, syncXattrName, 0, uint64(1234), nil, xattrValBytes, true, deleteBody, nil)
+
+	require.ErrorAs(t, err, &sgbucket.CasMismatchErr{})
+
+	_, err = col.WriteWithXattr(ctx, docID, syncXattrName, 0, cas, nil, xattrValBytes, true, deleteBody, nil)
+	require.NoError(t, err)
+	verifyEmptyBodyAndSyncXattr(t, col, docID)
+}
+
+func TestWriteCasWithXattrXattrExistsNoDoc(t *testing.T) {
+	col := makeTestBucket(t).DefaultDataStore()
+	const docID = "XattrExistsNoDoc"
+
+	val := make(map[string]interface{})
+	val["type"] = docID
+
+	xattrVal := make(map[string]interface{})
+	xattrVal["seq"] = 456
+	xattrVal["rev"] = "1-1234"
+
+	ctx := testCtx(t)
+	// Create w/ XATTR
+	cas := uint64(0)
+	cas, err := col.WriteCasWithXattr(ctx, docID, syncXattrName, 0, cas, val, xattrVal, nil)
+	require.NoError(t, err)
+
+	// Delete the doc body
+	cas, err = col.Remove(docID, cas)
+	require.NoError(t, err)
+
+	updatedXattrVal := make(map[string]interface{})
+	updatedXattrVal["seq"] = 123
+	updatedXattrVal["rev"] = "2-1234"
+	xattrValBytes, err := json.Marshal(updatedXattrVal)
+	require.NoError(t, err)
+
+	// First attempt to update with a bad cas value, and ensure we're getting the expected error
+	const deleteBody = false
+	_, err = col.WriteWithXattr(ctx, docID, syncXattrName, 0, uint64(1234), nil, xattrValBytes, true, deleteBody, nil)
+	require.ErrorAs(t, err, &sgbucket.CasMismatchErr{})
+
+	_, err = col.WriteWithXattr(ctx, docID, syncXattrName, 0, cas, nil, xattrValBytes, true, deleteBody, nil)
+	require.NoError(t, err)
+	verifyEmptyBodyAndSyncXattr(t, col, docID)
+}
+
+func verifyEmptyBodyAndSyncXattr(t *testing.T, store sgbucket.XattrStore, key string) {
+	var retrievedVal map[string]interface{}
+	var retrievedXattr map[string]interface{}
+	_, err := store.GetWithXattr(testCtx(t), key, syncXattrName, "", &retrievedVal, &retrievedXattr, nil)
+
+	require.NoError(t, err)
+	require.Empty(t, retrievedVal) // require that the doc body is empty
+	require.Greater(t, len(retrievedXattr), 0)
 }

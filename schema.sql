@@ -27,7 +27,9 @@ CREATE TABLE documents (
 	xattrs 		blob, 				/* xattrs in JSON, else null */
 	isJSON 		integer default true,
 	value 		blob, 				/* document body, usually JSON; null if deleted */
+	tombstone 	integer default 0,
 	UNIQUE (collection, key) );
+
 CREATE INDEX docs_cas ON documents (collection, cas);
 CREATE INDEX docs_exp ON documents (collection, exp) WHERE exp > 0;
 
