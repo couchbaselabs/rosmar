@@ -35,17 +35,26 @@ func init() {
 	}
 }
 
-// registryBucket adds a newly opened Bucket to the registry.
-func (r *bucketRegistry) registerBucket(bucket *Bucket) {
+// registryBucket adds a newly opened Bucket to the registry. Returns true if the bucket already exists, and a copy of the bucket to use.
+func (r *bucketRegistry) registerBucket(bucket *Bucket) (bool, *Bucket) {
 	name := bucket.GetName()
 	debug("registerBucket %v %s at %s", bucket, name, bucket.url)
 	r.lock.Lock()
 	defer r.lock.Unlock()
+	return r._registerBucket(bucket)
+}
+
+// _registryBucket adds a newly opened Bucket to the registry. Returns true if the bucket already exists, and a copy of the bucket to use.
+func (r *bucketRegistry) _registerBucket(bucket *Bucket) (bool, *Bucket) {
+	name := bucket.GetName()
+	debug("_registerBucket %v %s at %s", bucket, name, bucket.url)
+
 	_, ok := r.buckets[name]
 	if !ok {
 		r.buckets[name] = bucket
 	}
 	r.bucketCount[name] += 1
+	return ok, r.buckets[name].copy()
 }
 
 // getCachedBucket returns a bucket from the registry if it exists.
@@ -56,7 +65,9 @@ func (r *bucketRegistry) getCachedBucket(name string) *Bucket {
 	if bucket == nil {
 		return nil
 	}
-	return bucket.copy()
+	// return a copy of the bucket
+	_, bucket = r._registerBucket(bucket)
+	return bucket
 }
 
 // unregisterBucket removes a Bucket from the registry. Must be called before closing.
@@ -115,8 +126,13 @@ func getCachedBucket(name string) *Bucket {
 	return cluster.getCachedBucket(name)
 }
 
-// registryBucket adds a newly opened Bucket to the registry.
-func registerBucket(bucket *Bucket) {
+// registryBucket adds a copy of a Bucket to the registry. Returns true if the bucket already exists.
+func registerBucket(bucket *Bucket) (bool, *Bucket) {
+	return cluster.registerBucket(bucket)
+}
+
+// registryNewBucket adds a newly opened Bucket to the registry.
+func registerNewBucket(bucket *Bucket) {
 	cluster.registerBucket(bucket)
 }
 

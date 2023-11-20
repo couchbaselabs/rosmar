@@ -337,8 +337,8 @@ func (bucket *Bucket) expireDocuments() (int64, error) {
 	return count, nil
 }
 
-// scheduleExpiration schedules the next expiration of documents to occur, from the minimum expiration value in the bucket.
-func (bucket *Bucket) scheduleExpiration() {
+// scheduleExpiration schedules the next expiration of documents to occur, from the minimum expiration value in the bucket. This requires locking expiration manager.
+func (bucket *Bucket) _scheduleExpiration() {
 	if nextExp, err := bucket.nextExpiration(); err == nil && nextExp > 0 {
 		bucket.expManager._scheduleExpirationAtOrBefore(nextExp)
 	}
@@ -355,7 +355,7 @@ func (bucket *Bucket) doExpiration() {
 		info("Bucket %s expired %d docs", bucket, n)
 	}
 
-	bucket.scheduleExpiration()
+	bucket._scheduleExpiration()
 }
 
 // Completely removes all deleted documents (tombstones).

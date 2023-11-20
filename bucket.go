@@ -86,6 +86,7 @@ func OpenBucket(urlStr string, bucketName string, mode OpenMode) (b *Bucket, err
 	traceEnter("OpenBucket", "%q, %d", urlStr, mode)
 	defer func() { traceExit("OpenBucket", err, "ok") }()
 
+	ctx := context.TODO()
 	u, err := encodeDBURL(urlStr)
 	if err != nil {
 		return nil, err
@@ -94,13 +95,18 @@ func OpenBucket(urlStr string, bucketName string, mode OpenMode) (b *Bucket, err
 
 	bucket := getCachedBucket(bucketName)
 	if bucket != nil {
+		defer func() {
+			if err != nil {
+				bucket.Close(ctx)
+			}
+		}()
+
 		if mode == CreateNew {
 			return nil, fs.ErrExist
 		}
 		if urlStr != bucket.url {
 			return nil, fmt.Errorf("bucket %q already exists at %q, will not open at %q", bucketName, bucket.url, urlStr)
 		}
-		registerBucket(bucket)
 		return bucket, nil
 
 	}
@@ -179,7 +185,7 @@ func OpenBucket(urlStr string, bucketName string, mode OpenMode) (b *Bucket, err
 	bucket.expManager = newExpirationManager(bucket.doExpiration)
 	defer func() {
 		if err != nil {
-			_ = bucket.CloseAndDelete(context.TODO())
+			_ = bucket.CloseAndDelete(ctx)
 		}
 	}()
 
@@ -193,16 +199,23 @@ func OpenBucket(urlStr string, bucketName string, mode OpenMode) (b *Bucket, err
 		if err = bucket.initializeSchema(bucketName); err != nil {
 			return nil, err
 		}
-	} else {
-		bucket.scheduleExpiration()
 	}
 	err = bucket.setName(bucketName)
 	if err != nil {
 		return nil, err
 	}
 
-	registerBucket(bucket)
-	return bucket.copy(), err
+	exists, bucketCopy := registerBucket(bucket)
+	// someone else beat registered the bucket in the registry, that's OK we'll close ours
+	if exists {
+		bucket.Close(ctx)
+	}
+	// only schedule expiration if bucket is not new. This doesn't need to be locked because only one bucket will execute this code.
+	if vers != 0 {
+		bucket._scheduleExpiration()
+	}
+
+	return bucketCopy, err
 }
 
 // Creates or re-opens a bucket, like OpenBucket.
