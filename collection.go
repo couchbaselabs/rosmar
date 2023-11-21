@@ -101,6 +101,14 @@ func (c *Collection) GetRaw(key string) (val []byte, cas CAS, err error) {
 	return
 }
 
+// isTombstone returns true if the document is a tombstone.
+func (c *Collection) isTombstone(q queryable, key string) bool {
+	row := q.QueryRow("SELECT 1 FROM documents WHERE collection=? AND key=? AND tombstone=1", c.id, key)
+	var i int
+	err := scan(row, &i)
+	return err == nil
+}
+
 func (c *Collection) getRaw(q queryable, key string) (val []byte, cas CAS, err error) {
 	row := q.QueryRow("SELECT value, cas FROM documents WHERE collection=? AND key=?", c.id, key)
 	if err = scan(row, &val, &cas); err != nil {
@@ -144,7 +152,7 @@ func (c *Collection) add(key string, exp Exp, val []byte, isJSON bool) (added bo
 			`INSERT INTO documents (collection,key,value,cas,exp,isJSON) VALUES (?1,?2,?3,?4,?5,?6)
 				ON CONFLICT(collection,key) DO
 					UPDATE SET value=?3, xattrs=null, cas=?4, exp=?5, isJSON=?6
-					WHERE value IS NULL`,
+					WHERE tombstone != 0`,
 			c.id, key, val, newCas, exp, isJSON)
 		if err != nil {
 			return
@@ -299,26 +307,30 @@ func (c *Collection) WriteCas(key string, flags int, exp Exp, cas CAS, val any, 
 	}
 
 	err = c.withNewCas(func(txn *sql.Tx, newCas CAS) (*event, error) {
+		wasTombstone := false
+		if cas != 0 {
+			wasTombstone = c.isTombstone(txn, key)
+		}
 		exp = absoluteExpiry(exp)
 		var sql string
 		if (opt & sgbucket.Append) != 0 {
 			// Append:
 			sql = `UPDATE documents SET value=value || ?1, cas=?2, exp=?6, isJSON=0,
-						xattrs=iif(value is null, null, xattrs)
+						xattrs=iif(tombstone != 0, null, xattrs)
 				   WHERE collection=?3 AND key=?4 AND cas=?5`
 		} else if (opt&sgbucket.AddOnly) != 0 || cas == 0 {
 			// Insert, but fall back to Update if the doc is a tombstone
 			sql = `INSERT INTO documents (collection, key, value, cas, exp, isJSON) VALUES(?3,?4,?1,?2,?6,?7)
 					ON CONFLICT(collection,key) DO
-						UPDATE SET value=?1, xattrs=null, cas=?2, exp=?6, isJSON=?7
-						WHERE value IS NULL`
-			if cas != 0 {
+						UPDATE SET value=?1, xattrs=null, cas=?2, exp=?6, isJSON=?7, tombstone=0
+						WHERE tombstone == 1`
+			if !wasTombstone && cas != 0 {
 				sql += ` AND cas=?5`
 			}
 		} else {
 			// Regular write:
 			sql = `UPDATE documents SET value=?1, cas=?2, exp=?6, isJSON=?7,
-						xattrs=iif(value is null, null, xattrs)
+						xattrs=iif(tombstone != 0, null, xattrs)
 				   WHERE collection=?3 AND key=?4 AND cas=?5`
 		}
 		result, err := txn.Exec(sql, raw, newCas, c.id, key, cas, exp, isJSON)
@@ -400,10 +412,9 @@ func (c *Collection) remove(key string, ifCas *CAS) (casOut CAS, err error) {
 				rawXattrs = nil
 			}
 		}
-
 		// Now update, setting value=null, isJSON=false, and updating the xattrs:
 		_, err = txn.Exec(
-			`UPDATE documents SET value=null, cas=?1, exp=0, isJSON=0, xattrs=?2
+			`UPDATE documents SET value=null, cas=?1, exp=0, isJSON=0, xattrs=?2, tombstone=1
 			 WHERE collection=?3 AND key=?4`,
 			newCas, rawXattrs, c.id, key)
 		if err == nil {
