@@ -93,22 +93,12 @@ func OpenBucket(urlStr string, bucketName string, mode OpenMode) (b *Bucket, err
 	}
 	urlStr = u.String()
 
-	bucket := getCachedBucket(bucketName)
+	bucket, err := getCachedBucket(bucketName, urlStr, mode)
+	if err != nil {
+		return nil, err
+	}
 	if bucket != nil {
-		defer func() {
-			if err != nil {
-				bucket.Close(ctx)
-			}
-		}()
-
-		if mode == CreateNew {
-			return nil, fs.ErrExist
-		}
-		if urlStr != bucket.url {
-			return nil, fmt.Errorf("bucket %q already exists at %q, will not open at %q", bucketName, bucket.url, urlStr)
-		}
 		return bucket, nil
-
 	}
 
 	query := u.Query()

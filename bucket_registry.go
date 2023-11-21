@@ -10,6 +10,8 @@ package rosmar
 
 import (
 	"context"
+	"fmt"
+	"io/fs"
 	"sync"
 )
 
@@ -35,19 +37,12 @@ func init() {
 	}
 }
 
-// registryBucket adds a newly opened Bucket to the registry. Returns true if the bucket already exists, and a copy of the bucket to use.
+// registerBucket adds a newly opened Bucket to the registry. Returns true if the bucket already exists, and a copy of the bucket to use.
 func (r *bucketRegistry) registerBucket(bucket *Bucket) (bool, *Bucket) {
 	name := bucket.GetName()
-	debug("registerBucket %v %s at %s", bucket, name, bucket.url)
+	debug("_registerBucket %v %s at %s", bucket, name, bucket.url)
 	r.lock.Lock()
 	defer r.lock.Unlock()
-	return r._registerBucket(bucket)
-}
-
-// _registryBucket adds a newly opened Bucket to the registry. Returns true if the bucket already exists, and a copy of the bucket to use.
-func (r *bucketRegistry) _registerBucket(bucket *Bucket) (bool, *Bucket) {
-	name := bucket.GetName()
-	debug("_registerBucket %v %s at %s", bucket, name, bucket.url)
 
 	_, ok := r.buckets[name]
 	if !ok {
@@ -58,16 +53,22 @@ func (r *bucketRegistry) _registerBucket(bucket *Bucket) (bool, *Bucket) {
 }
 
 // getCachedBucket returns a bucket from the registry if it exists.
-func (r *bucketRegistry) getCachedBucket(name string) *Bucket {
+func (r *bucketRegistry) getCachedBucket(name, url string, mode OpenMode) (*Bucket, error) {
 	r.lock.Lock()
 	defer r.lock.Unlock()
 	bucket := r.buckets[name]
 	if bucket == nil {
-		return nil
+		return nil, nil
 	}
-	// return a copy of the bucket
-	_, bucket = r._registerBucket(bucket)
-	return bucket
+	if mode == CreateNew {
+		return nil, fs.ErrExist
+	}
+	if url != bucket.url {
+		return nil, fmt.Errorf("bucket %q already exists at %q, will not open at %q", name, bucket.url, url)
+	}
+
+	r.bucketCount[name] += 1
+	return r.buckets[name].copy(), nil
 }
 
 // unregisterBucket removes a Bucket from the registry. Must be called before closing.
@@ -121,19 +122,14 @@ func (r *bucketRegistry) getBucketNames() []string {
 	return names
 }
 
-// getCachedBucket returns an instance of a bucket. If there are other copies of this bucket already in memory, it will return this version. If this is an in memory bucket, the bucket will not be removed until deleteBucket is called.
-func getCachedBucket(name string) *Bucket {
-	return cluster.getCachedBucket(name)
+// getCachedBucket returns an instance of a bucket. If there are other copies of this bucket already in memory, it will return this version. If this is an in memory bucket, the bucket will not be removed until deleteBucket is called. Returns an error if the bucket can not be opened, but nil error and nil bucket if there is no registered bucket.
+func getCachedBucket(name, url string, mode OpenMode) (*Bucket, error) {
+	return cluster.getCachedBucket(name, url, mode)
 }
 
 // registryBucket adds a copy of a Bucket to the registry. Returns true if the bucket already exists.
 func registerBucket(bucket *Bucket) (bool, *Bucket) {
 	return cluster.registerBucket(bucket)
-}
-
-// registryNewBucket adds a newly opened Bucket to the registry.
-func registerNewBucket(bucket *Bucket) {
-	cluster.registerBucket(bucket)
 }
 
 // unregisterBucket removes a Bucket from the registry. Must be called before closing.
