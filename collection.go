@@ -369,6 +369,7 @@ func (c *Collection) WriteCas(key string, flags int, exp Exp, cas CAS, val any, 
 	return
 }
 
+// Remove creates a document tombstone. It removes the document's value and user xattrs.
 func (c *Collection) Remove(key string, cas CAS) (casOut CAS, err error) {
 	traceEnter("Remove", "%q, 0x%x", key, cas)
 	casOut, err = c.remove(key, &cas)
@@ -376,6 +377,7 @@ func (c *Collection) Remove(key string, cas CAS) (casOut CAS, err error) {
 	return
 }
 
+// Delete creates a document tombstone. It removes the document's value and user xattrs. Equivalent to Remove without a CAS check.
 func (c *Collection) Delete(key string) (err error) {
 	traceEnter("Delete", "%q", key)
 	_, err = c.remove(key, nil)
@@ -383,6 +385,7 @@ func (c *Collection) Delete(key string) (err error) {
 	return err
 }
 
+// remove creates a document tombstone. It removes the document's value and user xattrs. checkClosed will allow removing the document even the bucket instance is "closed".
 func (c *Collection) remove(key string, ifCas *CAS) (casOut CAS, err error) {
 	err = c.withNewCas(func(txn *sql.Tx, newCas CAS) (e *event, err error) {
 		// Get the doc, possibly checking cas:
@@ -529,10 +532,10 @@ func (c *Collection) IsSupported(feature sgbucket.BucketStoreFeature) bool {
 
 //////// EXPIRATION
 
-// Immediately deletes all expired documents in this collection.
-func (c *Collection) ExpireDocuments() (count int64, err error) {
-	traceEnter("ExpireDocuments", "")
-	defer func() { traceExit("ExpireDocuments", err, "%d", count) }()
+// _expireDocuments immediately deletes all expired documents in this collection.
+func (c *Collection) expireDocuments() (count int64, err error) {
+	traceEnter("_expireDocuments", "")
+	defer func() { traceExit("_expireDocuments", err, "%d", count) }()
 
 	// First find all the expired docs and collect their keys:
 	exp := nowAsExpiry()

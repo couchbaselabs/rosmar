@@ -36,13 +36,12 @@ type Bucket struct {
 	name            string         // Bucket name
 	collections     collectionsMap // Collections, indexed by DataStoreName
 	collectionFeeds map[sgbucket.DataStoreNameImpl][]*dcpFeed
-	mutex           *sync.Mutex // mutex for synchronized access to Bucket
-	sqliteDB        *sql.DB     // SQLite database handle (do not access; call db() instead)
-	expTimer        *time.Timer // Schedules expiration of docs
-	nextExp         *uint32     // Timestamp when expTimer will run (0 if never)
-	serial          uint32      // Serial number for logging
-	inMemory        bool        // True if it's an in-memory database
-	closed          bool        // represents state when it is closed
+	mutex           *sync.Mutex    // mutex for synchronized access to Bucket
+	sqliteDB        *sql.DB        // SQLite database handle (do not access; call db() instead)
+	expManager      *expiryManager // expiration manager for bucket
+	serial          uint32         // Serial number for logging
+	inMemory        bool           // True if it's an in-memory database
+	closed          bool           // represents state when it is closed
 }
 
 type collectionsMap = map[sgbucket.DataStoreNameImpl]*Collection
@@ -87,23 +86,19 @@ func OpenBucket(urlStr string, bucketName string, mode OpenMode) (b *Bucket, err
 	traceEnter("OpenBucket", "%q, %d", urlStr, mode)
 	defer func() { traceExit("OpenBucket", err, "ok") }()
 
+	ctx := context.TODO()
 	u, err := encodeDBURL(urlStr)
 	if err != nil {
 		return nil, err
 	}
 	urlStr = u.String()
 
-	bucket := getCachedBucket(bucketName)
+	bucket, err := getCachedBucket(bucketName, urlStr, mode)
+	if err != nil {
+		return nil, err
+	}
 	if bucket != nil {
-		if mode == CreateNew {
-			return nil, fs.ErrExist
-		}
-		if urlStr != bucket.url {
-			return nil, fmt.Errorf("bucket %q already exists at %q, will not open at %q", bucketName, bucket.url, urlStr)
-		}
-		registerBucket(bucket)
 		return bucket, nil
-
 	}
 
 	query := u.Query()
@@ -174,13 +169,13 @@ func OpenBucket(urlStr string, bucketName string, mode OpenMode) (b *Bucket, err
 		collections:     make(map[sgbucket.DataStoreNameImpl]*Collection),
 		collectionFeeds: make(map[sgbucket.DataStoreNameImpl][]*dcpFeed),
 		mutex:           &sync.Mutex{},
-		nextExp:         new(uint32),
 		inMemory:        inMemory,
 		serial:          serial,
 	}
+	bucket.expManager = newExpirationManager(bucket.doExpiration)
 	defer func() {
 		if err != nil {
-			_ = bucket.CloseAndDelete(context.TODO())
+			_ = bucket.CloseAndDelete(ctx)
 		}
 	}()
 
@@ -194,16 +189,23 @@ func OpenBucket(urlStr string, bucketName string, mode OpenMode) (b *Bucket, err
 		if err = bucket.initializeSchema(bucketName); err != nil {
 			return nil, err
 		}
-	} else {
-		bucket.scheduleExpiration()
 	}
 	err = bucket.setName(bucketName)
 	if err != nil {
 		return nil, err
 	}
 
-	registerBucket(bucket)
-	return bucket, err
+	exists, bucketCopy := registerBucket(bucket)
+	// someone else beat registered the bucket in the registry, that's OK we'll close ours
+	if exists {
+		bucket.Close(ctx)
+	}
+	// only schedule expiration if bucket is not new. This doesn't need to be locked because only one bucket will execute this code.
+	if vers != 0 {
+		bucket._scheduleExpiration()
+	}
+
+	return bucketCopy, err
 }
 
 // Creates or re-opens a bucket, like OpenBucket.
@@ -307,7 +309,7 @@ func (bucket *Bucket) initializeSchema(bucketName string) (err error) {
 	return
 }
 
-// Returns the database handle as a `queryable` interface value.
+// db returns the database handle as a `queryable` interface value.
 // If the bucket has been closed, it returns a special `closedDB` value that will return
 // ErrBucketClosed from any call.
 func (bucket *Bucket) db() queryable {
@@ -316,7 +318,7 @@ func (bucket *Bucket) db() queryable {
 	return bucket._db()
 }
 
-// Returns the database handle as a `queryable` interface value. This is the same as `db()` without locking. This is not safe to call without bucket.mutex being locked the caller.
+// db returns the database handle as a `queryable` interface value. This is the same as `db()` without locking. This is not safe to call without bucket.mutex being locked the caller.
 func (bucket *Bucket) _db() queryable {
 	if bucket.closed {
 		return closedDB{}
@@ -380,8 +382,7 @@ func (b *Bucket) copy() *Bucket {
 		collections:     make(collectionsMap),
 		mutex:           b.mutex,
 		sqliteDB:        b.sqliteDB,
-		expTimer:        b.expTimer,
-		nextExp:         b.nextExp,
+		expManager:      b.expManager,
 		serial:          b.serial,
 		inMemory:        b.inMemory,
 	}

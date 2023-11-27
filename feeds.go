@@ -168,7 +168,7 @@ func (c *Collection) postNewEvent(e *event) {
 	feedEvent := e.asFeedEvent()
 
 	c.postEvent(feedEvent)
-	c.bucket.scheduleExpirationAtOrBefore(e.exp)
+	c.bucket.expManager.scheduleExpirationAtOrBefore(e.exp)
 
 	/*
 		// Tell collections of other buckets on the same db file to post the event too:
