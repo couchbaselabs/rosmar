@@ -591,6 +591,30 @@ func TestWriteCasWithXattrXattrExistsNoDoc(t *testing.T) {
 	verifyEmptyBodyAndSyncXattr(t, col, docID)
 }
 
+func TestWriteCasWithXattrOnTombstone(t *testing.T) {
+	col := makeTestBucket(t).DefaultDataStore()
+	const docID = "XattrExistsNoDoc"
+
+	val := make(map[string]interface{})
+	val["type"] = docID
+
+	xattrVal := make(map[string]interface{})
+	xattrVal["seq"] = 456
+	xattrVal["rev"] = "1-1234"
+
+	ctx := testCtx(t)
+	cas, err := col.WriteCasWithXattr(ctx, docID, syncXattrName, 0, 0, val, xattrVal, nil)
+	require.NoError(t, err)
+
+	deleteCas, err := col.Remove(docID, cas)
+	require.NoError(t, err)
+	require.NotEqual(t, cas, deleteCas)
+
+	postDeleteCas, err := col.WriteCasWithXattr(ctx, docID, syncXattrName, 0, 0, val, xattrVal, nil)
+	require.ErrorAs(t, err, &sgbucket.CasMismatchErr{})
+	require.NotEqual(t, cas, postDeleteCas)
+}
+
 func verifyEmptyBodyAndSyncXattr(t *testing.T, store sgbucket.XattrStore, key string) {
 	var retrievedVal map[string]interface{}
 	var retrievedXattr map[string]interface{}

@@ -391,20 +391,19 @@ type writeXattrOptions struct {
 	deleteBody    bool // Delete the body along with updating tombstone
 }
 
-// checkCasXattr checks the cas supplied against the current cas of the document. e respresents the document in the bucket, and expectedCas is the expected value. Returns CasMismatchErr on an unsuccesful CAS check.
-func checkCasXattr(hasPreviousDocBody bool, existingCas, expectedCas *CAS, isTombstone bool, opts writeXattrOptions) error {
-	// no cas supplied, nothing to check
+// checkCasXattr checks the cas supplied against the current cas of the document. hasPreviousDocBody represents whether the existing document has a body. existingCas is the current Cas of the document (will be 0 if no document) and expectedCas is the expected value. Returns CasMismatchErr on an unsuccesful CAS check.
+func checkCasXattr(hasPreviousDocBody bool, existingCas, expectedCas *CAS, opts writeXattrOptions) error {
+	// no cas supplied, nothing to check, this is different than zero when used with SetXattr
 	if expectedCas == nil {
 		return nil
 	}
-	if !hasPreviousDocBody {
-		if opts.isDelete {
-			if opts.deleteBody {
-				return nil
-			}
-		} else if isTombstone {
-			return nil
-		}
+
+	// avoid a cas check if there is:
+	// 1. no previous body (could be xattrs)
+	// 2. we are writing a tombstone
+	// 3. we are not planning on writing a new body
+	if !hasPreviousDocBody && opts.isDelete && opts.deleteBody {
+		return nil
 	}
 	if *existingCas == *expectedCas {
 		return nil
@@ -454,7 +453,7 @@ func (c *Collection) writeWithXattr(
 			return nil, remapKeyError(err, key)
 		}
 
-		err := checkCasXattr(e.value != nil, &prevCas, ifCas, wasTombstone == 1, opts)
+		err := checkCasXattr(e.value != nil, &prevCas, ifCas, opts)
 		if err != nil {
 			return nil, err
 		}
