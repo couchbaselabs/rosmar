@@ -67,7 +67,6 @@ func (bucket *Bucket) _closeSqliteDB() {
 	}
 	if bucket.sqliteDB != nil {
 		bucket.sqliteDB.Close()
-		bucket.sqliteDB = nil
 		bucket.collections = nil
 	}
 }
