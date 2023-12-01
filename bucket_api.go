@@ -89,6 +89,8 @@ func (bucket *Bucket) IsSupported(feature sgbucket.BucketStoreFeature) bool {
 		return true
 	case sgbucket.BucketStoreFeatureCrc32cMacroExpansion:
 		return true
+	case sgbucket.BucketStoreFeaturePreserveExpiry:
+		return true
 	case sgbucket.BucketStoreFeatureN1ql:
 		return false
 	default:
