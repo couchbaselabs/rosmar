@@ -59,7 +59,7 @@ func (e *expiryManager) _clearNext() {
 
 // setNext sets the next expiration time and schedules an expiration to occur after that time. Requires caller to have acquired mutex.
 func (e *expiryManager) _setNext(exp uint32) {
-	info("_setNext ", exp)
+	debug("_setNext(%d)", exp)
 	e.nextExp = &exp
 	if exp == 0 {
 		e.timer = nil
