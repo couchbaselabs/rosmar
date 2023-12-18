@@ -68,10 +68,10 @@ loop:
 }
 
 type fakeClock struct {
-	time timestamp
+	time uint64
 }
 
-func (c *fakeClock) getTime() timestamp {
+func (c *fakeClock) getTime() uint64 {
 	return c.time
 }
 
@@ -82,19 +82,24 @@ func TestHLCReverseTime(t *testing.T) {
 	require.Equal(t, timestamp(2), hlc.Now())
 
 	// reverse time no counter
-	clock.time = timestamp(0)
+	clock.time = 0
 	require.Equal(t, timestamp(3), hlc.Now())
 
 	// reset time to normal
-	clock.time = timestamp(6)
-	require.Equal(t, timestamp(6), hlc.Now())
+	clock.time = 6
+	require.Equal(t, timestamp(0x60000), hlc.Now())
 
 	// reverse time again
-	clock.time = timestamp(1)
-	require.Equal(t, timestamp(7), hlc.Now())
+	clock.time = 1
+	require.Equal(t, timestamp(0x60001), hlc.Now())
 
 	// jump to a value we had previously
-	clock.time = timestamp(6)
-	require.Equal(t, int(timestamp(8)), int(hlc.Now()))
-	require.Equal(t, int(timestamp(9)), int(hlc.Now()))
+	clock.time = 6
+	require.Equal(t, timestamp(0x60002), hlc.Now())
+	require.Equal(t, timestamp(0x60003), hlc.Now())
+
+	// continue forward
+	clock.time = 7
+	require.Equal(t, timestamp(0x70000), hlc.Now())
+
 }
