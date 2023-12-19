@@ -48,12 +48,12 @@ func NewHybridLogicalClock(lastTime timestamp) *hybridLogicalClock {
 func (c *hybridLogicalClock) Now() timestamp {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
-	physicalTime := c.clock.getTime() & 0xFFFF
+	physicalTime := c.clock.getTime() &^ 0xFFFF // round to 48 bits to allow counter at end
 	if c.highestTime >= physicalTime {
 		c.counter++
 	} else {
 		c.counter = 0
 		c.highestTime = physicalTime
 	}
-	return timestamp((c.highestTime << 16) | uint64(c.counter))
+	return timestamp(c.highestTime | uint64(c.counter))
 }

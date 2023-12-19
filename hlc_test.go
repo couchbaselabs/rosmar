@@ -78,28 +78,30 @@ func (c *fakeClock) getTime() uint64 {
 func TestHLCReverseTime(t *testing.T) {
 	clock := &fakeClock{}
 	hlc := hybridLogicalClock{clock: clock}
-	require.Equal(t, timestamp(1), hlc.Now())
-	require.Equal(t, timestamp(2), hlc.Now())
+	startTime := uint64(1000000) // 1 second
+	clock.time = startTime
+	require.Equal(t, timestamp(0xf0000), hlc.Now())
+	require.Equal(t, timestamp(0xf0001), hlc.Now())
 
 	// reverse time no counter
 	clock.time = 0
-	require.Equal(t, timestamp(3), hlc.Now())
+	require.Equal(t, timestamp(0xf0002), hlc.Now())
 
 	// reset time to normal
-	clock.time = 6
-	require.Equal(t, timestamp(0x60000), hlc.Now())
+	clock.time = startTime
+	require.Equal(t, timestamp(0xf0003), hlc.Now())
 
 	// reverse time again
 	clock.time = 1
-	require.Equal(t, timestamp(0x60001), hlc.Now())
+	require.Equal(t, timestamp(0xf0004), hlc.Now())
 
 	// jump to a value we had previously
-	clock.time = 6
-	require.Equal(t, timestamp(0x60002), hlc.Now())
-	require.Equal(t, timestamp(0x60003), hlc.Now())
+	clock.time = startTime * 2
+	require.Equal(t, timestamp(0x1e0000), hlc.Now())
+	require.Equal(t, timestamp(0x1e0001), hlc.Now())
 
 	// continue forward
-	clock.time = 7
-	require.Equal(t, timestamp(0x70000), hlc.Now())
+	clock.time *= 2
+	require.Equal(t, timestamp(0x3d0000), hlc.Now())
 
 }
