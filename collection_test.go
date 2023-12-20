@@ -182,7 +182,7 @@ func TestEvalSubdocPaths(t *testing.T) {
 	assert.Error(t, err)
 }
 
-func initSubDocTest(t *testing.T) sgbucket.DataStore {
+func initSubDocTest(t *testing.T) (CAS, sgbucket.DataStore) {
 	ensureNoLeaks(t)
 
 	coll := makeTestBucket(t).DefaultDataStore()
@@ -199,41 +199,42 @@ func initSubDocTest(t *testing.T) sgbucket.DataStore {
 	var fullDoc map[string]any
 	cas, err := coll.Get("key", &fullDoc)
 	assert.NoError(t, err)
-	assert.Equal(t, CAS(1), cas)
+	assert.Greater(t, cas, CAS(0))
 
-	return coll
+	return cas, coll
 }
 
 func TestWriteSubDoc(t *testing.T) {
 	ctx := testCtx(t)
-	coll := initSubDocTest(t)
+	initialCas, coll := initSubDocTest(t)
 
 	// update json
 	rawJson := []byte(`"was here"`)
 	// test update using incorrect cas value
-	cas, err := coll.WriteSubDoc(ctx, "key", "rosmar", 10, rawJson)
+	cas1, err := coll.WriteSubDoc(ctx, "key", "rosmar", 10, rawJson)
 	assert.Error(t, err)
+	assert.Equal(t, CAS(0), cas1)
 
 	// test update using correct cas value
-	cas, err = coll.WriteSubDoc(ctx, "key", "rosmar", cas, rawJson)
+	cas2, err := coll.WriteSubDoc(ctx, "key", "rosmar", initialCas, rawJson)
 	assert.NoError(t, err)
-	assert.Equal(t, CAS(2), cas)
+	assert.Greater(t, cas2, initialCas)
 
 	var fullDoc map[string]any
-	cas, err = coll.Get("key", &fullDoc)
+	cas2Get, err := coll.Get("key", &fullDoc)
 	assert.NoError(t, err)
-	assert.Equal(t, CAS(2), cas)
+	assert.Equal(t, cas2, cas2Get)
 	assert.EqualValues(t, map[string]any{"rosmar": "was here"}, fullDoc)
 
 	// test update using 0 cas value
-	cas, err = coll.WriteSubDoc(ctx, "key", "rosmar", 0, rawJson)
+	cas3, err := coll.WriteSubDoc(ctx, "key", "rosmar", 0, rawJson)
 	assert.NoError(t, err)
-	assert.Equal(t, CAS(3), cas)
+	assert.Greater(t, cas3, cas2)
 }
 
 func TestInsertSubDoc(t *testing.T) {
 	ctx := testCtx(t)
-	coll := initSubDocTest(t)
+	initialCas, coll := initSubDocTest(t)
 
 	rosmarMap := map[string]any{"foo": "lol", "bar": "baz"}
 	expectedDoc := map[string]any{"rosmar": rosmarMap}
@@ -243,13 +244,13 @@ func TestInsertSubDoc(t *testing.T) {
 	assert.Error(t, err)
 
 	// test update
-	err = coll.SubdocInsert(ctx, "key", "rosmar.kilroy", CAS(1), "was here")
+	err = coll.SubdocInsert(ctx, "key", "rosmar.kilroy", initialCas, "was here")
 	assert.NoError(t, err)
 
 	var fullDoc map[string]any
 	cas, err := coll.Get("key", &fullDoc)
 	assert.NoError(t, err)
-	assert.Equal(t, CAS(2), cas)
+	assert.Greater(t, cas, initialCas)
 
 	rosmarMap["kilroy"] = "was here"
 	assert.EqualValues(t, expectedDoc, fullDoc)

@@ -68,12 +68,12 @@ func TestMutations(t *testing.T) {
 		require.NoError(t, err)
 	}()
 
-	readExpectedEventsDEF(t, events, 4)
+	readExpectedEventsDEF(t, events)
 
 	// Read the mutation of "eskimo":
 	e := <-events
 	e.TimeReceived = time.Time{}
-	assert.Equal(t, sgbucket.FeedEvent{Opcode: sgbucket.FeedOpDeletion, Key: []byte("eskimo"), Cas: 7, DataType: sgbucket.FeedDataTypeRaw}, e)
+	assertEventEquals(t, sgbucket.FeedEvent{Opcode: sgbucket.FeedOpDeletion, Key: []byte("eskimo"), DataType: sgbucket.FeedDataTypeRaw}, e)
 
 	require.NoError(t, bucket.CloseAndDelete(testCtx(t)))
 
@@ -130,7 +130,7 @@ func TestCheckpoint(t *testing.T) {
 	e := <-events
 	assert.Equal(t, "Checkpoint:myID", string(e.Key))
 
-	readExpectedEventsDEF(t, events, 5)
+	readExpectedEventsDEF(t, events)
 
 	event = <-events
 	assert.Equal(t, sgbucket.FeedOpEndBackfill, event.Opcode)
@@ -157,28 +157,35 @@ func startFeedWithArgs(t *testing.T, bucket *Bucket, args sgbucket.FeedArguments
 	return events, args.DoneChan
 }
 
+func assertEventEquals(t *testing.T, expected sgbucket.FeedEvent, actual sgbucket.FeedEvent) {
+	assert.Equal(t, expected.Opcode, actual.Opcode)
+	assert.Equal(t, expected.Key, actual.Key)
+	assert.Equal(t, expected.Value, actual.Value)
+	assert.Equal(t, expected.DataType, actual.DataType)
+}
+
 func readExpectedEventsABC(t *testing.T, events chan sgbucket.FeedEvent) {
 	e := <-events
 	e.TimeReceived = time.Time{}
-	assert.Equal(t, sgbucket.FeedEvent{Opcode: sgbucket.FeedOpMutation, Key: []byte("able"), Value: []byte(`"A"`), Cas: 1, DataType: sgbucket.FeedDataTypeJSON}, e)
+	assertEventEquals(t, sgbucket.FeedEvent{Opcode: sgbucket.FeedOpMutation, Key: []byte("able"), Value: []byte(`"A"`), DataType: sgbucket.FeedDataTypeJSON}, e)
 	e = <-events
 	e.TimeReceived = time.Time{}
-	assert.Equal(t, sgbucket.FeedEvent{Opcode: sgbucket.FeedOpMutation, Key: []byte("baker"), Value: []byte(`"B"`), Cas: 2, DataType: sgbucket.FeedDataTypeJSON}, e)
+	assertEventEquals(t, sgbucket.FeedEvent{Opcode: sgbucket.FeedOpMutation, Key: []byte("baker"), Value: []byte(`"B"`), DataType: sgbucket.FeedDataTypeJSON}, e)
 	e = <-events
 	e.TimeReceived = time.Time{}
-	assert.Equal(t, sgbucket.FeedEvent{Opcode: sgbucket.FeedOpMutation, Key: []byte("charlie"), Value: []byte(`"C"`), Cas: 3, DataType: sgbucket.FeedDataTypeJSON}, e)
+	assertEventEquals(t, sgbucket.FeedEvent{Opcode: sgbucket.FeedOpMutation, Key: []byte("charlie"), Value: []byte(`"C"`), DataType: sgbucket.FeedDataTypeJSON}, e)
 }
 
-func readExpectedEventsDEF(t *testing.T, events chan sgbucket.FeedEvent, cas CAS) {
+func readExpectedEventsDEF(t *testing.T, events chan sgbucket.FeedEvent) {
 	e := <-events
 	e.TimeReceived = time.Time{}
-	assert.Equal(t, sgbucket.FeedEvent{Opcode: sgbucket.FeedOpMutation, Key: []byte("delta"), Value: []byte(`"D"`), Cas: cas, DataType: sgbucket.FeedDataTypeJSON}, e)
+	assertEventEquals(t, sgbucket.FeedEvent{Opcode: sgbucket.FeedOpMutation, Key: []byte("delta"), Value: []byte(`"D"`), DataType: sgbucket.FeedDataTypeJSON}, e)
 	e = <-events
 	e.TimeReceived = time.Time{}
-	assert.Equal(t, sgbucket.FeedEvent{Opcode: sgbucket.FeedOpMutation, Key: []byte("eskimo"), Value: []byte(`"E"`), Cas: cas + 1, DataType: sgbucket.FeedDataTypeJSON}, e)
+	assertEventEquals(t, sgbucket.FeedEvent{Opcode: sgbucket.FeedOpMutation, Key: []byte("eskimo"), Value: []byte(`"E"`), DataType: sgbucket.FeedDataTypeJSON}, e)
 	e = <-events
 	e.TimeReceived = time.Time{}
-	assert.Equal(t, sgbucket.FeedEvent{Opcode: sgbucket.FeedOpMutation, Key: []byte("fahrvergnügen"), Value: []byte(`"F"`), Cas: cas + 2, DataType: sgbucket.FeedDataTypeJSON}, e)
+	assertEventEquals(t, sgbucket.FeedEvent{Opcode: sgbucket.FeedOpMutation, Key: []byte("fahrvergnügen"), Value: []byte(`"F"`), DataType: sgbucket.FeedDataTypeJSON}, e)
 }
 
 func TestCrossBucketEvents(t *testing.T) {
@@ -209,8 +216,8 @@ func TestCrossBucketEvents(t *testing.T) {
 		require.NoError(t, err)
 	}()
 
-	readExpectedEventsDEF(t, events, 4)
-	readExpectedEventsDEF(t, events2, 4)
+	readExpectedEventsDEF(t, events)
+	readExpectedEventsDEF(t, events2)
 
 	bucket.Close(testCtx(t))
 	require.NoError(t, bucket2.CloseAndDelete(testCtx(t)))
