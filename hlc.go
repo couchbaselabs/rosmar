@@ -18,7 +18,6 @@ type timestamp uint64
 // hybridLogicalClock is a hybrid logical clock implementation for rosmar that produces timestamps that will always be increasing regardless of clock changes.
 type hybridLogicalClock struct {
 	clock       clock
-	counter     uint16
 	highestTime uint64
 	mutex       sync.Mutex
 }
@@ -48,12 +47,11 @@ func NewHybridLogicalClock(lastTime timestamp) *hybridLogicalClock {
 func (c *hybridLogicalClock) Now() timestamp {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
-	physicalTime := c.clock.getTime() &^ 0xFFFF // round to 48 bits to allow counter at end
+	physicalTime := c.clock.getTime() &^ 0xFFFF // round to 48 bits
 	if c.highestTime >= physicalTime {
-		c.counter++
+		c.highestTime++
 	} else {
-		c.counter = 0
 		c.highestTime = physicalTime
 	}
-	return timestamp(c.highestTime | uint64(c.counter))
+	return timestamp(c.highestTime)
 }
