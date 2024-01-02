@@ -9,7 +9,6 @@
 package rosmar
 
 import (
-	"bytes"
 	"database/sql"
 	"fmt"
 	"hash/crc32"
@@ -152,34 +151,6 @@ func absoluteExpiry(exp Exp) Exp {
 func expDuration(exp Exp) time.Duration {
 	secs := int64(absoluteExpiry(exp)) - int64(nowAsExpiry())
 	return time.Duration(secs) * time.Second
-}
-
-var maxCallerStackDepth = 50
-
-func readableStackTrace(skip int) string {
-	callers := make([]uintptr, maxCallerStackDepth)
-	length := runtime.Callers(skip, callers[:])
-	callers = callers[:length]
-
-	var result bytes.Buffer
-	frames := callersToFrames(callers)
-	for _, frame := range frames {
-		result.WriteString(fmt.Sprintf("%s:%d (%#x)\n\t%s\n",
-			frame.File, frame.Line, frame.PC, frame.Function))
-	}
-	return result.String()
-}
-
-func callersToFrames(callers []uintptr) []runtime.Frame {
-	frames := make([]runtime.Frame, 0, len(callers))
-	framesPtr := runtime.CallersFrames(callers)
-	for {
-		frame, more := framesPtr.Next()
-		frames = append(frames, frame)
-		if !more {
-			return frames
-		}
-	}
 }
 
 var (

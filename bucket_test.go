@@ -14,7 +14,6 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -30,7 +29,7 @@ func init() {
 	}
 }
 
-func testCtx(t *testing.T) context.Context {
+func testCtx(_ *testing.T) context.Context {
 	return context.Background() // match sync gateway interfaces for logging
 }
 
@@ -87,7 +86,7 @@ func TestGetMissingBucket(t *testing.T) {
 	path := uriFromPath(testBucketPath(t))
 	require.NoError(t, DeleteBucketAt(path))
 	bucket, err := OpenBucket(path, strings.ToLower(t.Name()), ReOpenExisting)
-	if runtime.GOOS == "windows" {
+	if isWindows() {
 		assert.ErrorContains(t, err, "unable to open database file: The system cannot find the path specified")
 	} else {
 		assert.ErrorContains(t, err, "unable to open database file: no such file or directory")
@@ -423,7 +422,7 @@ func TestExpirationAfterClose(t *testing.T) {
 
 func TestUriFromPathWindows(t *testing.T) {
 	ensureNoLeaks(t)
-	if runtime.GOOS != "windows" {
+	if !isWindows() {
 		t.Skip("This test is only for windows")
 	}
 	testCases := []struct {
@@ -461,7 +460,7 @@ func TestUriFromPathWindows(t *testing.T) {
 
 func TestUriFromPathNonWindows(t *testing.T) {
 	ensureNoLeaks(t)
-	if runtime.GOOS == "windows" {
+	if isWindows() {
 		t.Skip("This test is only for non-windows")
 	}
 	testCases := []struct {

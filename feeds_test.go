@@ -26,9 +26,9 @@ func TestBackfill(t *testing.T) {
 	bucket := makeTestBucket(t)
 	c := bucket.DefaultDataStore()
 
-	addToCollection(t, c, "able", 0, "A")
-	addToCollection(t, c, "baker", 0, "B")
-	addToCollection(t, c, "charlie", 0, "C")
+	addToCollection(t, c, "able", "A")
+	addToCollection(t, c, "baker", "B")
+	addToCollection(t, c, "charlie", "C")
 
 	args := sgbucket.FeedArguments{
 		Backfill: 0,
@@ -53,17 +53,17 @@ func TestMutations(t *testing.T) {
 	bucket := makeTestBucket(t)
 	c := bucket.DefaultDataStore()
 
-	addToCollection(t, c, "able", 0, "A")
-	addToCollection(t, c, "baker", 0, "B")
-	addToCollection(t, c, "charlie", 0, "C")
+	addToCollection(t, c, "able", "A")
+	addToCollection(t, c, "baker", "B")
+	addToCollection(t, c, "charlie", "C")
 
 	events, doneChan := startFeed(t, bucket)
 
-	addToCollection(t, c, "delta", 0, "D")
-	addToCollection(t, c, "eskimo", 0, "E")
+	addToCollection(t, c, "delta", "D")
+	addToCollection(t, c, "eskimo", "E")
 
 	go func() {
-		addToCollection(t, c, "fahrvergnügen", 0, "F")
+		addToCollection(t, c, "fahrvergnügen", "F")
 		err := c.Delete("eskimo")
 		require.NoError(t, err)
 	}()
@@ -86,9 +86,9 @@ func TestCheckpoint(t *testing.T) {
 	bucket := makeTestBucket(t)
 	c := bucket.DefaultDataStore()
 
-	addToCollection(t, c, "able", 0, "A")
-	addToCollection(t, c, "baker", 0, "B")
-	addToCollection(t, c, "charlie", 0, "C")
+	addToCollection(t, c, "able", "A")
+	addToCollection(t, c, "baker", "B")
+	addToCollection(t, c, "charlie", "C")
 
 	// Run the feed:
 	args := sgbucket.FeedArguments{
@@ -109,9 +109,9 @@ func TestCheckpoint(t *testing.T) {
 	assert.False(t, ok)
 
 	// Create new docs:
-	addToCollection(t, c, "delta", 0, "D")
-	addToCollection(t, c, "eskimo", 0, "E")
-	addToCollection(t, c, "fahrvergnügen", 0, "F")
+	addToCollection(t, c, "delta", "D")
+	addToCollection(t, c, "eskimo", "E")
+	addToCollection(t, c, "fahrvergnügen", "F")
 
 	// Resume the feed:
 	t.Logf("---- Resuming feed from checkpoint ---")
@@ -193,9 +193,9 @@ func TestCrossBucketEvents(t *testing.T) {
 	bucket := makeTestBucket(t)
 	c := bucket.DefaultDataStore()
 
-	addToCollection(t, c, "able", 0, "A")
-	addToCollection(t, c, "baker", 0, "B")
-	addToCollection(t, c, "charlie", 0, "C")
+	addToCollection(t, c, "able", "A")
+	addToCollection(t, c, "baker", "B")
+	addToCollection(t, c, "charlie", "C")
 
 	// Open a 2nd bucket on the same file, to receive events:
 	bucket2, err := OpenBucket(bucket.url, strings.ToLower(t.Name()), ReOpenExisting)
@@ -207,11 +207,11 @@ func TestCrossBucketEvents(t *testing.T) {
 	events, doneChan := startFeed(t, bucket)
 	events2, doneChan2 := startFeed(t, bucket2)
 
-	addToCollection(t, c, "delta", 0, "D")
-	addToCollection(t, c, "eskimo", 0, "E")
+	addToCollection(t, c, "delta", "D")
+	addToCollection(t, c, "eskimo", "E")
 
 	go func() {
-		addToCollection(t, c, "fahrvergnügen", 0, "F")
+		addToCollection(t, c, "fahrvergnügen", "F")
 		err = c.Delete("eskimo")
 		require.NoError(t, err)
 	}()

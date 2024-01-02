@@ -569,13 +569,6 @@ func (c *Collection) expireDocuments() (count int64, err error) {
 
 //////// Utilities:
 
-// Returns the last CAS assigned to any doc in _any_ collection.
-func (bucket *Bucket) getLastCas(txn *sql.Tx) (cas CAS, err error) {
-	row := txn.QueryRow("SELECT lastCas FROM bucket")
-	err = scan(row, &cas)
-	return
-}
-
 // Returns the last CAS assigned to any doc in this collection.
 func (c *Collection) getLastCas(q queryable) (cas CAS, err error) {
 	row := q.QueryRow("SELECT lastCas FROM collections WHERE id=?1", c.id)
@@ -588,7 +581,7 @@ func (bucket *Bucket) getLastTimestamp() timestamp {
 	var lastTimestamp timestamp
 	row := bucket.db().QueryRow("SELECT lastCas FROM bucket")
 	_ = scan(row, &lastTimestamp)
-	return timestamp(lastTimestamp)
+	return lastTimestamp
 }
 
 // Updates the collection's and the bucket's lastCas.

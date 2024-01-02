@@ -111,7 +111,7 @@ func OpenBucket(urlStr string, bucketName string, mode OpenMode) (b *Bucket, err
 		u = u.JoinPath(bucketName)
 	} else {
 		dir := u.Path
-		if runtime.GOOS == "windows" {
+		if isWindows() {
 			dir = strings.TrimPrefix(dir, "/")
 		}
 
@@ -245,7 +245,7 @@ func DeleteBucketAt(urlStr string) (err error) {
 
 	// For safety's sake, don't delete just any directory. Ensure it contains a db file:
 	dir := u.Path
-	if runtime.GOOS == "windows" {
+	if isWindows() {
 		dir = strings.TrimPrefix(dir, "/")
 	}
 
@@ -396,7 +396,7 @@ func (b *Bucket) copy() *Bucket {
 // uriFromPath converts a file path to a rosmar URI. On windows, these need to have forward slashes and drive letters will have an extra /, such as romsar://c:/foo/bar.
 func uriFromPath(path string) string {
 	uri := "rosmar://"
-	if runtime.GOOS != "windows" {
+	if !isWindows() {
 		return uri + path
 	}
 	path = filepath.ToSlash(path)
@@ -404,4 +404,8 @@ func uriFromPath(path string) string {
 		return uri + path
 	}
 	return uri + "/" + path
+}
+
+func isWindows() bool {
+	return runtime.GOOS == "windows"
 }

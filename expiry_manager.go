@@ -44,13 +44,6 @@ func (e *expiryManager) _getNext() uint32 {
 	return *e.nextExp
 }
 
-// setNext sets the next expiration time and schedules an expiration to occur after that time.
-func (e *expiryManager) setNext(exp uint32) {
-	e.mutex.Lock()
-	defer e.mutex.Unlock()
-	e._setNext(exp)
-}
-
 // _clearNext clears the next expiration time.
 func (e *expiryManager) _clearNext() {
 	var exp uint32

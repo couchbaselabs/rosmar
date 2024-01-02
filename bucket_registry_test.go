@@ -69,6 +69,7 @@ func TestDuplicateBucketNamesDifferentPath(t *testing.T) {
 
 	bucket2, err := OpenBucket(path2, bucketName, CreateOrOpen)
 	require.ErrorContains(t, err, "already exists")
+	require.Nil(t, bucket2)
 	require.Equal(t, []string{bucketName}, GetBucketNames())
 
 	bucket1.Close(testCtx(t))

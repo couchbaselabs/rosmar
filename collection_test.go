@@ -32,14 +32,14 @@ func TestDeleteThenAdd(t *testing.T) {
 	var value interface{}
 	_, err := coll.Get("key", &value)
 	assert.Equal(t, sgbucket.MissingError{Key: "key"}, err)
-	addToCollection(t, coll, "key", 0, "value")
+	addToCollection(t, coll, "key", "value")
 	_, err = coll.Get("key", &value)
 	assert.NoError(t, err, "Get")
 	assert.Equal(t, "value", value)
 	assert.NoError(t, coll.Delete("key"), "Delete")
 	_, err = coll.Get("key", &value)
 	assert.Equal(t, sgbucket.MissingError{Key: "key"}, err)
-	addToCollection(t, coll, "key", 0, "value")
+	addToCollection(t, coll, "key", "value")
 }
 
 func TestIncr(t *testing.T) {
@@ -112,7 +112,7 @@ func TestGets(t *testing.T) {
 	coll := makeTestBucket(t).DefaultDataStore()
 
 	// Gets (JSON)
-	addToCollection(t, coll, "key", 0, "value")
+	addToCollection(t, coll, "key", "value")
 
 	var value interface{}
 	cas, err := coll.Get("key", &value)
@@ -194,7 +194,7 @@ func initSubDocTest(t *testing.T) (CAS, sgbucket.DataStore) {
             "bar":"baz"}
         }`)
 
-	addToCollection(t, coll, "key", 0, rawJson)
+	addToCollection(t, coll, "key", rawJson)
 
 	var fullDoc map[string]any
 	cas, err := coll.Get("key", &fullDoc)
@@ -390,8 +390,8 @@ func TestNonRawBytes(t *testing.T) {
 	assert.NoError(t, err, "WriteCas *[]byte")
 
 	// Add with Add - JSON doc as []byte and *[]byte
-	addToCollection(t, coll, "add1", 0, byteBody)
-	addToCollection(t, coll, "add2", 0, &byteBody)
+	addToCollection(t, coll, "add1", byteBody)
+	addToCollection(t, coll, "add2", &byteBody)
 
 	// Set - JSON doc as []byte
 	// Set - JSON doc as *[]byte
@@ -451,8 +451,8 @@ func setJSON(coll sgbucket.DataStore, docid string, jsonDoc string) error {
 	return coll.Set(docid, 0, nil, obj)
 }
 
-func addToCollection(t *testing.T, coll sgbucket.DataStore, key string, exp uint32, value interface{}) {
-	added, err := coll.Add(key, exp, value)
+func addToCollection(t *testing.T, coll sgbucket.DataStore, key string, value interface{}) {
+	added, err := coll.Add(key, 0, value)
 	require.NoError(t, err)
 	require.True(t, added, "Expected doc to be added")
 }
@@ -544,6 +544,7 @@ func TestWriteCasWithXattrNoXattr(t *testing.T) {
 	updatedXattrVal["seq"] = 123
 	updatedXattrVal["rev"] = "2-1234"
 	xattrValBytes, err := json.Marshal(updatedXattrVal)
+	require.NoError(t, err)
 	ctx := testCtx(t)
 	const deleteBody = true
 	_, err = col.WriteWithXattr(ctx, docID, syncXattrName, 0, uint64(1234), nil, xattrValBytes, true, deleteBody, nil)

@@ -391,7 +391,7 @@ type writeXattrOptions struct {
 	deleteBody    bool // Delete the body along with updating tombstone
 }
 
-// checkCasXattr checks the cas supplied against the current cas of the document. hasPreviousDocBody represents whether the existing document has a body. existingCas is the current Cas of the document (will be 0 if no document) and expectedCas is the expected value. Returns CasMismatchErr on an unsuccesful CAS check.
+// checkCasXattr checks the cas supplied against the current cas of the document. hasPreviousDocBody represents whether the existing document has a body. existingCas is the current Cas of the document (will be 0 if no document) and expectedCas is the expected value. Returns CasMismatchErr on an unsuccessful CAS check.
 func checkCasXattr(hasPreviousDocBody bool, existingCas, expectedCas *CAS, opts writeXattrOptions) error {
 	// no cas supplied, nothing to check, this is different than zero when used with SetXattr
 	if expectedCas == nil {

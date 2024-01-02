@@ -21,7 +21,7 @@ func TestSetXattr(t *testing.T) {
 	ensureNoLeakedFeeds(t)
 	coll := makeTestBucket(t).DefaultDataStore()
 
-	addToCollection(t, coll, "key", 0, "value")
+	addToCollection(t, coll, "key", "value")
 
 	cas, err := coll.SetXattr(ctx, "key", "xfiles", []byte(`{"truth":"out_there"}`))
 	require.NoError(t, err)

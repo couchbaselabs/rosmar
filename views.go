@@ -180,9 +180,11 @@ type mapRow struct {
 }
 
 // Updates the view index if necessary.
-func (c *Collection) updateView(ctx context.Context, designDoc string, viewName string) (view *rosmarView, err error) {
-	err = c.bucket.inTransaction(func(txn *sql.Tx) error {
+func (c *Collection) updateView(ctx context.Context, designDoc string, viewName string) (*rosmarView, error) {
+	var view *rosmarView
+	err := c.bucket.inTransaction(func(txn *sql.Tx) error {
 		// Read the view to ensure we get the current lastCas, mapFn, reduceFn:
+		var err error
 		view, err = c.findView(ctx, txn, designDoc, viewName)
 		if err != nil {
 			return err
@@ -212,7 +214,12 @@ func (c *Collection) updateView(ctx context.Context, designDoc string, viewName 
 		if err != nil {
 			return err
 		}
-		defer rows.Close()
+		defer func() {
+			err := rows.Close()
+			if err != nil {
+				warn("Error closing rows in updateView: %v", err)
+			}
+		}()
 
 		// One goroutine reads documents from the db:
 		mapInputChan := make(chan *mapInput, 100)

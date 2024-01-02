@@ -51,8 +51,10 @@ func (bucket *Bucket) UUID() (string, error) {
 func (bucket *Bucket) Close(_ context.Context) {
 	traceEnter("Bucket.Close", "%s", bucket)
 
-	unregisterBucket(bucket)
-
+	err := unregisterBucket(bucket)
+	if err != nil {
+		warn("Error unregistering bucket: %v", err)
+	}
 	bucket.mutex.Lock()
 	defer bucket.mutex.Unlock()
 
@@ -60,22 +62,27 @@ func (bucket *Bucket) Close(_ context.Context) {
 }
 
 // _closeSqliteDB closes the underlying sqlite database and shuts down dcpFeeds. Must have a lock to call this function.
-func (bucket *Bucket) _closeSqliteDB() {
+func (bucket *Bucket) _closeSqliteDB() error {
 	bucket.expManager.stop()
 	for _, c := range bucket.collections {
 		c.close()
 	}
-	if bucket.sqliteDB != nil {
-		bucket.sqliteDB.Close()
-		bucket.collections = nil
+	if bucket.sqliteDB == nil {
+		return nil
 	}
+	err := bucket.sqliteDB.Close()
+	bucket.collections = nil
+	return err
 }
 
 // Closes a bucket and deletes its directory and files (unless it's in-memory.)
-func (bucket *Bucket) CloseAndDelete(ctx context.Context) (err error) {
+func (bucket *Bucket) CloseAndDelete(ctx context.Context) error {
 	bucket.mutex.Lock()
 	defer bucket.mutex.Unlock()
-	bucket._closeSqliteDB()
+	err := bucket._closeSqliteDB()
+	if err != nil {
+		return err
+	}
 	return deleteBucket(ctx, bucket)
 }
 
@@ -251,40 +258,6 @@ func (bucket *Bucket) getOrCreateCollection(name sgbucket.DataStoreNameImpl, orC
 		return nil, err
 	}
 }
-
-func (bucket *Bucket) getOpenCollectionByID(id CollectionID) *Collection {
-	bucket.mutex.Lock()
-	defer bucket.mutex.Unlock()
-
-	for _, coll := range bucket.collections {
-		if coll.id == id {
-			return coll
-		}
-	}
-	return nil
-}
-
-/*  unused (so far)
-func (bucket *Bucket) getCollectionByID(id CollectionID) (*Collection, error) {
-
-	bucket.mutex.Lock()
-	defer bucket.mutex.Unlock()
-
-	for _, coll := range bucket.collections {
-		if coll.id == id {
-			return coll, nil
-		}
-	}
-	row := bucket.db().QueryRow(`SELECT scope,name FROM collections WHERE id=?1`, id)
-	var scope, name string
-	err := scan(row, &scope, &name)
-	if err != nil {
-		return nil, err
-	}
-	dsName := sgbucket.DataStoreNameImpl{Scope: scope, Collection: name}
-	return bucket._initCollection(dsName, id), nil
-}
-*/
 
 func (bucket *Bucket) dropCollection(name sgbucket.DataStoreNameImpl) error {
 	if name.IsDefault() {
