@@ -39,6 +39,55 @@ func (c *Collection) GetXattr(
 	}
 }
 
+// SetWithMeta updates a document fully with xattrs and body and allows specification of a specific CAS (newCas). This update will always happen as long as oldCas matches the value of existing document.
+func (c *Collection) SetWithMeta(_ context.Context, key string, oldCas CAS, newCas CAS, exp uint32, xattrs []byte, body []byte, isJSON bool) error {
+	var e *event
+	err := c.bucket.inTransaction(func(txn *sql.Tx) error {
+		var prevCas CAS
+		row := txn.QueryRow(`SELECT cas FROM documents WHERE collection=?1 AND key=?2`,
+			c.id, key)
+		err := scan(row, &prevCas)
+		if err != nil && err != sql.ErrNoRows {
+			return remapKeyError(err, key)
+		}
+		if oldCas != prevCas {
+			return sgbucket.CasMismatchErr{Expected: oldCas, Actual: prevCas}
+		}
+		e := &event{
+			collectionID: c.GetCollectionID(),
+			key:          key,
+			value:        body,
+			xattrs:       xattrs,
+			cas:          newCas,
+			exp:          exp,
+			isDeletion:   false,
+			isJSON:       isJSON,
+		}
+		err = writeDocument(txn, c.id, e)
+		return err
+	})
+
+	if err != nil {
+		return err
+	}
+	if e != nil {
+		c.postNewEvent(e)
+	}
+	return nil
+}
+
+// writeDocument will update a document in a collection from a given event. This will always overwrite the values.
+func writeDocument(txn *sql.Tx, collectionID CollectionID, e *event) error {
+	// Note that e.collectionID does not represent collectionID as the offset of the table.
+	_, err := txn.Exec(`INSERT INTO documents(collection,key,value,isJSON,cas,exp,xattrs,tombstone)
+							VALUES (?1,?2,?3,?4,?5,?6,?7,0)
+							ON CONFLICT (collection,key) DO
+								UPDATE SET value=?3, isJSON=?4, cas=?5, exp=?6, xattrs=?7,tombstone=0
+								WHERE collection=?1 AND key=?2`,
+		collectionID, e.key, e.value, e.isJSON, e.cas, e.exp, e.xattrs)
+	return err
+}
+
 // Set a single xattr value.
 func (c *Collection) SetXattr(
 	_ context.Context,
@@ -537,13 +586,11 @@ func (c *Collection) writeWithXattr(
 			e.exp = absoluteExpiry(*exp)
 		}
 
-		_, err = txn.Exec(`INSERT INTO documents(collection,key,value,isJSON,cas,exp,xattrs)
-							VALUES (?5,?6,?1,?2,?3,?7,?4)
-							ON CONFLICT (collection,key) DO
-								UPDATE SET value=?1, isJSON=?2, cas=?3, exp=?7, xattrs=?4
-								WHERE collection=?5 AND key=?6`,
-			e.value, e.isJSON, e.cas, e.xattrs, c.id, key, e.exp)
-		return e, err
+		err = writeDocument(txn, c.id, e)
+		if err != nil {
+			return nil, err
+		}
+		return e, nil
 	})
 	return
 }
