@@ -729,3 +729,70 @@ func TestSetWithMetaCas(t *testing.T) {
 	require.Equal(t, specifiedCas, cas)
 	require.JSONEq(t, string(body), string(val))
 }
+
+func TestDeleteWithMeta(t *testing.T) {
+	col := makeTestBucket(t).DefaultDataStore()
+	docID := t.Name()
+
+	startingCas, err := col.WriteCas(docID, 0, 0, 0, []byte(`{"foo": "bar"}`), sgbucket.Raw)
+	require.NoError(t, err)
+	specifiedCas := CAS(1)
+
+	ctx := testCtx(t)
+
+	// pass a bad CAS and document will not delete
+	badStartingCas := CAS(1234)
+	// document doesn't exist, but CAS 0 will allow writing
+	err = col.(*Collection).DeleteWithMeta(ctx, docID, badStartingCas, specifiedCas, 0, nil)
+	require.ErrorAs(t, err, &sgbucket.CasMismatchErr{})
+
+	// tombstone with a good cas
+	err = col.(*Collection).DeleteWithMeta(ctx, docID, startingCas, specifiedCas, 0, nil)
+	require.NoError(t, err)
+
+	_, err = col.Get(docID, nil)
+	require.ErrorAs(t, err, &sgbucket.MissingError{})
+}
+
+func TestDeleteWithMetaXattr(t *testing.T) {
+	col := makeTestBucket(t).DefaultDataStore()
+	docID := t.Name()
+
+	val := make(map[string]interface{})
+	val["type"] = docID
+
+	xattrVal := make(map[string]interface{})
+	const (
+		userXattr      = "userXattr"
+		systemXattr    = "_systemXattr"
+		systemXattrVal = "bar"
+	)
+	xattrVal[userXattr] = "foo"
+	xattrVal[systemXattr] = systemXattrVal
+
+	ctx := testCtx(t)
+	startingCas, err := col.WriteCasWithXattr(ctx, docID, syncXattrName, 0, 0, val, xattrVal, nil)
+	require.NoError(t, err)
+
+	specifiedCas := CAS(1)
+	// pass a bad CAS and document will not delete
+	badStartingCas := CAS(1234)
+	// document doesn't exist, but CAS 0 will allow writing
+	err = col.(*Collection).DeleteWithMeta(ctx, docID, badStartingCas, specifiedCas, 0, nil)
+	require.ErrorAs(t, err, &sgbucket.CasMismatchErr{})
+
+	// tombstone with a good cas
+	err = col.(*Collection).DeleteWithMeta(ctx, docID, startingCas, specifiedCas, 0, []byte(fmt.Sprintf(fmt.Sprintf(`{"%s": "%s"}`, systemXattr, systemXattrVal))))
+	require.NoError(t, err)
+
+	_, err = col.Get(docID, nil)
+	require.ErrorAs(t, err, &sgbucket.MissingError{})
+
+	var xattr string
+	tombstoneCas, err := col.GetXattr(ctx, docID, systemXattr, &xattr)
+	require.NoError(t, err)
+	require.Equal(t, specifiedCas, tombstoneCas)
+
+	tombstoneCas, err = col.GetXattr(ctx, docID, userXattr, &xattr)
+	require.ErrorAs(t, err, &sgbucket.XattrMissingError{})
+}

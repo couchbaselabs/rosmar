@@ -39,7 +39,7 @@ func (c *Collection) GetXattr(
 	}
 }
 
-// SetWithMeta updates a document fully with xattrs and body and allows specification of a specific CAS (newCas). This update will always happen as long as oldCas matches the value of existing document.
+// SetWithMeta updates a document fully with xattrs and body and allows specification of a specific CAS (newCas). This update will always happen as long as oldCas matches the value of existing document. This simulates the kv op setWithMeta.
 func (c *Collection) SetWithMeta(_ context.Context, key string, oldCas CAS, newCas CAS, exp uint32, xattrs []byte, body []byte, isJSON bool) error {
 	var e *event
 	err := c.bucket.inTransaction(func(txn *sql.Tx) error {
@@ -76,15 +76,55 @@ func (c *Collection) SetWithMeta(_ context.Context, key string, oldCas CAS, newC
 	return nil
 }
 
+// DeleteWithMeta tombstones a document and sets a specific cas. This update will always happen as long as oldCas matches the value of existing document. This simulates the kv op deleteWithMeta.
+func (c *Collection) DeleteWithMeta(_ context.Context, key string, oldCas CAS, newCas CAS, exp uint32, xattrs []byte) error {
+	var e *event
+	err := c.bucket.inTransaction(func(txn *sql.Tx) error {
+		var prevCas CAS
+		row := txn.QueryRow(`SELECT cas FROM documents WHERE collection=?1 AND key=?2`,
+			c.id, key)
+		err := scan(row, &prevCas)
+		if err != nil && err != sql.ErrNoRows {
+			return remapKeyError(err, key)
+		}
+		if oldCas != prevCas {
+			return sgbucket.CasMismatchErr{Expected: oldCas, Actual: prevCas}
+		}
+		e := &event{
+			collectionID: c.GetCollectionID(),
+			key:          key,
+			value:        nil,
+			xattrs:       xattrs,
+			cas:          newCas,
+			exp:          exp,
+			isDeletion:   true,
+		}
+		err = writeDocument(txn, c.id, e)
+		return err
+	})
+
+	if err != nil {
+		return err
+	}
+	if e != nil {
+		c.postNewEvent(e)
+	}
+	return nil
+}
+
 // writeDocument will update a document in a collection from a given event. This will always overwrite the values.
 func writeDocument(txn *sql.Tx, collectionID CollectionID, e *event) error {
+	tombstone := 0
+	if e.isDeletion {
+		tombstone = 1
+	}
 	// Note that e.collectionID does not represent collectionID as the offset of the table.
 	_, err := txn.Exec(`INSERT INTO documents(collection,key,value,isJSON,cas,exp,xattrs,tombstone)
-							VALUES (?1,?2,?3,?4,?5,?6,?7,0)
+							VALUES (?1,?2,?3,?4,?5,?6,?7,?8)
 							ON CONFLICT (collection,key) DO
 								UPDATE SET value=?3, isJSON=?4, cas=?5, exp=?6, xattrs=?7,tombstone=0
 								WHERE collection=?1 AND key=?2`,
-		collectionID, e.key, e.value, e.isJSON, e.cas, e.exp, e.xattrs)
+		collectionID, e.key, e.value, e.isJSON, e.cas, e.exp, e.xattrs, tombstone)
 	return err
 }
 
