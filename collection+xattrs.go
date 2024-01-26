@@ -44,7 +44,7 @@ func (c *Collection) SetWithMeta(_ context.Context, key string, oldCas CAS, newC
 	return c.writeWithMeta(key, body, xattrs, oldCas, newCas, exp, isJSON, false)
 }
 
-// writeWithMeta writes a document with a specific cas. This update will always happen as long as oldCas matches the value of existing document (or 0 if no document).
+// writeWithMeta writes a document which will be stored with a cas value of newCas.  It still performs the standard CAS check for optimistic concurrency using oldCas, when specified.
 func (c *Collection) writeWithMeta(key string, body []byte, xattrs []byte, oldCas CAS, newCas CAS, exp uint32, isJSON, isDeletion bool) error {
 	var e *event
 	err := c.bucket.inTransaction(func(txn *sql.Tx) error {
