@@ -54,14 +54,13 @@ func (c *Collection) SetWithMeta(_ context.Context, key string, oldCas CAS, newC
 			return sgbucket.CasMismatchErr{Expected: oldCas, Actual: prevCas}
 		}
 		e := &event{
-			collectionID: c.GetCollectionID(),
-			key:          key,
-			value:        body,
-			xattrs:       xattrs,
-			cas:          newCas,
-			exp:          exp,
-			isDeletion:   false,
-			isJSON:       isJSON,
+			key:        key,
+			value:      body,
+			xattrs:     xattrs,
+			cas:        newCas,
+			exp:        exp,
+			isDeletion: false,
+			isJSON:     isJSON,
 		}
 		err = writeDocument(txn, c.id, e)
 		return err
@@ -91,13 +90,12 @@ func (c *Collection) DeleteWithMeta(_ context.Context, key string, oldCas CAS, n
 			return sgbucket.CasMismatchErr{Expected: oldCas, Actual: prevCas}
 		}
 		e := &event{
-			collectionID: c.GetCollectionID(),
-			key:          key,
-			value:        nil,
-			xattrs:       xattrs,
-			cas:          newCas,
-			exp:          exp,
-			isDeletion:   true,
+			key:        key,
+			value:      nil,
+			xattrs:     xattrs,
+			cas:        newCas,
+			exp:        exp,
+			isDeletion: true,
 		}
 		err = writeDocument(txn, c.id, e)
 		return err
@@ -118,11 +116,10 @@ func writeDocument(txn *sql.Tx, collectionID CollectionID, e *event) error {
 	if e.isDeletion {
 		tombstone = 1
 	}
-	// Note that e.collectionID does not represent collectionID as the offset of the table.
 	_, err := txn.Exec(`INSERT INTO documents(collection,key,value,isJSON,cas,exp,xattrs,tombstone)
 							VALUES (?1,?2,?3,?4,?5,?6,?7,?8)
 							ON CONFLICT (collection,key) DO
-								UPDATE SET value=?3, isJSON=?4, cas=?5, exp=?6, xattrs=?7,tombstone=0
+								UPDATE SET value=?3, isJSON=?4, cas=?5, exp=?6, xattrs=?7,tombstone=?8
 								WHERE collection=?1 AND key=?2`,
 		collectionID, e.key, e.value, e.isJSON, e.cas, e.exp, e.xattrs, tombstone)
 	return err
