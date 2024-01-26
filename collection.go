@@ -315,7 +315,7 @@ func (c *Collection) WriteCas(key string, flags int, exp Exp, cas CAS, val any, 
 		var sql string
 		if (opt & sgbucket.Append) != 0 {
 			// Append:
-			sql = `UPDATE documents SET value=value || ?1, cas=?2, exp=?6, isJSON=0,
+			sql = `UPDATE documents SET value=value || ?1, cas=?2, exp=?6, isJSON=?7,
 						xattrs=iif(tombstone != 0, null, xattrs)
 				   WHERE collection=?3 AND key=?4 AND cas=?5`
 		} else if (opt&sgbucket.AddOnly) != 0 || cas == 0 {

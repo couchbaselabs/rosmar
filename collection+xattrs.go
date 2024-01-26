@@ -40,8 +40,10 @@ func (c *Collection) GetXattr(
 }
 
 // SetWithMeta updates a document fully with xattrs and body and allows specification of a specific CAS (newCas). This update will always happen as long as oldCas matches the value of existing document. This simulates the kv op setWithMeta.
-func (c *Collection) SetWithMeta(_ context.Context, key string, oldCas CAS, newCas CAS, exp uint32, xattrs []byte, body []byte, isJSON bool) error {
-	return c.writeWithMeta(key, body, xattrs, oldCas, newCas, exp, isJSON, false)
+func (c *Collection) SetWithMeta(_ context.Context, key string, oldCas CAS, newCas CAS, exp uint32, xattrs []byte, body []byte, datatype sgbucket.FeedDataType) error {
+	isJSON := datatype&sgbucket.FeedDataTypeJSON != 0
+	isDeletion := false
+	return c.writeWithMeta(key, body, xattrs, oldCas, newCas, exp, isJSON, isDeletion)
 }
 
 // writeWithMeta writes a document which will be stored with a cas value of newCas.  It still performs the standard CAS check for optimistic concurrency using oldCas, when specified.
@@ -58,7 +60,7 @@ func (c *Collection) writeWithMeta(key string, body []byte, xattrs []byte, oldCa
 		if oldCas != prevCas {
 			return sgbucket.CasMismatchErr{Expected: oldCas, Actual: prevCas}
 		}
-		e := &event{
+		e = &event{
 			key:        key,
 			value:      body,
 			xattrs:     xattrs,
