@@ -625,3 +625,218 @@ func verifyEmptyBodyAndSyncXattr(t *testing.T, store sgbucket.XattrStore, key st
 	require.Empty(t, retrievedVal) // require that the doc body is empty
 	require.Greater(t, len(retrievedXattr), 0)
 }
+
+func TestSetWithMetaNoDocument(t *testing.T) {
+	col := makeTestBucket(t).DefaultDataStore()
+	const docID = "TestSetWithMeta"
+	ctx := testCtx(t)
+	cas2 := CAS(1)
+	body := []byte(`{"foo":"bar"}`)
+	err := col.(*Collection).SetWithMeta(ctx, docID, 0, cas2, 0, nil, body, sgbucket.FeedDataTypeJSON)
+	require.NoError(t, err)
+
+	val, cas, err := col.GetRaw(docID)
+	require.NoError(t, err)
+	require.Equal(t, cas2, cas)
+	require.JSONEq(t, string(body), string(val))
+}
+
+func TestSetWithMetaOverwriteJSON(t *testing.T) {
+	col := makeTestBucket(t).DefaultDataStore()
+	docID := t.Name()
+	cas1, err := col.WriteCas(docID, 0, 0, 0, []byte("{}"), sgbucket.Raw)
+	require.NoError(t, err)
+	require.Greater(t, cas1, CAS(0))
+
+	ctx := testCtx(t)
+	cas2 := CAS(1)
+	body := []byte(`{"foo":"bar"}`)
+	err = col.(*Collection).SetWithMeta(ctx, docID, cas1, cas2, 0, nil, body, sgbucket.FeedDataTypeJSON)
+	require.NoError(t, err)
+
+	val, cas, err := col.GetRaw(docID)
+	require.NoError(t, err)
+	require.Equal(t, cas2, cas)
+	require.JSONEq(t, string(body), string(val))
+}
+
+func TestSetWithMetaOverwriteNotJSON(t *testing.T) {
+	bucket := makeTestBucket(t)
+	col := bucket.DefaultDataStore()
+	docID := t.Name()
+
+	events, _ := startFeed(t, bucket)
+	cas1, err := col.WriteCas(docID, 0, 0, 0, []byte("{}"), 0)
+	require.NoError(t, err)
+	require.Greater(t, cas1, CAS(0))
+
+	event1 := <-events
+	require.Equal(t, docID, string(event1.Key))
+	require.Equal(t, sgbucket.FeedOpMutation, event1.Opcode)
+	require.Equal(t, sgbucket.FeedDataTypeJSON, event1.DataType)
+
+	ctx := testCtx(t)
+	cas2 := CAS(1)
+	body := []byte(`ABC`)
+	err = col.(*Collection).SetWithMeta(ctx, docID, cas1, cas2, 0, nil, body, sgbucket.FeedDataTypeRaw)
+	require.NoError(t, err)
+
+	val, cas, err := col.GetRaw(docID)
+	require.NoError(t, err)
+	require.Equal(t, cas2, cas)
+	require.Equal(t, body, val)
+
+	event2 := <-events
+	require.Equal(t, docID, string(event2.Key))
+	require.Equal(t, sgbucket.FeedOpMutation, event2.Opcode)
+	require.Equal(t, sgbucket.FeedDataTypeRaw, event2.DataType)
+}
+
+func TestSetWithMetaOverwriteTombstone(t *testing.T) {
+	bucket := makeTestBucket(t)
+	col := bucket.DefaultDataStore()
+	docID := t.Name()
+	cas1, err := col.WriteCas(docID, 0, 0, 0, []byte("{}"), sgbucket.Raw)
+	require.NoError(t, err)
+	require.Greater(t, cas1, CAS(0))
+	deletedCas, err := col.Remove(docID, cas1)
+	require.NoError(t, err)
+
+	ctx := testCtx(t)
+	cas2 := CAS(1)
+	body := []byte(`ABC`)
+
+	// make sure there is a cas check even for tombstone
+	err = col.(*Collection).SetWithMeta(ctx, docID, CAS(0), cas2, 0, nil, body, sgbucket.FeedDataTypeJSON)
+	require.ErrorAs(t, err, &sgbucket.CasMismatchErr{})
+
+	events, _ := startFeed(t, bucket)
+
+	// cas check even on tombstone
+	err = col.(*Collection).SetWithMeta(ctx, docID, deletedCas, cas2, 0, nil, body, sgbucket.FeedDataTypeJSON)
+	require.NoError(t, err)
+
+	event := <-events
+	require.Equal(t, docID, string(event.Key))
+	require.Equal(t, sgbucket.FeedOpMutation, event.Opcode)
+
+	val, cas, err := col.GetRaw(docID)
+	require.NoError(t, err)
+	require.Equal(t, cas2, cas)
+	require.Equal(t, body, val)
+}
+
+func TestSetWithMetaCas(t *testing.T) {
+	col := makeTestBucket(t).DefaultDataStore()
+	docID := t.Name()
+
+	body := []byte(`{"foo":"bar"}`)
+	ctx := testCtx(t)
+
+	badStartingCas := CAS(1234)
+	specifiedCas := CAS(1)
+
+	// document doesn't exist, so cas mismatch will occur if CAS != 0
+	err := col.(*Collection).SetWithMeta(ctx, docID, badStartingCas, specifiedCas, 0, nil, body, sgbucket.FeedDataTypeJSON)
+	require.ErrorAs(t, err, &sgbucket.CasMismatchErr{})
+
+	// document doesn't exist, but CAS 0 will allow writing
+	err = col.(*Collection).SetWithMeta(ctx, docID, CAS(0), specifiedCas, 0, nil, body, sgbucket.FeedDataTypeJSON)
+	require.NoError(t, err)
+
+	val, cas, err := col.GetRaw(docID)
+	require.NoError(t, err)
+	require.Equal(t, specifiedCas, cas)
+	require.JSONEq(t, string(body), string(val))
+}
+
+func TestDeleteWithMeta(t *testing.T) {
+	testCases := []struct {
+		name     string
+		dataType sgbucket.WriteOptions
+	}{
+		{
+			name:     "JSON",
+			dataType: 0, // automatically determined
+		},
+		{
+			name:     "Raw",
+			dataType: sgbucket.Raw,
+		},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			bucket := makeTestBucket(t)
+			col := bucket.DefaultDataStore()
+			docID := t.Name()
+
+			startingCas, err := col.WriteCas(docID, 0, 0, 0, []byte(`{"foo": "bar"}`), testCase.dataType)
+			require.NoError(t, err)
+			specifiedCas := CAS(1)
+
+			events, _ := startFeed(t, bucket)
+			ctx := testCtx(t)
+
+			// pass a bad CAS and document will not delete
+			badStartingCas := CAS(1234)
+			// document doesn't exist, but CAS 0 will allow writing
+			err = col.(*Collection).DeleteWithMeta(ctx, docID, badStartingCas, specifiedCas, 0, nil)
+			require.ErrorAs(t, err, &sgbucket.CasMismatchErr{})
+
+			// tombstone with a good cas
+			err = col.(*Collection).DeleteWithMeta(ctx, docID, startingCas, specifiedCas, 0, nil)
+			require.NoError(t, err)
+
+			event := <-events
+			require.Equal(t, docID, string(event.Key))
+			require.Equal(t, sgbucket.FeedOpDeletion, event.Opcode)
+			require.Equal(t, sgbucket.FeedDataTypeRaw, event.DataType)
+
+			_, err = col.Get(docID, nil)
+			require.ErrorAs(t, err, &sgbucket.MissingError{})
+		})
+	}
+}
+
+func TestDeleteWithMetaXattr(t *testing.T) {
+	col := makeTestBucket(t).DefaultDataStore()
+	docID := t.Name()
+
+	val := make(map[string]interface{})
+	val["type"] = docID
+
+	xattrVal := make(map[string]interface{})
+	const (
+		userXattr      = "userXattr"
+		systemXattr    = "_systemXattr"
+		systemXattrVal = "bar"
+	)
+	xattrVal[userXattr] = "foo"
+	xattrVal[systemXattr] = systemXattrVal
+
+	ctx := testCtx(t)
+	startingCas, err := col.WriteCasWithXattr(ctx, docID, syncXattrName, 0, 0, val, xattrVal, nil)
+	require.NoError(t, err)
+
+	specifiedCas := CAS(1)
+	// pass a bad CAS and document will not delete
+	badStartingCas := CAS(1234)
+	// document doesn't exist, but CAS 0 will allow writing
+	err = col.(*Collection).DeleteWithMeta(ctx, docID, badStartingCas, specifiedCas, 0, nil)
+	require.ErrorAs(t, err, &sgbucket.CasMismatchErr{})
+
+	// tombstone with a good cas
+	err = col.(*Collection).DeleteWithMeta(ctx, docID, startingCas, specifiedCas, 0, []byte(fmt.Sprintf(fmt.Sprintf(`{"%s": "%s"}`, systemXattr, systemXattrVal))))
+	require.NoError(t, err)
+
+	_, err = col.Get(docID, nil)
+	require.ErrorAs(t, err, &sgbucket.MissingError{})
+
+	var xattr string
+	tombstoneCas, err := col.GetXattr(ctx, docID, systemXattr, &xattr)
+	require.NoError(t, err)
+	require.Equal(t, specifiedCas, tombstoneCas)
+
+	tombstoneCas, err = col.GetXattr(ctx, docID, userXattr, &xattr)
+	require.ErrorAs(t, err, &sgbucket.XattrMissingError{})
+}

@@ -39,6 +39,71 @@ func (c *Collection) GetXattr(
 	}
 }
 
+// SetWithMeta updates a document fully with xattrs and body and allows specification of a specific CAS (newCas). This update will always happen as long as oldCas matches the value of existing document. This simulates the kv op setWithMeta.
+func (c *Collection) SetWithMeta(_ context.Context, key string, oldCas CAS, newCas CAS, exp uint32, xattrs []byte, body []byte, datatype sgbucket.FeedDataType) error {
+	isJSON := datatype&sgbucket.FeedDataTypeJSON != 0
+	isDeletion := false
+	return c.writeWithMeta(key, body, xattrs, oldCas, newCas, exp, isJSON, isDeletion)
+}
+
+// writeWithMeta writes a document which will be stored with a cas value of newCas.  It still performs the standard CAS check for optimistic concurrency using oldCas, when specified.
+func (c *Collection) writeWithMeta(key string, body []byte, xattrs []byte, oldCas CAS, newCas CAS, exp uint32, isJSON, isDeletion bool) error {
+	var e *event
+	err := c.bucket.inTransaction(func(txn *sql.Tx) error {
+		var prevCas CAS
+		row := txn.QueryRow(`SELECT cas FROM documents WHERE collection=?1 AND key=?2`,
+			c.id, key)
+		err := scan(row, &prevCas)
+		if err != nil && err != sql.ErrNoRows {
+			return remapKeyError(err, key)
+		}
+		if oldCas != prevCas {
+			return sgbucket.CasMismatchErr{Expected: oldCas, Actual: prevCas}
+		}
+		e = &event{
+			key:        key,
+			value:      body,
+			xattrs:     xattrs,
+			cas:        newCas,
+			exp:        exp,
+			isDeletion: isDeletion,
+			isJSON:     isJSON,
+		}
+		return c.storeDocument(txn, e)
+	})
+
+	if err != nil {
+		return err
+	}
+	if e != nil {
+		c.postNewEvent(e)
+	}
+	return nil
+}
+
+// DeleteWithMeta tombstones a document and sets a specific cas. This update will always happen as long as oldCas matches the value of existing document. This simulates the kv op deleteWithMeta.
+func (c *Collection) DeleteWithMeta(_ context.Context, key string, oldCas CAS, newCas CAS, exp uint32, xattrs []byte) error {
+	var body []byte
+	isJSON := false
+	isDeletion := true
+	return c.writeWithMeta(key, body, xattrs, oldCas, newCas, exp, isJSON, isDeletion)
+}
+
+// storeDocument performs a write to the underlying sqlite database of a document from a given event.
+func (c *Collection) storeDocument(txn *sql.Tx, e *event) error {
+	tombstone := 0
+	if e.isDeletion {
+		tombstone = 1
+	}
+	_, err := txn.Exec(`INSERT INTO documents(collection,key,value,isJSON,cas,exp,xattrs,tombstone)
+							VALUES (?1,?2,?3,?4,?5,?6,?7,?8)
+							ON CONFLICT (collection,key) DO
+								UPDATE SET value=?3, isJSON=?4, cas=?5, exp=?6, xattrs=?7,tombstone=?8
+								WHERE collection=?1 AND key=?2`,
+		c.id, e.key, e.value, e.isJSON, e.cas, e.exp, e.xattrs, tombstone)
+	return err
+}
+
 // Set a single xattr value.
 func (c *Collection) SetXattr(
 	_ context.Context,
@@ -537,13 +602,11 @@ func (c *Collection) writeWithXattr(
 			e.exp = absoluteExpiry(*exp)
 		}
 
-		_, err = txn.Exec(`INSERT INTO documents(collection,key,value,isJSON,cas,exp,xattrs)
-							VALUES (?5,?6,?1,?2,?3,?7,?4)
-							ON CONFLICT (collection,key) DO
-								UPDATE SET value=?1, isJSON=?2, cas=?3, exp=?7, xattrs=?4
-								WHERE collection=?5 AND key=?6`,
-			e.value, e.isJSON, e.cas, e.xattrs, c.id, key, e.exp)
-		return e, err
+		err = c.storeDocument(txn, e)
+		if err != nil {
+			return nil, err
+		}
+		return e, nil
 	})
 	return
 }

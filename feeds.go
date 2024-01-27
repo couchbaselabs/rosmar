@@ -152,20 +152,19 @@ func (c *Collection) enqueueBackfillEvents(startCas uint64, keysOnly bool, q *ev
 	if err != nil {
 		return err
 	}
-	e := event{collectionID: c.GetCollectionID()}
+	e := event{}
 	for rows.Next() {
 		if err := rows.Scan(&e.key, &e.value, &e.xattrs, &e.isJSON, &e.cas); err != nil {
 			return err
 		}
-		q.push(e.asFeedEvent())
+		q.push(e.asFeedEvent(c.GetCollectionID()))
 	}
 	return rows.Close()
 }
 
 func (c *Collection) postNewEvent(e *event) {
 	info("DCP: %s cas 0x%x: %q = %#.50q ---- xattrs %#q", c, e.cas, e.key, e.value, e.xattrs)
-	e.collectionID = c.GetCollectionID()
-	feedEvent := e.asFeedEvent()
+	feedEvent := e.asFeedEvent(c.GetCollectionID())
 
 	c.postEvent(feedEvent)
 	c.bucket.expManager.scheduleExpirationAtOrBefore(e.exp)
@@ -315,23 +314,22 @@ func (feed *dcpFeed) close() {
 //////// EVENTS
 
 type event struct {
-	collectionID uint32 // Public collection ID (not the same as Collection.id)
-	key          string // Doc ID
-	value        []byte // Raw data content, or nil if deleted
-	isDeletion   bool   // True if it's a deletion event
-	isJSON       bool   // Is the data a JSON document?
-	xattrs       []byte // Extended attributes
-	cas          CAS    // Sequence in collection
-	exp          Exp    // Expiration time
+	key        string // Doc ID
+	value      []byte // Raw data content, or nil if deleted
+	isDeletion bool   // True if it's a deletion event
+	isJSON     bool   // Is the data a JSON document?
+	xattrs     []byte // Extended attributes
+	cas        CAS    // Sequence in collection
+	exp        Exp    // Expiration time
 }
 
-func (e *event) asFeedEvent() *sgbucket.FeedEvent {
+func (e *event) asFeedEvent(collectionID uint32) *sgbucket.FeedEvent {
 	if e.exp != absoluteExpiry(e.exp) {
 		panic(fmt.Sprintf("expiry %d isn't absolute", e.exp)) // caller forgot absoluteExpiry()
 	}
 	feedEvent := sgbucket.FeedEvent{
 		Opcode:       ifelse(e.isDeletion, sgbucket.FeedOpDeletion, sgbucket.FeedOpMutation),
-		CollectionID: e.collectionID,
+		CollectionID: collectionID,
 		Key:          []byte(e.key),
 		Value:        e.value,
 		Cas:          e.cas,
