@@ -21,22 +21,21 @@ import (
 
 type semiParsedXattrs = map[string]json.RawMessage
 
-//////// SGBUCKET XATTR STORE INTERFACE
-
-// Get a single xattr value.
-func (c *Collection) GetXattr(
+// ////// SGBUCKET XATTR STORE INTERFACE
+func (c *Collection) GetXattrs(
 	_ context.Context,
 	key string,
-	xattrKey string,
-	xv interface{},
-) (CAS, error) {
-	if rawDoc, err := c.getRawWithXattr(key, xattrKey, ""); err != nil {
-		return 0, err
-	} else if rawDoc.Xattr == nil {
-		return 0, sgbucket.XattrMissingError{Key: key, XattrKey: xattrKey}
-	} else {
-		return rawDoc.Cas, decodeRaw(rawDoc.Xattr, xv)
+	xattrKeys []string,
+) (map[string][]byte, CAS, error) {
+	rawDoc, err := c.getRawWithXattrs(key, xattrKeys)
+	if err != nil {
+		return nil, 0, err
 	}
+	if rawDoc.Xattrs == nil || len(rawDoc.Xattrs) == 0 {
+		return nil, 0, sgbucket.XattrMissingError{Key: key, Xattrs: xattrKeys}
+	}
+
+	return rawDoc.Xattrs, rawDoc.Cas, nil
 }
 
 // SetWithMeta updates a document fully with xattrs and body and allows specification of a specific CAS (newCas). This update will always happen as long as oldCas matches the value of existing document. This simulates the kv op setWithMeta.
@@ -105,33 +104,28 @@ func (c *Collection) storeDocument(txn *sql.Tx, e *event) error {
 }
 
 // Set a single xattr value.
-func (c *Collection) SetXattr(
-	_ context.Context,
-	key string,
-	xattrKey string,
-	xv []byte,
-) (casOut CAS, err error) {
-	traceEnter("SetXattr", "%q, %q", key, xattrKey)
-	casOut, err = c.writeWithXattr(key, nil, xattrKey, payload{marshaled: xv}, nil, nil, writeXattrOptions{}, nil)
+func (c *Collection) SetXattrs(_ context.Context, key string, xattrs map[string][]byte) (CAS, error) {
+	traceEnter("SetXattrs", "%q, %q", key, xattrs)
+	payloadXattrs := make(map[string]payload, len(xattrs))
+	for k, v := range xattrs {
+		payloadXattrs[k] = payload{marshaled: v}
+	}
+	casOut, err := c.writeWithXattrs(key, nil, payloadXattrs, nil, nil, writeXattrOptions{}, nil)
 	traceExit("SetXattr", err, "0x%x", casOut)
 	return casOut, err
 }
 
-// Remove a single xattr.
-func (c *Collection) RemoveXattr(
-	_ context.Context,
-	key string,
-	xattrKey string,
-	cas CAS,
-) error {
-	traceEnter("RemoveXattr", "%q, %q", key, xattrKey)
-	_, err := c.writeWithXattr(key, nil, xattrKey, payload{}, &cas, nil, writeXattrOptions{}, nil)
-	traceExit("RemoveXattr", err, "ok")
+func (c *Collection) RemoveXattrs(_ context.Context, key string, xattrKeys []string, cas CAS) error {
+	removedXattrs := make(map[string]payload, len(xattrKeys))
+	for _, xattrKey := range xattrKeys {
+		removedXattrs[xattrKey] = payload{}
+	}
+	_, err := c.writeWithXattrs(key, nil, removedXattrs, &cas, nil, writeXattrOptions{}, nil)
 	return err
 }
 
-// Remove one or more xattrs.
-func (c *Collection) DeleteXattrs(
+// Remove one or more subdoc paths from a document.
+func (c *Collection) DeleteSubDocPaths(
 	_ context.Context,
 	key string,
 	xattrKeys ...string,
@@ -160,134 +154,79 @@ func (c *Collection) DeleteXattrs(
 	return err
 }
 
-//////// UserXattrStore INTERFACE:
-
-func (c *Collection) WriteUserXattr(
-	key string,
-	xattrKey string,
-	xv interface{},
-) (casOut CAS, err error) {
-	traceEnter("WriteUserXattr", "%q, %q, ...", key, xattrKey)
-	casOut, err = c.writeWithXattr(key, nil, xattrKey, payload{parsed: xv}, nil, nil, writeXattrOptions{}, nil)
-	traceExit("WriteUserXattr", err, "0x%x", casOut)
-	return casOut, err
-}
-
-func (c *Collection) DeleteUserXattr(
-	key string,
-	xattrKey string,
-) (casOut CAS, err error) {
-	traceEnter("DeleteUserXattr", "%q, %q", key, xattrKey)
-	casOut, err = c.writeWithXattr(key, nil, xattrKey, payload{}, nil, nil, writeXattrOptions{}, nil)
-	traceExit("DeleteUserXattr", err, "0x%x", casOut)
-	return casOut, err
-}
-
 //////// BODY + XATTRS:
 
-// Get the document's body and an xattr and a user xattr(?)
-func (c *Collection) GetWithXattr(
-	_ context.Context,
-	key string,
-	xattrKey string,
-	userXattrKey string,
-	rv interface{},
-	xv interface{},
-	uxv interface{},
-) (cas CAS, err error) {
-	traceEnter("GetWithXattr", "%q, %q, %q, ...", key, xattrKey, userXattrKey)
-	var rawDoc sgbucket.BucketDocument
-	if rawDoc, err = c.getRawWithXattr(key, xattrKey, userXattrKey); err == nil {
-		cas = rawDoc.Cas
-		if rawDoc.Body == nil && rawDoc.Xattr == nil {
-			err = sgbucket.MissingError{Key: key}
-		} else if err = decodeRaw(rawDoc.Body, rv); err == nil {
-			if err = decodeRaw(rawDoc.Xattr, xv); err == nil && userXattrKey != "" {
-				err = decodeRaw(rawDoc.UserXattr, uxv)
-			}
+func (c *Collection) GetWithXattrs(_ context.Context, key string, xattrKeys []string, rv any) (xattrs map[string][]byte, cas CAS, err error) {
+	rawDoc, err := c.getRawWithXattrs(key, xattrKeys)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	if rawDoc.Body == nil && len(rawDoc.Xattrs) == 0 {
+		return nil, 0, sgbucket.MissingError{Key: key}
+	}
+	err = decodeRaw(rawDoc.Body, rv)
+	if err != nil {
+		return nil, 0, err
+	}
+	xattrs = make(map[string][]byte, len(xattrKeys))
+	for _, xattrKey := range xattrKeys {
+		encodedXattr, ok := rawDoc.Xattrs[xattrKey]
+		if !ok {
+			continue
 		}
+		var xattr []byte
+		err = decodeRaw(encodedXattr, &xattr)
+		if err != nil {
+			return nil, 0, err
+		}
+		xattrs[xattrKey] = xattr
 	}
-	traceExit("GetWithXattr", err, "cas=0x%x  body=%s  xattr=%s", cas, rawDoc.Body, rawDoc.Xattr)
-	return
+	return xattrs, rawDoc.Cas, nil
 }
 
-// Single attempt to update a document and xattr.
-// Setting isDelete=true and value=nil will delete the document body.
-func (c *Collection) WriteWithXattr(
-	_ context.Context,
-	key string,
-	xattrKey string,
-	exp Exp,
-	cas CAS,
-	value []byte,
-	xv []byte,
-	isDelete bool, // ignored; unnecessary in Rosmar though it has meaning in CBS
-	deleteBody bool,
-	opts *sgbucket.MutateInOptions,
-) (casOut CAS, err error) {
-	traceEnter("WriteWithXattr", "%q, %q, cas=%d, exp=%d, isDelete=%v, deleteBody=%v ...", key, xattrKey, cas, exp, isDelete, deleteBody)
+func (c *Collection) WriteWithXattrs(ctx context.Context, k string, exp uint32, cas uint64, value []byte, xattrValue map[string][]byte, opts *sgbucket.MutateInOptions) (casOut uint64, err error) {
 	expP := ifelse(opts != nil && opts.PreserveExpiry, nil, &exp)
-	vp := ifelse(value != nil || deleteBody, &payload{marshaled: value}, nil)
-	casOut, err = c.writeWithXattr(key, vp, xattrKey, payload{marshaled: xv}, &cas, expP, writeXattrOptions{isDelete: isDelete, deleteBody: deleteBody}, opts)
-	traceExit("WriteWithXattr", err, "0x%x", casOut)
-	return
-}
-
-// CAS-safe write of a document and its associated named xattr
-func (c *Collection) WriteCasWithXattr(
-	_ context.Context,
-	key string,
-	xattrKey string,
-	exp Exp,
-	cas CAS,
-	v interface{},
-	xv interface{},
-	opts *sgbucket.MutateInOptions,
-) (casOut CAS, err error) {
-	traceEnter("WriteCasWithXattr", "%q, %q, cas=%d, exp=%d ...", key, xattrKey, cas, exp)
-	expP := &exp
-	vp := ifelse(v != nil, &payload{parsed: v}, nil)
-	if opts != nil && opts.PreserveExpiry {
-		expP = nil
+	vp := &payload{marshaled: value}
+	xattrs := make(map[string]payload, len(xattrValue))
+	for xattrKey, xv := range xattrValue {
+		xattrs[xattrKey] = payload{marshaled: xv}
 	}
-	casOut, err = c.writeWithXattr(key, vp, xattrKey, payload{parsed: xv}, &cas, expP, writeXattrOptions{}, opts)
-	traceExit("WriteCasWithXattr", err, "0x%x", casOut)
-	return
+	return c.writeWithXattrs(k, vp, xattrs, &cas, expP, writeXattrOptions{}, opts)
 }
 
 // WriteUpdateWithXattr retrieves the existing doc from the c, invokes the callback to update
 // the document, then writes the new document to the c.  Will repeat this process on CAS
 // failure.  If `previous` is provided, will pass those values to the callback on the first
 // iteration instead of retrieving from the c.
-func (c *Collection) WriteUpdateWithXattr(
+func (c *Collection) WriteUpdateWithXattrs(
 	ctx context.Context,
 	key string,
-	xattrKey string,
-	userXattrKey string,
+	xattrKeys []string,
 	exp Exp,
 	previous *sgbucket.BucketDocument,
 	opts *sgbucket.MutateInOptions,
-	callback sgbucket.WriteUpdateWithXattrFunc,
+	callback sgbucket.WriteUpdateWithXattrsFunc,
 ) (casOut CAS, err error) {
-	traceEnter("WriteUpdateWithXattr", "%q, %q, %q, exp=%d, ...", key, xattrKey, userXattrKey, exp)
+	traceEnter("WriteUpdateWithXattr", "%q, %q, %q, exp=%d, ...", key, xattrKeys, exp)
 	defer func() { traceExit("WriteUpdateWithXattr", err, "0x%x", casOut) }()
 	for {
 		if previous == nil {
 			// Get current doc if no previous doc was provided:
-			prevDoc, err := c.getRawWithXattr(key, xattrKey, userXattrKey)
+			prevDoc, err := c.getRawWithXattrs(key, xattrKeys)
 			if err != nil {
 				if _, ok := err.(sgbucket.MissingError); !ok {
 					return 0, err
 				}
 			}
 			previous = &prevDoc
-			trace("\tread BucketDocument{Body: %q, Xattr: %q, UserXattr: %q, Cas: %d}", previous.Body, previous.Xattr, previous.UserXattr, previous.Cas)
+			trace("\tread BucketDocument{Body: %q, Xattrs: %q, UserXattr: %q, Cas: %d}", previous.Body, previous.Xattrs, previous.Cas)
 		} else {
-			trace("\tprevious = BucketDocument{Body: %q, Xattr: %q, UserXattr: %q, Cas: %d}", previous.Body, previous.Xattr, previous.UserXattr, previous.Cas)
+			trace("\tprevious = BucketDocument{Body: %q, Xattr: %q, UserXattr: %q, Cas: %d}", previous.Body, previous.Xattrs, previous.Cas)
 		}
 
 		// Invoke the callback:
-		updatedDoc, updatedXattr, deleteDoc, newExp, updatedSpec, err := callback(previous.Body, previous.Xattr, previous.UserXattr, previous.Cas)
+		updatedDoc, err := callback(previous.Body, previous.Xattrs, previous.Cas)
 		if err != nil {
 			if err == sgbucket.ErrCasFailureShouldRetry {
 				// Callback wants us to retry:
@@ -296,17 +235,21 @@ func (c *Collection) WriteUpdateWithXattr(
 			}
 			return previous.Cas, err
 		}
-		if newExp != nil {
-			exp = *newExp
+		var exp Exp
+		if updatedDoc.Expiry != nil {
+			exp = *updatedDoc.Expiry
 		}
 		// update the mutate in options if necessary
-		if updatedSpec != nil {
-			opts.MacroExpansion = append(opts.MacroExpansion, updatedSpec...)
+		if updatedDoc.Spec != nil {
+			opts.MacroExpansion = append(opts.MacroExpansion, updatedDoc.Spec...)
 		}
 
-		// Update body and/or xattr:
-		casOut, err = c.WriteWithXattr(ctx, key, xattrKey, exp, previous.Cas, updatedDoc, updatedXattr, false, deleteDoc, opts)
-
+		if updatedDoc.IsTombstone {
+			casOut, err = c.WriteTombstoneWithXattrs(ctx, key, exp, previous.Cas, updatedDoc.Xattrs, opts)
+		} else {
+			// Update body and/or xattr:
+			casOut, err = c.WriteWithXattrs(ctx, key, exp, previous.Cas, updatedDoc.Doc, updatedDoc.Xattrs, opts)
+		}
 		if _, ok := err.(sgbucket.CasMismatchErr); !ok {
 			// Exit loop on success or failure
 			return casOut, err
@@ -318,32 +261,37 @@ func (c *Collection) WriteUpdateWithXattr(
 	}
 }
 
-// Delete a document's body and an xattr simultaneously.
-func (c *Collection) DeleteWithXattr(
-	ctx context.Context,
-	key string,
-	xattrKey string,
-) (err error) {
-	traceEnter("DeleteWithXattr", "%q, %q", key, xattrKey)
-	defer func() { traceExit("DeleteWithXattr", err, "ok") }()
-	return c._deleteBodyAndXattr(key, xattrKey, false)
-}
-
-//////// XattrStore2 INTERFACE:
-
 // Updates a document's xattr.
-func (c *Collection) UpdateXattr(
+func (c *Collection) UpdateXattrs(
 	_ context.Context,
 	key string,
-	xattrKey string,
 	exp uint32,
 	cas uint64,
-	xv interface{},
+	xattrs map[string][]byte,
 	opts *sgbucket.MutateInOptions,
 ) (casOut uint64, err error) {
-	traceEnter("UpdateXattr", "%q, %q, exp=%d, cas=0x%x ...", key, xattrKey, exp, cas)
+	traceEnter("UpdateXattr", "%q, %q, exp=%d, cas=0x%x ...", key, xattrs, exp, cas)
 	defer func() { traceExit("UpdateXattr", err, "0x%x", casOut) }()
-	return c.writeWithXattr(key, nil, xattrKey, payload{parsed: xv}, &cas, &exp, writeXattrOptions{}, opts)
+	xv := make(map[string]payload, len(xattrs))
+	for xattrKey, xattrVal := range xattrs {
+		xv[xattrKey] = payload{parsed: xattrVal}
+	}
+	return c.writeWithXattrs(key, nil, xv, &cas, &exp, writeXattrOptions{}, opts)
+}
+
+func (c *Collection) WriteTombstoneWithXattrs(
+	_ context.Context,
+	key string,
+	exp uint32,
+	cas uint64,
+	xv map[string][]byte,
+	opts *sgbucket.MutateInOptions,
+) (casOut uint64, err error) {
+	xattrs := make(map[string]payload, len(xv))
+	for xattrKey, xattrVal := range xv {
+		xattrs[xattrKey] = payload{marshaled: xattrVal}
+	}
+	return c.writeWithXattrs(key, &payload{}, xattrs, &cas, &exp, writeXattrOptions{}, opts)
 }
 
 // Updates an xattr and deletes the body (making the doc a tombstone.)
@@ -358,21 +306,26 @@ func (c *Collection) UpdateXattrDeleteBody(
 ) (casOut uint64, err error) {
 	traceEnter("UpdateXattrDeleteBody", "%q, %q, exp=%d, cas=0x%x ...", key, xattrKey, exp, cas)
 	defer func() { traceExit("UpdateXattrDeleteBody", err, "0x%x", casOut) }()
-	return c.writeWithXattr(key, &payload{}, xattrKey, payload{parsed: xv}, &cas, &exp, writeXattrOptions{}, opts)
+	xattrs := map[string]payload{xattrKey: payload{parsed: xv}}
+	return c.writeWithXattrs(key, &payload{}, xattrs, &cas, &exp, writeXattrOptions{}, opts)
 }
 
 // Deletes the document's body, and updates the CAS & CRC32 macros in the xattr.
 func (c *Collection) DeleteBody(
 	_ context.Context,
 	key string,
-	xattrKey string,
+	xattrKeys []string,
 	exp uint32,
 	cas uint64,
 	opts *sgbucket.MutateInOptions,
 ) (casOut uint64, err error) {
-	traceEnter("DeleteBody", "%q, %q, exp=%d, cas=0x%x ...", key, xattrKey, exp, cas)
+	traceEnter("DeleteBody", "%q, %q, exp=%d, cas=0x%x ...", key, xattrKeys, exp, cas)
 	defer func() { traceExit("DeleteBody", err, "0x%x", casOut) }()
-	return c.writeWithXattr(key, &payload{}, xattrKey, payload{}, &cas, &exp, writeXattrOptions{preserveXattr: true}, opts)
+	xattrs := make(map[string]payload, len(xattrKeys))
+	for _, xattrKey := range xattrKeys {
+		xattrs[xattrKey] = payload{}
+	}
+	return c.writeWithXattrs(key, &payload{}, xattrs, &cas, &exp, writeXattrOptions{preserveXattr: true}, opts)
 }
 
 //////// INTERNALS:
@@ -387,44 +340,39 @@ func (c *Collection) getRawXattrs(txn *sql.Tx, key string) ([]byte, error) {
 }
 
 // get doc's raw body and an xattr.
-func (c *Collection) getRawWithXattr(key string, xattrKey string, userXattrKey string) (rawDoc sgbucket.BucketDocument, err error) {
-	xattrIsDocument := xattrKey == "$document"
-	var xattrPath, userXattrPath string
-	if xattrIsDocument {
-		xattrPath = "$.___"
-	} else if xattrPath, err = xattrKeyToSQLitePath(xattrKey); err != nil {
-		return
+func (c *Collection) getRawWithXattrs(key string, xattrKeys []string) (sgbucket.BucketDocument, error) {
+	row := c.db().QueryRow(`SELECT value, cas, xattrs FROM documents WHERE collection=?1 AND key=?2`, c.id, key)
+	rawDoc := sgbucket.BucketDocument{
+		Xattrs: make(map[string][]byte, len(xattrKeys)),
 	}
-	if userXattrKey == "" {
-		userXattrPath = "$.___"
-	} else if userXattrPath, err = xattrKeyToSQLitePath(userXattrKey); err != nil {
-		return
-	}
-	row := c.db().QueryRow(`SELECT value, cas, xattrs -> ?1, xattrs -> ?2 FROM documents
-							WHERE collection=?3 AND key=?4`, xattrPath, userXattrPath, c.id, key)
-	var xattr, userXattr []byte
-	err = scan(row, &rawDoc.Body, &rawDoc.Cas, &xattr, &userXattr)
+	var xattrs []byte
+	err := scan(row, &rawDoc.Body, &rawDoc.Cas, &xattrs)
 	if err != nil {
-		err = remapKeyError(err, key)
-		return
+		return sgbucket.BucketDocument{}, remapKeyError(err, key)
 	}
-	if xattrIsDocument {
-		rawDoc.Xattr = []byte(fmt.Sprintf(`{"value_crc32c":%q}`, encodedCRC32c(rawDoc.Body)))
-	} else if len(xattr) > 0 {
-		rawDoc.Xattr = xattr
+	if xattrs != nil {
+		var xattrMap map[string]json.RawMessage
+		err = json.Unmarshal(xattrs, &xattrMap)
+		if err != nil {
+			return sgbucket.BucketDocument{}, fmt.Errorf("document %q xattrs are unreadable: %w %s", key, err, xattrs)
+		}
+		for _, xattrKey := range xattrKeys {
+			if xattrKey == "$document" {
+				rawDoc.Xattrs[xattrKey] = []byte(fmt.Sprintf(`{"value_crc32c":%q}`, encodedCRC32c(rawDoc.Body)))
+				continue
+			}
+			val, ok := xattrMap[xattrKey]
+			if !ok {
+				continue
+			}
+			rawDoc.Xattrs[xattrKey] = val
+		}
 	}
-	if userXattrKey != "" && len(userXattr) > 0 {
-		rawDoc.UserXattr = userXattr
-	}
-	return
+	return rawDoc, nil
 }
 
-// Delete a document's body and an xattr simultaneously.
-func (c *Collection) _deleteBodyAndXattr(
-	key string,
-	xattrKey string,
-	bodyMustExist bool,
-) error {
+// DeleteWithXattrs a document's body and xattrs simultaneously.
+func (c *Collection) DeleteWithXattrs(ctx context.Context, key string, xattrKeys []string) error {
 	err := c.withNewCas(func(txn *sql.Tx, newCas CAS) (*event, error) {
 		e := &event{
 			key:        key,
@@ -436,9 +384,7 @@ func (c *Collection) _deleteBodyAndXattr(
 		err := scan(row, &e.xattrs, &bodyExists)
 		if err != nil {
 			return nil, remapKeyError(err, key)
-		} else if bodyMustExist && !bodyExists {
-			return nil, sgbucket.MissingError{Key: key}
-		} else if e.xattrs, err = removeXattrs(e.xattrs, xattrKey); err != nil {
+		} else if e.xattrs, err = removeXattrs(e.xattrs, xattrKeys...); err != nil {
 			return nil, err
 		}
 		_, err = txn.Exec(`UPDATE documents SET value=null, xattrs=?1, cas=?2 WHERE collection=?3 AND key=?4`, e.xattrs, newCas, c.id, key)
@@ -477,27 +423,29 @@ func checkCasXattr(hasPreviousDocBody bool, existingCas, expectedCas *CAS, opts 
 }
 
 // Swiss Army knife method for modifying a document xattr, with or without changing the body.
-func (c *Collection) writeWithXattr(
+func (c *Collection) writeWithXattrs(
 	key string, // doc key
 	val *payload, // if non-nil, updates doc body; a nil payload means delete
-	xattrKey string, // xattr key
-	xattrVal payload, // xattr value; a nil payload deletes the xattr
+	xattrsPayload map[string]payload, // xattr key/val; a nil payload deletes the xattr
 	ifCas *CAS, // if non-nil, must match current CAS; 0 for insert
 	exp *Exp, // if non-nil, sets expiration to this value
 	opts writeXattrOptions, // option flags
 	mutateOpts *sgbucket.MutateInOptions, // expiry and macro expansion options
 ) (casOut CAS, err error) {
-	// Validate xattr key/value before going into the transaction:
-	if err = validateXattrKey(xattrKey); err != nil {
-		return
-	}
-	var parsedXattr any
-	if !xattrVal.isNil() {
-		if parsedXattr, err = xattrVal.unmarshalJSON(); err != nil {
-			return 0, fmt.Errorf("unparseable xattr: %w", err)
+	parsedXattrs := make(map[string]any, len(xattrsPayload))
+	for xattrKey, xattrVal := range xattrsPayload {
+		// Validate xattr key/value before going into the transaction:
+		if err = validateXattrKey(xattrKey); err != nil {
+			return
+		}
+		if !xattrVal.isNil() {
+			parsedXattr, err := xattrVal.unmarshalJSON()
+			if err != nil {
+				return 0, fmt.Errorf("unparseable xattr: %w", err)
+			}
+			parsedXattrs[xattrKey] = parsedXattr
 		}
 	}
-
 	err = c.withNewCas(func(txn *sql.Tx, newCas CAS) (*event, error) {
 		e := &event{
 			key: key,
@@ -552,43 +500,52 @@ func (c *Collection) writeWithXattr(
 			if opts.insertXattr {
 				return nil, fmt.Errorf("illegal options to rosmar.Collection.writeWithXattr")
 			}
-			existingVal, ok := xattrs[xattrKey]
-			if !ok {
-				existingVal = json.RawMessage(`{}`)
-			}
-			xattrVal.setMarshaled(existingVal)
-			if parsedXattr, err = xattrVal.unmarshalJSON(); err != nil {
-				return nil, err
+			for xattrKey := range xattrsPayload {
+				existingVal, ok := xattrs[xattrKey]
+				if !ok {
+					existingVal = json.RawMessage(`{}`)
+				}
+
+				xattrPayload := xattrsPayload[xattrKey]
+				xattrPayload.setMarshaled(existingVal)
+				parsedXattr, err := xattrPayload.unmarshalJSON()
+				if err != nil {
+					return nil, err
+				}
+				parsedXattrs[xattrKey] = parsedXattr
 			}
 		}
 
-		if !xattrVal.isNil() {
-			// Set xattr:
-			if opts.insertXattr && xattrs[xattrKey] != nil {
-				return nil, sgbucket.ErrPathExists
-			}
-			// Expand any macros specified in the mutateOpts
-			if err := e.expandXattrMacros(xattrKey, parsedXattr, mutateOpts); err != nil {
-				return nil, err
-			}
-			xattrVal.setParsed(parsedXattr)
+		for xattrKey, xattrVal := range xattrsPayload {
+			if !xattrVal.isNil() {
+				// Set xattr:
+				if opts.insertXattr && xattrs[xattrKey] != nil {
+					return nil, sgbucket.ErrPathExists
+				}
+				// Expand any macros specified in the mutateOpts
+				parsedXattr := parsedXattrs[xattrKey]
+				if err := e.expandXattrMacros(xattrKey, parsedXattr, mutateOpts); err != nil {
+					return nil, err
+				}
+				xattrVal.setParsed(parsedXattr)
 
-			var rawXattr []byte
-			if rawXattr, err = xattrVal.marshalJSON(); err != nil {
-				return nil, err
-			}
-			if xattrs == nil {
-				xattrs = semiParsedXattrs{}
-			}
-			xattrs[xattrKey] = json.RawMessage(rawXattr)
-			trace("\t\tSet doc %q xattr %q = %s", key, xattrKey, rawXattr)
-		} else {
-			// Delete xattr:
-			if _, found := xattrs[xattrKey]; found {
-				delete(xattrs, xattrKey)
-				trace("\t\tDeleted doc %q xattr %s", key, xattrKey)
+				var rawXattr []byte
+				if rawXattr, err = xattrVal.marshalJSON(); err != nil {
+					return nil, err
+				}
+				if xattrs == nil {
+					xattrs = semiParsedXattrs{}
+				}
+				xattrs[xattrKey] = json.RawMessage(rawXattr)
+				trace("\t\tSet doc %q xattr %q = %s", key, xattrKey, rawXattr)
 			} else {
-				return nil, sgbucket.ErrPathNotFound
+				// Delete xattr:
+				if _, found := xattrs[xattrKey]; found {
+					delete(xattrs, xattrKey)
+					trace("\t\tDeleted doc %q xattr %s", key, xattrKey)
+				} else {
+					return nil, sgbucket.ErrPathNotFound
+				}
 			}
 		}
 		e.xattrs, _ = json.Marshal(xattrs)
@@ -723,8 +680,3 @@ func (e *event) expandXattrMacros(xattrKey string, xattr any, mutateOpts *sgbuck
 	}
 	return nil
 }
-
-var (
-	// Enforce interface conformance:
-	_ sgbucket.UserXattrStore = &Collection{}
-)
