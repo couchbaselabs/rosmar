@@ -279,6 +279,17 @@ func (c *Collection) UpdateXattrs(
 	return c.writeWithXattrs(key, nil, xv, &cas, &exp, writeXattrOptions{}, opts)
 }
 
+func (c *Collection) InsertTombstoneWithXattrs(
+	_ context.Context,
+	key string,
+	exp uint32,
+	xv map[string][]byte,
+	opts *sgbucket.MutateInOptions,
+) (casOut uint64, err error) {
+	// special case, needed in gocb for tombstone creation
+	return c.WriteTombstoneWithXattrs(nil, key, exp, 0, xv, opts)
+}
+
 func (c *Collection) WriteTombstoneWithXattrs(
 	_ context.Context,
 	key string,
