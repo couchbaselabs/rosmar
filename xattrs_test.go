@@ -35,11 +35,10 @@ func TestSetXattrs(t *testing.T) {
 	cas, err := coll.SetXattrs(ctx, "key", xattrs)
 	require.NoError(t, err)
 
-	var val string
-	outputXattrs, gotCas, err := coll.GetWithXattrs(ctx, "key", []string{key1, key2}, &val)
+	val, outputXattrs, gotCas, err := coll.GetWithXattrs(ctx, "key", []string{key1, key2})
 	require.NoError(t, err)
 	assert.Equal(t, cas, gotCas)
-	assert.Equal(t, "value", val)
+	assert.Equal(t, `"value"`, string(val))
 	assert.Equal(t, string(mustMarshalJSON(t, map[string]string{"truth": "out_there"})), string(outputXattrs[key1]))
 }
 
@@ -62,8 +61,7 @@ func TestMacroExpansion(t *testing.T) {
 	casOut, err := coll.WriteWithXattrs(ctx, "key", 0, 0, bodyBytes, xattrsInput, opts)
 	require.NoError(t, err)
 
-	var val any
-	xattrs, getCas, err := coll.GetWithXattrs(ctx, "key", []string{syncXattrName}, &val)
+	_, xattrs, getCas, err := coll.GetWithXattrs(ctx, "key", []string{syncXattrName})
 	require.NoError(t, err)
 	require.Equal(t, getCas, casOut)
 

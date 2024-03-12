@@ -154,21 +154,17 @@ func (c *Collection) DeleteSubDocPaths(
 	return err
 }
 
-//////// BODY + XATTRS:
-
-func (c *Collection) GetWithXattrs(_ context.Context, key string, xattrKeys []string, rv any) (xattrs map[string][]byte, cas CAS, err error) {
+// ////// BODY + XATTRS:
+func (c *Collection) GetWithXattrs(_ context.Context, key string, xattrKeys []string) (v []byte, xattrs map[string][]byte, cas CAS, err error) {
 	rawDoc, err := c.getRawWithXattrs(key, xattrKeys)
 	if err != nil {
-		return nil, 0, err
+		return nil, nil, 0, err
 	}
 
 	if rawDoc.Body == nil && len(rawDoc.Xattrs) == 0 {
-		return nil, 0, sgbucket.MissingError{Key: key}
+		return nil, nil, 0, sgbucket.MissingError{Key: key}
 	}
-	err = decodeRaw(rawDoc.Body, rv)
-	if err != nil {
-		return nil, 0, err
-	}
+
 	xattrs = make(map[string][]byte, len(xattrKeys))
 	for _, xattrKey := range xattrKeys {
 		encodedXattr, ok := rawDoc.Xattrs[xattrKey]
@@ -178,11 +174,11 @@ func (c *Collection) GetWithXattrs(_ context.Context, key string, xattrKeys []st
 		var xattr []byte
 		err = decodeRaw(encodedXattr, &xattr)
 		if err != nil {
-			return nil, 0, err
+			return nil, nil, 0, err
 		}
 		xattrs[xattrKey] = xattr
 	}
-	return xattrs, rawDoc.Cas, nil
+	return rawDoc.Body, xattrs, rawDoc.Cas, nil
 }
 
 func (c *Collection) WriteWithXattrs(ctx context.Context, k string, exp uint32, cas uint64, value []byte, xattrValue map[string][]byte, opts *sgbucket.MutateInOptions) (casOut uint64, err error) {
@@ -243,13 +239,13 @@ func (c *Collection) WriteUpdateWithXattrs(
 		if updatedDoc.Spec != nil {
 			opts.MacroExpansion = append(opts.MacroExpansion, updatedDoc.Spec...)
 		}
-
 		if updatedDoc.IsTombstone {
-			casOut, err = c.WriteTombstoneWithXattrs(ctx, key, exp, previous.Cas, updatedDoc.Xattrs, opts)
+			casOut, err = c.WriteTombstoneWithXattrs(ctx, key, exp, previous.Cas, updatedDoc.Xattrs, false, opts)
 		} else {
 			// Update body and/or xattr:
 			casOut, err = c.WriteWithXattrs(ctx, key, exp, previous.Cas, updatedDoc.Doc, updatedDoc.Xattrs, opts)
 		}
+
 		if _, ok := err.(sgbucket.CasMismatchErr); !ok {
 			// Exit loop on success or failure
 			return casOut, err
@@ -279,23 +275,13 @@ func (c *Collection) UpdateXattrs(
 	return c.writeWithXattrs(key, nil, xv, &cas, &exp, writeXattrOptions{}, opts)
 }
 
-func (c *Collection) InsertTombstoneWithXattrs(
-	_ context.Context,
-	key string,
-	exp uint32,
-	xv map[string][]byte,
-	opts *sgbucket.MutateInOptions,
-) (casOut uint64, err error) {
-	// special case, needed in gocb for tombstone creation
-	return c.WriteTombstoneWithXattrs(nil, key, exp, 0, xv, opts)
-}
-
 func (c *Collection) WriteTombstoneWithXattrs(
 	_ context.Context,
 	key string,
 	exp uint32,
 	cas uint64,
 	xv map[string][]byte,
+	_ bool, // rosmar doesn't require different handling depending on whether body is present
 	opts *sgbucket.MutateInOptions,
 ) (casOut uint64, err error) {
 	xattrs := make(map[string]payload, len(xv))

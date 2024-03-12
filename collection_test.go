@@ -521,11 +521,11 @@ func TestWriteCasWithXattrExistingXattr(t *testing.T) {
 
 	const deleteBody = true
 	// First attempt to update with a bad cas value, and ensure we're getting the expected error
-	_, err = col.WriteTombstoneWithXattrs(ctx, docID, exp, uint64(1234), newXattrs, nil)
+	_, err = col.WriteTombstoneWithXattrs(ctx, docID, exp, uint64(1234), newXattrs, deleteBody, nil)
 
 	require.ErrorAs(t, err, &sgbucket.CasMismatchErr{})
 
-	_, err = col.WriteTombstoneWithXattrs(ctx, docID, exp, cas, newXattrs, nil)
+	_, err = col.WriteTombstoneWithXattrs(ctx, docID, exp, cas, newXattrs, deleteBody, nil)
 	require.NoError(t, err)
 
 	verifyEmptyBodyAndSyncXattr(t, col.(*Collection), docID)
@@ -546,11 +546,11 @@ func TestWriteCasWithXattrNoXattr(t *testing.T) {
 	xattrs := map[string][]byte{syncXattrName: mustMarshalJSON(t, updatedXattrVal)}
 	const deleteBody = true
 	ctx := testCtx(t)
-	_, err = col.WriteTombstoneWithXattrs(ctx, docID, 0, uint64(1234), xattrs, nil)
+	_, err = col.WriteTombstoneWithXattrs(ctx, docID, 0, uint64(1234), xattrs, deleteBody, nil)
 
 	require.ErrorAs(t, err, &sgbucket.CasMismatchErr{})
 
-	_, err = col.WriteTombstoneWithXattrs(ctx, docID, 0, cas, xattrs, nil)
+	_, err = col.WriteTombstoneWithXattrs(ctx, docID, 0, cas, xattrs, deleteBody, nil)
 	require.NoError(t, err)
 	verifyEmptyBodyAndSyncXattr(t, col, docID)
 }
@@ -586,10 +586,10 @@ func TestWriteCasWithXattrXattrExistsNoDoc(t *testing.T) {
 	updatedXattrs := map[string][]byte{syncXattrName: xattrValBytes}
 	// First attempt to update with a bad cas value, and ensure we're getting the expected error
 	const deleteBody = false
-	_, err = col.WriteTombstoneWithXattrs(ctx, docID, 0, uint64(1234), updatedXattrs, nil)
+	_, err = col.WriteTombstoneWithXattrs(ctx, docID, 0, uint64(1234), updatedXattrs, deleteBody, nil)
 	require.ErrorAs(t, err, &sgbucket.CasMismatchErr{})
 
-	_, err = col.WriteTombstoneWithXattrs(ctx, docID, 0, cas, updatedXattrs, nil)
+	_, err = col.WriteTombstoneWithXattrs(ctx, docID, 0, cas, updatedXattrs, deleteBody, nil)
 	require.NoError(t, err)
 	verifyEmptyBodyAndSyncXattr(t, col, docID)
 }
@@ -620,12 +620,11 @@ func TestWriteCasWithXattrOnTombstone(t *testing.T) {
 }
 
 func verifyEmptyBodyAndSyncXattr(t *testing.T, store sgbucket.DataStore, key string) {
-	var retrievedVal map[string]any
 	xattrKeys := []string{syncXattrName}
-	retrievedXattrs, _, err := store.GetWithXattrs(testCtx(t), key, xattrKeys, &retrievedVal)
+	retrievedVal, retrievedXattrs, _, err := store.GetWithXattrs(testCtx(t), key, xattrKeys)
 
 	require.NoError(t, err)
-	require.Empty(t, retrievedVal) // require that the doc body is empty
+	require.Nil(t, retrievedVal) // require that the doc body is empty
 	syncXattrRaw, ok := retrievedXattrs[syncXattrName]
 	require.True(t, ok)
 	require.Greater(t, len(syncXattrRaw), 0)
