@@ -307,24 +307,6 @@ func (c *Collection) UpdateXattrDeleteBody(
 	return c.writeWithXattrs(key, &payload{}, xattrs, &cas, &exp, writeXattrOptions{}, opts)
 }
 
-// Deletes the document's body, and updates the CAS & CRC32 macros in the xattr.
-func (c *Collection) DeleteBody(
-	_ context.Context,
-	key string,
-	xattrKeys []string,
-	exp uint32,
-	cas uint64,
-	opts *sgbucket.MutateInOptions,
-) (casOut uint64, err error) {
-	traceEnter("DeleteBody", "%q, %q, exp=%d, cas=0x%x ...", key, xattrKeys, exp, cas)
-	defer func() { traceExit("DeleteBody", err, "0x%x", casOut) }()
-	xattrs := make(map[string]payload, len(xattrKeys))
-	for _, xattrKey := range xattrKeys {
-		xattrs[xattrKey] = payload{}
-	}
-	return c.writeWithXattrs(key, &payload{}, xattrs, &cas, &exp, writeXattrOptions{preserveXattr: true}, opts)
-}
-
 //////// INTERNALS:
 
 // just gets doc's raw xattrs during a transaction

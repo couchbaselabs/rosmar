@@ -3,7 +3,7 @@ module github.com/couchbaselabs/rosmar
 go 1.19
 
 require (
-	github.com/couchbase/sg-bucket v0.0.0-20240226165457-c1c63d7907f5
+	github.com/couchbase/sg-bucket v0.0.0-20240320160014-79baf843f9d3
 	github.com/google/uuid v1.3.0
 	github.com/mattn/go-sqlite3 v1.14.17
 	github.com/stretchr/testify v1.8.4
