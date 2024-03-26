@@ -93,6 +93,8 @@ func (bucket *Bucket) IsSupported(feature sgbucket.BucketStoreFeature) bool {
 		return true
 	case sgbucket.BucketStoreFeatureN1ql:
 		return false
+	case sgbucket.BucketStoreFeatureMultiXattrSubdocOperations:
+		return true
 	default:
 		return false
 	}

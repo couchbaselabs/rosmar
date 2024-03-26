@@ -290,7 +290,7 @@ func (c *Collection) Set(key string, exp Exp, opts *sgbucket.UpsertOptions, val 
 	return
 }
 
-func (c *Collection) WriteCas(key string, flags int, exp Exp, cas CAS, val any, opt sgbucket.WriteOptions) (casOut CAS, err error) {
+func (c *Collection) WriteCas(key string, exp Exp, cas CAS, val any, opt sgbucket.WriteOptions) (casOut CAS, err error) {
 	// Marshal JSON if the value is not raw:
 	isJSON := (opt&(sgbucket.Raw|sgbucket.Append) == 0)
 	raw, err := encodeAsRaw(val, isJSON)
@@ -467,7 +467,7 @@ func (c *Collection) Update(key string, exp Exp, callback sgbucket.UpdateFunc) (
 		}
 
 		var opt sgbucket.WriteOptions = 0 // Hardcoded; callback cannot customize this :(
-		casOut, err = c.WriteCas(key, 0, exp, cas, raw, opt)
+		casOut, err = c.WriteCas(key, exp, cas, raw, opt)
 		if err == nil {
 			break
 		} else if _, ok := err.(sgbucket.CasMismatchErr); !ok {

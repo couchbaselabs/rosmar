@@ -104,7 +104,7 @@ func (c *Collection) subdocWrite(key string, subdocKey string, cas CAS, value an
 		}
 
 		// Write full doc back to collection
-		casOut, err = c.WriteCas(key, 0, 0, casOut, fullDoc, 0)
+		casOut, err = c.WriteCas(key, 0, casOut, fullDoc, 0)
 
 		if err != nil {
 			if _, ok := err.(sgbucket.CasMismatchErr); ok && cas == 0 {
