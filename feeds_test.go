@@ -190,7 +190,8 @@ func readExpectedEventsDEF(t *testing.T, events chan sgbucket.FeedEvent) {
 
 func TestCrossBucketEvents(t *testing.T) {
 	ensureNoLeakedFeeds(t)
-	bucket := makeTestBucket(t)
+	bucketName := strings.ToLower(t.Name())
+	bucket := makeTestBucketWithName(t, bucketName)
 	c := bucket.DefaultDataStore()
 
 	addToCollection(t, c, "able", 0, "A")
@@ -198,7 +199,7 @@ func TestCrossBucketEvents(t *testing.T) {
 	addToCollection(t, c, "charlie", 0, "C")
 
 	// Open a 2nd bucket on the same file, to receive events:
-	bucket2, err := OpenBucket(bucket.url, strings.ToLower(t.Name()), ReOpenExisting)
+	bucket2, err := OpenBucket(bucket.url, bucketName, ReOpenExisting)
 	require.NoError(t, err)
 	t.Cleanup(func() {
 		bucket2.Close(testCtx(t))
@@ -241,8 +242,8 @@ func TestCollectionMutations(t *testing.T) {
 	require.NoError(t, err)
 	numDocs := 50
 
-	collectionID_1 := collection1.(sgbucket.Collection).GetCollectionID()
-	collectionID_2 := collection2.(sgbucket.Collection).GetCollectionID()
+	collectionID_1 := collection1.GetCollectionID()
+	collectionID_2 := collection2.GetCollectionID()
 
 	// Add n docs to two collections
 	for i := 1; i <= numDocs; i++ {

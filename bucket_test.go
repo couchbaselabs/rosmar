@@ -20,6 +20,7 @@ import (
 	"time"
 
 	sgbucket "github.com/couchbase/sg-bucket"
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -30,27 +31,35 @@ func init() {
 	}
 }
 
+// testCtx returns a context for testing
 func testCtx(t *testing.T) context.Context {
 	return context.Background() // match sync gateway interfaces for logging
 }
 
 const testBucketDirName = "RosmarTest"
 
+// testBucketPath returns a path for a test bucket in a unique directory.
 func testBucketPath(t *testing.T) string {
 	return fmt.Sprintf("%s%c%s", t.TempDir(), os.PathSeparator, testBucketDirName)
 }
 
-func makeTestBucket(t *testing.T) *Bucket {
+// makeTestBucketWithName creates a new persistent test bucket with a given name. If a bucket already exists, this function will fail. This uses testing.T.Cleanup to remove the bucket.
+func makeTestBucketWithName(t *testing.T, name string) *Bucket {
 	LoggingCallback = func(level LogLevel, fmt string, args ...any) {
 		t.Logf(logLevelNamesPrint[level]+fmt, args...)
 	}
-	bucket, err := OpenBucket(uriFromPath(testBucketPath(t)), strings.ToLower(t.Name()), CreateNew)
+	bucket, err := OpenBucket(uriFromPath(testBucketPath(t)), name, CreateNew)
 	require.NoError(t, err)
 	t.Cleanup(func() {
 		assert.NoError(t, bucket.CloseAndDelete(testCtx(t)))
 	})
 
 	return bucket
+}
+
+// makeTestBucket creates a new test bucket with a unique game
+func makeTestBucket(t *testing.T) *Bucket {
+	return makeTestBucketWithName(t, t.Name()+"_"+uuid.New().String())
 }
 
 func dsName(scope string, coll string) sgbucket.DataStoreName {
@@ -71,8 +80,8 @@ func bucketCount(name string) uint {
 
 func TestNewBucket(t *testing.T) {
 	ensureNoLeaks(t)
-	bucket := makeTestBucket(t)
 	bucketName := strings.ToLower(t.Name())
+	bucket := makeTestBucketWithName(t, bucketName)
 	assert.Equal(t, bucketName, bucket.GetName())
 	assert.Contains(t, bucket.GetURL(), testBucketDirName)
 
@@ -146,10 +155,10 @@ var defaultCollection = dsName("_default", "_default")
 
 func TestTwoBucketsOneURL(t *testing.T) {
 	ensureNoLeaks(t)
-	bucket1 := makeTestBucket(t)
+	bucketName := strings.ToLower(t.Name())
+	bucket1 := makeTestBucketWithName(t, bucketName)
 	url := bucket1.url
 
-	bucketName := strings.ToLower(t.Name())
 	bucket2, err := OpenBucket(url, bucketName, CreateNew)
 	require.ErrorContains(t, err, "already exists")
 	require.Nil(t, bucket2)
@@ -177,7 +186,8 @@ func TestTwoBucketsOneURL(t *testing.T) {
 
 func TestDefaultCollection(t *testing.T) {
 	ensureNoLeaks(t)
-	bucket := makeTestBucket(t)
+	bucketName := strings.ToLower(t.Name())
+	bucket := makeTestBucketWithName(t, bucketName)
 
 	// Initially one collection:
 	colls, err := bucket.ListDataStores()
@@ -186,12 +196,15 @@ func TestDefaultCollection(t *testing.T) {
 
 	coll := bucket.DefaultDataStore()
 	assert.NotNil(t, coll)
-	assert.Equal(t, strings.ToLower(t.Name())+"._default._default", coll.GetName())
+	assert.Equal(t, bucketName+"._default._default", coll.GetName())
+	assert.Equal(t, "_default", coll.DataStoreName().ScopeName())
+	assert.Equal(t, "_default", coll.DataStoreName().CollectionName())
 }
 
 func TestCreateCollection(t *testing.T) {
 	ensureNoLeaks(t)
-	bucket := makeTestBucket(t)
+	bucketName := strings.ToLower(t.Name())
+	bucket := makeTestBucketWithName(t, bucketName)
 
 	collName := dsName("_default", "foo")
 	err := bucket.CreateDataStore(testCtx(t), collName)
@@ -200,8 +213,9 @@ func TestCreateCollection(t *testing.T) {
 	coll, err := bucket.NamedDataStore(collName)
 	assert.NoError(t, err)
 	assert.NotNil(t, coll)
-	assert.Equal(t, strings.ToLower(t.Name())+"._default.foo", coll.GetName())
-
+	assert.Equal(t, bucketName+"._default.foo", coll.GetName())
+	assert.Equal(t, "_default", coll.DataStoreName().ScopeName())
+	assert.Equal(t, "foo", coll.DataStoreName().CollectionName())
 	colls, err := bucket.ListDataStores()
 	assert.NoError(t, err)
 	assert.Equal(t, colls, []sgbucket.DataStoreName{defaultCollection, collName})

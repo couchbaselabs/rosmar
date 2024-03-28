@@ -63,10 +63,17 @@ func (c *Collection) db() queryable {
 
 //////// Interface DataStore
 
+// GetName returns bucket.scope.collection name.
 func (c *Collection) GetName() string {
 	return c.bucket.GetName() + "." + c.DataStoreNameImpl.String()
 }
 
+// DataStoreName returns the scope and collection name.
+func (c *Collection) DataStoreName() sgbucket.DataStoreName {
+	return c.DataStoreNameImpl
+}
+
+// GetCollectionID returns a unique ID for a given collection, used to identify the collection in DCP feeds and other places.
 func (c *Collection) GetCollectionID() uint32 {
 	return uint32(c.id) - 1 // SG expects that the default collection has id 0, so subtract 1
 }
