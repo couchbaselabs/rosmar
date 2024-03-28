@@ -33,7 +33,9 @@ type XDCR struct {
 
 // NewXDCR creates an instance of XDCR backed by rosmar. This is not started until Start is called.
 func NewXDCR(_ context.Context, fromBucket, toBucket *Bucket, opts sgbucket.XDCROptions) (*XDCR, error) {
-
+	if opts.Mobile != sgbucket.XDCRMobileOn {
+		return nil, errors.New("Only sgbucket.XDCRMobileOn is supported in rosmar")
+	}
 	return &XDCR{
 		fromBucket:              fromBucket,
 		toBucket:                toBucket,

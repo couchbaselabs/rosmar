@@ -24,7 +24,7 @@ func TestXDCR(t *testing.T) {
 	defer fromBucket.Close(ctx)
 	defer toBucket.Close(ctx)
 
-	xdcr, err := NewXDCR(ctx, fromBucket, toBucket, sgbucket.XDCROptions{})
+	xdcr, err := NewXDCR(ctx, fromBucket, toBucket, sgbucket.XDCROptions{Mobile: sgbucket.XDCRMobileOn})
 	require.NoError(t, err)
 	err = xdcr.Start(ctx)
 	require.NoError(t, err)
@@ -93,7 +93,7 @@ func TestXattrMigration(t *testing.T) {
 	defer fromBucket.Close(ctx)
 	defer toBucket.Close(ctx)
 
-	xdcr, err := NewXDCR(ctx, fromBucket, toBucket, sgbucket.XDCROptions{})
+	xdcr, err := NewXDCR(ctx, fromBucket, toBucket, sgbucket.XDCROptions{Mobile: sgbucket.XDCRMobileOn})
 	require.NoError(t, err)
 	err = xdcr.Start(ctx)
 	require.NoError(t, err)
