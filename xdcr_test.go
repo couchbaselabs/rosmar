@@ -9,7 +9,6 @@ package rosmar
 // the file licenses/APL2.txt.
 
 import (
-	"encoding/json"
 	"testing"
 	"time"
 
@@ -109,8 +108,6 @@ func TestXattrMigration(t *testing.T) {
 		body            = `{"foo": "bar"}`
 		systemXattrVal  = `{"bar": "baz"}`
 		userXattrVal    = `{"baz": "baz"}`
-		isDelete        = false
-		deleteBody      = false
 	)
 
 	startingCas, err := fromBucket.DefaultDataStore().WriteWithXattrs(ctx, docID, 0, 0, []byte(body), map[string][]byte{systemXattrName: []byte(systemXattrVal)}, nil)
@@ -131,11 +128,4 @@ func TestXattrMigration(t *testing.T) {
 	stats, err := xdcr.Stats(ctx)
 	require.NoError(t, err)
 	require.Equal(t, uint64(0), stats.ErrorCount)
-}
-
-func mustUnmarshalJSON(t *testing.T, val string) map[string]string {
-	var v map[string]string
-	err := json.Unmarshal([]byte(val), &v)
-	require.NoError(t, err)
-	return v
 }
