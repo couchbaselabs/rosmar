@@ -53,7 +53,6 @@ func NewXDCR(_ context.Context, fromBucket, toBucket *Bucket, opts sgbucket.XDCR
 func (r *XDCR) processEvent(event sgbucket.FeedEvent) bool {
 	docID := string(event.Key)
 	trace("Got event %s, opcode: %s", docID, event.Opcode)
-	fmt.Printf("Got event %s, opcode: %s\n", docID, event.Opcode)
 	col, ok := r.toBucketCollections[event.CollectionID]
 	if !ok {
 		logError("This violates the assumption that all collections are mapped to a target collection. This should not happen. Found event=%+v", event)
@@ -65,7 +64,6 @@ func (r *XDCR) processEvent(event sgbucket.FeedEvent) bool {
 	case sgbucket.FeedOpDeletion, sgbucket.FeedOpMutation:
 		// Filter out events if we have a non XDCR filter
 		if r.filterFunc != nil && !r.filterFunc(&event) {
-			fmt.Printf("Filtering %s\n", docID)
 			trace("Filtering doc %s", docID)
 			r.docsFiltered.Add(1)
 			return true
