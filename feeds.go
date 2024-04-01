@@ -23,10 +23,6 @@ var activeFeedCount int32 // for tests
 
 //////// BUCKET API: (sgbucket.MutationFeedStore interface)
 
-func (bucket *Bucket) GetFeedType() sgbucket.FeedType {
-	return sgbucket.DcpFeedType
-}
-
 func (bucket *Bucket) StartDCPFeed(
 	ctx context.Context,
 	args sgbucket.FeedArguments,
@@ -82,13 +78,6 @@ func (bucket *Bucket) StartDCPFeed(
 	}()
 
 	return nil
-}
-
-func (wh *Bucket) StartTapFeed(
-	args sgbucket.FeedArguments,
-	dbStats *expvar.Map,
-) (sgbucket.MutationFeed, error) {
-	return nil, &ErrUnimplemented{"rosmar bucket doesn't support tap feed, use DCP"}
 }
 
 //////// COLLECTION API:
@@ -350,8 +339,3 @@ func (e *event) asFeedEvent(collectionID uint32) *sgbucket.FeedEvent {
 	}
 	return &feedEvent
 }
-
-var (
-	// Enforce interface conformance:
-	_ sgbucket.MutationFeedStore2 = &Bucket{}
-)
