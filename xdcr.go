@@ -129,7 +129,7 @@ func (r *XDCR) processEvent(event sgbucket.FeedEvent) bool {
 
 }
 
-// Start starts the replication.
+// Start starts the replication for all existing replications. Errors if there aren't corresponding named collections on each bucket.
 func (r *XDCR) Start(ctx context.Context) error {
 	// set up replication to target all existing collections, and map to other collections
 	scopes := make(map[string][]string)
