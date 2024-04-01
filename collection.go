@@ -68,9 +68,14 @@ func (c *Collection) GetName() string {
 	return c.bucket.GetName() + "." + c.DataStoreNameImpl.String()
 }
 
-// DataStoreName returns the scope and collection name.
-func (c *Collection) DataStoreName() sgbucket.DataStoreName {
-	return c.DataStoreNameImpl
+// ScopeName returns the scope name. _default for the default scope.
+func (c *Collection) ScopeName() string {
+	return c.DataStoreNameImpl.ScopeName()
+}
+
+// ScopeName returns the collection name. _default for the default collection
+func (c *Collection) CollectionName() string {
+	return c.DataStoreNameImpl.CollectionName()
 }
 
 // GetCollectionID returns a unique ID for a given collection, used to identify the collection in DCP feeds and other places.

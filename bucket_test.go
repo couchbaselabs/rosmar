@@ -194,8 +194,8 @@ func TestDefaultCollection(t *testing.T) {
 	coll := bucket.DefaultDataStore()
 	assert.NotNil(t, coll)
 	assert.Equal(t, bucketName+"._default._default", coll.GetName())
-	assert.Equal(t, "_default", coll.DataStoreName().ScopeName())
-	assert.Equal(t, "_default", coll.DataStoreName().CollectionName())
+	assert.Equal(t, "_default", coll.ScopeName())
+	assert.Equal(t, "_default", coll.CollectionName())
 }
 
 func TestCreateCollection(t *testing.T) {
@@ -211,8 +211,8 @@ func TestCreateCollection(t *testing.T) {
 	assert.NoError(t, err)
 	assert.NotNil(t, coll)
 	assert.Equal(t, bucketName+"._default.foo", coll.GetName())
-	assert.Equal(t, "_default", coll.DataStoreName().ScopeName())
-	assert.Equal(t, "foo", coll.DataStoreName().CollectionName())
+	assert.Equal(t, "_default", coll.ScopeName())
+	assert.Equal(t, "foo", coll.CollectionName())
 	colls, err := bucket.ListDataStores()
 	assert.NoError(t, err)
 	assert.Equal(t, colls, []sgbucket.DataStoreName{defaultCollection, collName})
