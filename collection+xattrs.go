@@ -39,7 +39,7 @@ func (c *Collection) GetXattrs(
 }
 
 // SetWithMeta updates a document fully with xattrs and body and allows specification of a specific CAS (newCas). This update will always happen as long as oldCas matches the value of existing document. This simulates the kv op setWithMeta.
-func (c *Collection) SetWithMeta(_ context.Context, key string, oldCas CAS, newCas CAS, exp uint32, xattrs []byte, body []byte, datatype sgbucket.FeedDataType) error {
+func (c *Collection) setWithMeta(key string, oldCas CAS, newCas CAS, exp uint32, xattrs []byte, body []byte, datatype sgbucket.FeedDataType) error {
 	isJSON := datatype&sgbucket.FeedDataTypeJSON != 0
 	isDeletion := false
 	return c.writeWithMeta(key, body, xattrs, oldCas, newCas, exp, isJSON, isDeletion)
@@ -80,8 +80,8 @@ func (c *Collection) writeWithMeta(key string, body []byte, xattrs []byte, oldCa
 	return nil
 }
 
-// DeleteWithMeta tombstones a document and sets a specific cas. This update will always happen as long as oldCas matches the value of existing document. This simulates the kv op deleteWithMeta.
-func (c *Collection) DeleteWithMeta(_ context.Context, key string, oldCas CAS, newCas CAS, exp uint32, xattrs []byte) error {
+// deleteWithMeta tombstones a document and sets a specific cas. This update will always happen as long as oldCas matches the value of existing document. This simulates the kv op deleteWithMeta.
+func (c *Collection) deleteWithMeta(key string, oldCas CAS, newCas CAS, exp uint32, xattrs []byte) error {
 	var body []byte
 	isJSON := false
 	isDeletion := true

@@ -32,7 +32,7 @@ func init() {
 }
 
 // testCtx returns a context for testing
-func testCtx(t *testing.T) context.Context {
+func testCtx(_ *testing.T) context.Context {
 	return context.Background() // match sync gateway interfaces for logging
 }
 
@@ -45,9 +45,6 @@ func testBucketPath(t *testing.T) string {
 
 // makeTestBucketWithName creates a new persistent test bucket with a given name. If a bucket already exists, this function will fail. This uses testing.T.Cleanup to remove the bucket.
 func makeTestBucketWithName(t *testing.T, name string) *Bucket {
-	LoggingCallback = func(level LogLevel, fmt string, args ...any) {
-		t.Logf(logLevelNamesPrint[level]+fmt, args...)
-	}
 	bucket, err := OpenBucket(uriFromPath(testBucketPath(t)), name, CreateNew)
 	require.NoError(t, err)
 	t.Cleanup(func() {

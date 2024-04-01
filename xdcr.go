@@ -19,16 +19,18 @@ import (
 	sgbucket "github.com/couchbase/sg-bucket"
 )
 
-// XDCR implements a XDCR bucket to bucket setup within rosmar.
+// XDCR implements a XDCR bucket to bucket replication within rosmar.
 type XDCR struct {
-	terminator              chan bool
-	fromBucketCollectionIDs map[uint32]sgbucket.DataStoreName
-	fromBucket              *Bucket
-	toBucket                *Bucket
-	replicationID           string
-	docsWritten             atomic.Uint64
-	docsFiltered            atomic.Uint64
-	errorCount              atomic.Uint64
+	filterFunc          xdcrFilterFunc
+	terminator          chan bool
+	toBucketCollections map[uint32]*Collection
+	fromBucket          *Bucket
+	toBucket            *Bucket
+	replicationID       string
+	docsFiltered        atomic.Uint64
+	docsWritten         atomic.Uint64
+	errorCount          atomic.Uint64
+	targetNewerDocs     atomic.Uint64
 }
 
 // NewXDCR creates an instance of XDCR backed by rosmar. This is not started until Start is called.
@@ -37,143 +39,140 @@ func NewXDCR(_ context.Context, fromBucket, toBucket *Bucket, opts sgbucket.XDCR
 		return nil, errors.New("Only sgbucket.XDCRMobileOn is supported in rosmar")
 	}
 	return &XDCR{
-		fromBucket:              fromBucket,
-		toBucket:                toBucket,
-		replicationID:           fmt.Sprintf("%s-%s", fromBucket.GetName(), toBucket.GetName()),
-		fromBucketCollectionIDs: map[uint32]sgbucket.DataStoreName{},
-		terminator:              make(chan bool),
+		fromBucket:          fromBucket,
+		toBucket:            toBucket,
+		replicationID:       fmt.Sprintf("%s-%s", fromBucket.GetName(), toBucket.GetName()),
+		toBucketCollections: make(map[uint32]*Collection),
+		terminator:          make(chan bool),
+		filterFunc:          mobileXDCRFilter,
 	}, nil
 
 }
 
-// getFromBucketCollectionName returns the collection name for a given collection ID in the from bucket.
-func (r *XDCR) getFromBucketCollectionName(collectionID uint32) (sgbucket.DataStoreName, error) {
-	dsName, ok := r.fromBucketCollectionIDs[collectionID]
-	if ok {
-		return dsName, nil
+// processEvent processes a DCP event coming from a toBucket and replicates it to the target datastore.
+func (r *XDCR) processEvent(event sgbucket.FeedEvent) bool {
+	docID := string(event.Key)
+	trace("Got event %s, opcode: %s", docID, event.Opcode)
+	fmt.Printf("Got event %s, opcode: %s\n", docID, event.Opcode)
+	col, ok := r.toBucketCollections[event.CollectionID]
+	if !ok {
+		logError("This violates the assumption that all collections are mapped to a target collection. This should not happen. Found event=%+v", event)
+		r.errorCount.Add(1)
+		return false
 	}
 
-	dataStores, err := r.fromBucket.ListDataStores()
-
-	if err != nil {
-		return nil, fmt.Errorf("Could not list data stores: %w", err)
-
-	}
-
-	for _, dsName := range dataStores {
-		dataStore, err := r.fromBucket.NamedDataStore(dsName)
-		if err != nil {
-			return nil, fmt.Errorf("Could not get data store %s: %w", dsName, err)
+	switch event.Opcode {
+	case sgbucket.FeedOpDeletion, sgbucket.FeedOpMutation:
+		// Filter out events if we have a non XDCR filter
+		if r.filterFunc != nil && !r.filterFunc(&event) {
+			fmt.Printf("Filtering %s\n", docID)
+			trace("Filtering doc %s", docID)
+			r.docsFiltered.Add(1)
+			return true
 		}
 
-		if dataStore.GetCollectionID() == collectionID {
-			name := dataStore.DataStoreName()
-			r.fromBucketCollectionIDs[collectionID] = name
-			return name, nil
-
+		toCas, err := col.Get(docID, nil)
+		if err != nil && !col.IsError(err, sgbucket.KeyNotFoundError) {
+			warn("Skipping replicating doc %s, could not perform a kv op get doc in toBucket: %s", event.Key, err)
+			r.errorCount.Add(1)
+			return false
 		}
-	}
-	return nil, fmt.Errorf("Could not find collection with ID %d", collectionID)
-}
 
-// Start starts the replication.
-func (r *XDCR) Start(ctx context.Context) error {
-	args := sgbucket.FeedArguments{
-		ID:         "xdcr-" + r.replicationID,
-		Backfill:   sgbucket.FeedNoBackfill,
-		Terminator: r.terminator,
-	}
+		/* full LWW conflict resolution is not implemented in rosmar yet
 
-	callback := func(event sgbucket.FeedEvent) bool {
-		docID := string(event.Key)
-		trace("Got event %s, opcode: %s", docID, event.Opcode)
-		dsName, err := r.getFromBucketCollectionName(event.CollectionID)
+		CBS algorithm is:
+
+		if (command.CAS > document.CAS)
+		  command succeeds
+		else if (command.CAS == document.CAS)
+		  // Check the RevSeqno
+		  if (command.RevSeqno > document.RevSeqno)
+		    command succeeds
+		  else if (command.RevSeqno == document.RevSeqno)
+		    // Check the expiry time
+		    if (command.Expiry > document.Expiry)
+		      command succeeds
+		    else if (command.Expiry == document.Expiry)
+		      // Finally check flags
+		      if (command.Flags < document.Flags)
+		        command succeeds
+
+
+		command fails
+
+		In the current state of rosmar:
+
+		1. all CAS values are unique.
+		2. RevSeqno is not implemented
+		3. Expiry is implemented and could be compared except all CAS values are unique.
+		4. Flags are not implemented
+
+		*/
+
+		if event.Cas <= toCas {
+			r.targetNewerDocs.Add(1)
+			trace("Skipping replicating doc %s, cas %d <= %d", docID, event.Cas, toCas)
+			return true
+		}
+
+		err = opWithMeta(col, toCas, event)
 		if err != nil {
-			warn("Could not find collection with ID %d for docID %s: %s", event.CollectionID, docID, err)
+			warn("Replicating doc %s, could not write doc: %s", event.Key, err)
 			r.errorCount.Add(1)
 			return false
 
 		}
-
-		switch event.Opcode {
-		case sgbucket.FeedOpDeletion, sgbucket.FeedOpMutation:
-			if strings.HasPrefix(docID, sgbucket.SyncDocPrefix) && !strings.HasPrefix(docID, sgbucket.Att2Prefix) {
-				trace("Filtering doc %s", docID)
-				r.docsFiltered.Add(1)
-				return true
-
-			}
-
-			toDataStore, err := r.toBucket.NamedDataStore(dsName)
-			if err != nil {
-				warn("Replicating doc %s, could not find matching datastore for %s in target bucket", event.Key, dsName)
-				r.errorCount.Add(1)
-				return false
-			}
-
-			originalCas, err := toDataStore.Get(docID, nil)
-			if err != nil && !toDataStore.IsError(err, sgbucket.KeyNotFoundError) {
-				warn("Skipping replicating doc %s, could not perform a kv op get doc in toBucket: %s", event.Key, err)
-				r.errorCount.Add(1)
-				return false
-			}
-
-			/* full LWW conflict resolution is not implemented in rosmar yet
-
-			CBS algorithm is:
-
-			if (command.CAS > document.CAS)
-			  command succeeds
-			else if (command.CAS == document.CAS)
-			  // Check the RevSeqno
-			  if (command.RevSeqno > document.RevSeqno)
-			    command succeeds
-			  else if (command.RevSeqno == document.RevSeqno)
-			    // Check the expiry time
-			    if (command.Expiry > document.Expiry)
-			      command succeeds
-			    else if (command.Expiry == document.Expiry)
-			      // Finally check flags
-			      if (command.Flags < document.Flags)
-			        command succeeds
-
-
-			command fails
-
-			In the current state of rosmar:
-
-			1. all CAS values are unique.
-			2. RevSeqno is not implemented
-			3. Expiry is implemented and could be compared except all CAS values are unique.
-			4. Flags are not implemented
-
-			*/
-
-			if event.Cas <= originalCas {
-				trace("Skipping replicating doc %s, cas %d <= %d", docID, event.Cas, originalCas)
-				return true
-			}
-
-			toCollection, ok := toDataStore.(*Collection)
-			if !ok {
-				warn("Datastore is not of type Collection, is of type %T", toDataStore)
-				r.errorCount.Add(1)
-			}
-
-			err = writeDoc(ctx, toCollection, originalCas, event)
-			if err != nil {
-				warn("Replicating doc %s, could not write doc: %s", event.Key, err)
-				r.errorCount.Add(1)
-				return false
-
-			}
-			r.docsWritten.Add(1)
-		}
-
-		return true
-
+		r.docsWritten.Add(1)
 	}
-	return r.fromBucket.StartDCPFeed(ctx, args, callback, nil)
+
+	return true
+
+}
+
+// Start starts the replication.
+func (r *XDCR) Start(ctx context.Context) error {
+	// set up replication to target all existing collections, and map to other collections
+	scopes := make(map[string][]string)
+	fromDataStores, err := r.fromBucket.ListDataStores()
+	if err != nil {
+		return fmt.Errorf("Could not list data stores: %w", err)
+	}
+	toDataStores, err := r.toBucket.ListDataStores()
+	if err != nil {
+		return fmt.Errorf("Could not list toBucket data stores: %w", err)
+	}
+	for _, fromName := range fromDataStores {
+		fromDataStore, err := r.fromBucket.NamedDataStore(fromName)
+		if err != nil {
+			return fmt.Errorf("Could not get data store %s: %w when starting XDCR", fromName, err)
+		}
+		collectionID := fromDataStore.GetCollectionID()
+		for _, toName := range toDataStores {
+			if fromName.ScopeName() != toName.ScopeName() || fromName.CollectionName() != toName.CollectionName() {
+				continue
+			}
+			toDataStore, err := r.toBucket.NamedDataStore(toName)
+			if err != nil {
+				return fmt.Errorf("There is not a matching datastore name in the toBucket for the fromBucket %s", toName)
+			}
+			col, ok := toDataStore.(*Collection)
+			if !ok {
+				return fmt.Errorf("DataStore %s is not of rosmar.Collection: %T", toDataStore, toDataStore)
+			}
+			r.toBucketCollections[collectionID] = col
+			scopes[fromName.ScopeName()] = append(scopes[fromName.ScopeName()], fromName.CollectionName())
+			break
+		}
+	}
+
+	args := sgbucket.FeedArguments{
+		ID:         "xdcr-" + r.replicationID,
+		Backfill:   sgbucket.FeedNoBackfill,
+		Terminator: r.terminator,
+		Scopes:     scopes,
+	}
+
+	return r.fromBucket.StartDCPFeed(ctx, args, r.processEvent, nil)
 }
 
 // Stop terminates the replication.
@@ -183,16 +182,8 @@ func (r *XDCR) Stop(_ context.Context) error {
 	return nil
 }
 
-// writeDoc writes a document to the target datastore. This will not return an error on a CAS mismatch, but will return error on other types of write.
-func writeDoc(ctx context.Context, collection *Collection, originalCas uint64, event sgbucket.FeedEvent) error {
-	if event.Opcode == sgbucket.FeedOpDeletion {
-		_, err := collection.Remove(string(event.Key), originalCas)
-		if !errors.Is(err, sgbucket.CasMismatchErr{}) {
-			return err
-		}
-		return nil
-	}
-
+// opWithMeta writes a document to the target datastore given a type of Deletion or Mutation event with a specific cas.
+func opWithMeta(collection *Collection, originalCas uint64, event sgbucket.FeedEvent) error {
 	var xattrs []byte
 	var body []byte
 	if event.DataType&sgbucket.FeedDataTypeXattr != 0 {
@@ -214,13 +205,11 @@ func writeDoc(ctx context.Context, collection *Collection, originalCas uint64, e
 
 	}
 
-	err := collection.SetWithMeta(ctx, string(event.Key), originalCas, event.Cas, event.Expiry, xattrs, body, event.DataType)
-
-	if !collection.IsError(err, sgbucket.KeyNotFoundError) {
-		return err
+	if event.Opcode == sgbucket.FeedOpDeletion {
+		return collection.deleteWithMeta(string(event.Key), originalCas, event.Cas, event.Expiry, xattrs)
 	}
 
-	return nil
+	return collection.setWithMeta(string(event.Key), originalCas, event.Cas, event.Expiry, xattrs, body, event.DataType)
 
 }
 
@@ -229,9 +218,10 @@ func writeDoc(ctx context.Context, collection *Collection, originalCas uint64, e
 func (r *XDCR) Stats(context.Context) (*sgbucket.XDCRStats, error) {
 
 	return &sgbucket.XDCRStats{
-		DocsWritten:  r.docsWritten.Load(),
-		DocsFiltered: r.docsFiltered.Load(),
-		ErrorCount:   r.errorCount.Load(),
+		DocsWritten:     r.docsWritten.Load(),
+		DocsFiltered:    r.docsFiltered.Load(),
+		ErrorCount:      r.errorCount.Load(),
+		TargetNewerDocs: r.targetNewerDocs.Load(),
 	}, nil
 }
 
@@ -242,4 +232,12 @@ func xattrToBytes(xattrs []sgbucket.Xattr) ([]byte, error) {
 		xattrMap[xattr.Name] = xattr.Value
 	}
 	return json.Marshal(xattrMap)
+}
+
+// xdcrFilterFunc is a function that filters out events from the replication.
+type xdcrFilterFunc func(event *sgbucket.FeedEvent) bool
+
+// mobileXDCRFilter is the implicit key filtering function that Couchbase Server -mobile XDCR works on.
+func mobileXDCRFilter(event *sgbucket.FeedEvent) bool {
+	return !(strings.HasPrefix(string(event.Key), sgbucket.SyncDocPrefix) && !strings.HasPrefix(string(event.Key), sgbucket.Att2Prefix))
 }

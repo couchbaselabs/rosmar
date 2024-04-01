@@ -26,6 +26,21 @@ func TestXDCR(t *testing.T) {
 
 	xdcr, err := NewXDCR(ctx, fromBucket, toBucket, sgbucket.XDCROptions{Mobile: sgbucket.XDCRMobileOn})
 	require.NoError(t, err)
+
+	const (
+		scopeName      = "customScope"
+		collectionName = "customCollection"
+	)
+	fromDs, err := fromBucket.NamedDataStore(sgbucket.DataStoreNameImpl{Scope: scopeName, Collection: collectionName})
+	require.NoError(t, err)
+	toDs, err := toBucket.NamedDataStore(sgbucket.DataStoreNameImpl{Scope: scopeName, Collection: collectionName})
+	require.NoError(t, err)
+	// create collections on both sides
+	collections := map[sgbucket.DataStore]sgbucket.DataStore{
+		fromBucket.DefaultDataStore(): toBucket.DefaultDataStore(),
+		fromDs:                        toDs,
+	}
+
 	err = xdcr.Start(ctx)
 	require.NoError(t, err)
 	defer func() {
@@ -39,48 +54,55 @@ func TestXDCR(t *testing.T) {
 		normalDocBody     = `{"key":"value"}`
 		exp               = 0
 	)
-	_, err = fromBucket.DefaultDataStore().AddRaw(syncDoc, exp, []byte(`{"foo", "bar"}`))
-	require.NoError(t, err)
+	var totalDocsFiltered uint64
+	var totalDocsWritten uint64
+	// run test on named and default collections
+	for fromDs, toDs := range collections {
+		_, err = fromDs.AddRaw(syncDoc, exp, []byte(`{"foo", "bar"}`))
+		require.NoError(t, err)
 
-	attachmentDocCas, err := fromBucket.DefaultDataStore().WriteCas(attachmentDoc, exp, 0, []byte(attachmentDocBody), sgbucket.Raw)
-	require.NoError(t, err)
+		attachmentDocCas, err := fromDs.WriteCas(attachmentDoc, exp, 0, []byte(attachmentDocBody), sgbucket.Raw)
+		require.NoError(t, err)
 
-	normalDocCas, err := fromBucket.DefaultDataStore().WriteCas(normalDoc, exp, 0, []byte(normalDocBody), 0)
-	require.NoError(t, err)
+		normalDocCas, err := fromDs.WriteCas(normalDoc, exp, 0, []byte(normalDocBody), 0)
+		require.NoError(t, err)
 
-	require.EventuallyWithT(t, func(c *assert.CollectT) {
-		val, cas, err := toBucket.DefaultDataStore().GetRaw(normalDoc)
-		assert.NoError(c, err)
-		assert.Equal(c, normalDocCas, cas)
-		assert.JSONEq(c, normalDocBody, string(val))
-	}, time.Second*5, time.Millisecond*100)
+		require.EventuallyWithT(t, func(c *assert.CollectT) {
+			val, cas, err := toDs.GetRaw(normalDoc)
+			assert.NoError(c, err)
+			assert.Equal(c, normalDocCas, cas)
+			assert.JSONEq(c, normalDocBody, string(val))
+		}, time.Second*5, time.Millisecond*100)
 
-	require.EventuallyWithT(t, func(c *assert.CollectT) {
-		val, cas, err := toBucket.DefaultDataStore().GetRaw(attachmentDoc)
-		assert.NoError(c, err)
-		assert.Equal(c, attachmentDocCas, cas)
-		assert.Equal(c, []byte(attachmentDocBody), val)
-	}, time.Second*5, time.Millisecond*100)
+		require.EventuallyWithT(t, func(c *assert.CollectT) {
+			val, cas, err := toDs.GetRaw(attachmentDoc)
+			assert.NoError(c, err)
+			assert.Equal(c, attachmentDocCas, cas)
+			assert.Equal(c, []byte(attachmentDocBody), val)
+		}, time.Second*5, time.Millisecond*100)
 
-	_, err = toBucket.DefaultDataStore().Get(syncDoc, nil)
-	assert.True(t, toBucket.IsError(err, sgbucket.KeyNotFoundError))
-
-	require.NoError(t, fromBucket.DefaultDataStore().Delete(normalDoc))
-	require.EventuallyWithT(t, func(c *assert.CollectT) {
-		var value string
-		_, err = toBucket.DefaultDataStore().Get(normalDoc, &value)
-		assert.Error(t, err)
+		_, err = toDs.Get(syncDoc, nil)
 		assert.True(t, toBucket.IsError(err, sgbucket.KeyNotFoundError))
-	}, time.Second*5, time.Millisecond*100)
 
-	// stats are not updated in real time, so we need to wait a bit
-	require.EventuallyWithT(t, func(c *assert.CollectT) {
-		stats, err := xdcr.Stats(ctx)
-		assert.NoError(t, err)
-		assert.Equal(c, uint64(1), stats.DocsFiltered)
-		assert.Equal(c, uint64(3), stats.DocsWritten)
-	}, time.Second*5, time.Millisecond*100)
+		require.NoError(t, fromDs.Delete(normalDoc))
+		require.EventuallyWithT(t, func(c *assert.CollectT) {
+			var value string
+			_, err = toDs.Get(normalDoc, &value)
+			assert.Error(t, err)
+			assert.True(t, toBucket.IsError(err, sgbucket.KeyNotFoundError))
+		}, time.Second*5, time.Millisecond*100)
 
+		// stats are not updated in real time, so we need to wait a bit
+		require.EventuallyWithT(t, func(c *assert.CollectT) {
+			stats, err := xdcr.Stats(ctx)
+			assert.NoError(t, err)
+			assert.Equal(c, totalDocsFiltered+1, stats.DocsFiltered)
+			assert.Equal(c, totalDocsWritten+3, stats.DocsWritten)
+		}, time.Second*5, time.Millisecond*100)
+		totalDocsFiltered += 1
+		totalDocsWritten += 3
+
+	}
 	stats, err := xdcr.Stats(ctx)
 	require.NoError(t, err)
 	require.Equal(t, uint64(0), stats.ErrorCount)
