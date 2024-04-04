@@ -241,8 +241,8 @@ func TestCollectionMutations(t *testing.T) {
 	require.NoError(t, err)
 	numDocs := 50
 
-	collectionID_1 := collection1.(sgbucket.Collection).GetCollectionID()
-	collectionID_2 := collection2.(sgbucket.Collection).GetCollectionID()
+	collectionID_1 := collection1.GetCollectionID()
+	collectionID_2 := collection2.GetCollectionID()
 
 	// Add n docs to two collections
 	for i := 1; i <= numDocs; i++ {
