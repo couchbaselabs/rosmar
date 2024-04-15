@@ -307,3 +307,49 @@ func TestCollectionMutations(t *testing.T) {
 	assert.Equal(t, len(c1Keys), numDocs)
 	assert.Equal(t, len(c2Keys), numDocs)
 }
+
+func TestDCPFeedTypes(t *testing.T) {
+	ensureNoLeakedFeeds(t)
+	bucket := makeTestBucket(t)
+	c := bucket.DefaultDataStore()
+
+	args := sgbucket.FeedArguments{}
+	events, _ := startFeedWithArgs(t, bucket, args)
+
+	docID := "jsondoc"
+	body := []byte(`{"foo": "bar"}`)
+	added, err := c.AddRaw(docID, 0, body)
+	require.NoError(t, err)
+	require.True(t, added)
+
+	event := <-events
+	assert.Equal(t, sgbucket.FeedOpBeginBackfill, event.Opcode)
+
+	event = <-events
+	assert.Equal(t, sgbucket.FeedOpEndBackfill, event.Opcode)
+
+	event = <-events
+	assertEventEquals(t, sgbucket.FeedEvent{Opcode: sgbucket.FeedOpMutation, Key: []byte(docID), Value: body, DataType: sgbucket.FeedDataTypeJSON}, event)
+
+	// SetRaw to json integer
+	body = []byte(`1`)
+	require.NoError(t, c.SetRaw(docID, 0, nil, body))
+
+	event = <-events
+	assertEventEquals(t, sgbucket.FeedEvent{Opcode: sgbucket.FeedOpMutation, Key: []byte(docID), Value: body, DataType: sgbucket.FeedDataTypeJSON}, event)
+
+	// SetRaw to binary
+	body = []byte(`1ABC`)
+	require.NoError(t, c.SetRaw(docID, 0, nil, body))
+
+	event = <-events
+	assertEventEquals(t, sgbucket.FeedEvent{Opcode: sgbucket.FeedOpMutation, Key: []byte(docID), Value: body, DataType: sgbucket.FeedDataTypeRaw}, event)
+
+	// SetRaw to valid json again
+	body = []byte(`{"bar" : "baz"}"`)
+	require.NoError(t, c.SetRaw(docID, 0, nil, body))
+
+	event = <-events
+	assertEventEquals(t, sgbucket.FeedEvent{Opcode: sgbucket.FeedOpMutation, Key: []byte(docID), Value: body, DataType: sgbucket.FeedDataTypeRaw}, event)
+
+}
