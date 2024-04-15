@@ -648,9 +648,8 @@ func (e *event) expandXattrMacros(xattrKey string, xattr any, mutateOpts *sgbuck
 			return err
 		}
 		if path[0] != xattrKey {
-			return fmt.Errorf("Unknown xattr in macro expansion path, expect %s: %v ", xattrKey, path)
+			continue
 		}
-
 		expandedValue, err := e.macroExpand(v.Type)
 		if err != nil {
 			return err

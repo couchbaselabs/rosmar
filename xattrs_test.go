@@ -77,16 +77,56 @@ func TestMacroExpansion(t *testing.T) {
 	_, ok = xval["testcrc32c"]
 	require.True(t, ok)
 
-	// Unsuccessful - target unknown xattr
-	opts.MacroExpansion = []sgbucket.MacroExpansionSpec{
-		{Path: "_unknown.testcas", Type: sgbucket.MacroCas},
-	}
-	_, err = coll.WriteWithXattrs(ctx, "xattrMismatch", 0, 0, bodyBytes, xattrsInput, opts)
-	require.Error(t, err)
+	// This would be the behavior in CBS <7.6
+	/*
+		// Unsuccessful - target unknown xattr
+		opts.MacroExpansion = []sgbucket.MacroExpansionSpec{
+			{Path: "_unknown.testcas", Type: sgbucket.MacroCas},
+		}
 
+		opts.MacroExpansion = []sgbucket.MacroExpansionSpec{
+			{Path: "_sync.unknownPath.testcas", Type: sgbucket.MacroCas},
+		}
+		_, err = coll.WriteWithXattrs(ctx, "pathError", 0, 0, bodyBytes, xattrsInput, opts)
+		require.Error(t, err)
+	*/
+}
+
+func TestMacroExpansionMultipleXattrs(t *testing.T) {
+	ctx := testCtx(t)
+	ensureNoLeakedFeeds(t)
+	coll := makeTestBucket(t).DefaultDataStore().(*Collection)
+
+	// Successful case - sets cas and crc32c in the _sync xattr
+	opts := &sgbucket.MutateInOptions{}
 	opts.MacroExpansion = []sgbucket.MacroExpansionSpec{
-		{Path: "_sync.unknownPath.testcas", Type: sgbucket.MacroCas},
+		{Path: "_xattr1.testcas", Type: sgbucket.MacroCas},
+		{Path: "_xattr2.testcas", Type: sgbucket.MacroCas},
 	}
-	_, err = coll.WriteWithXattrs(ctx, "pathError", 0, 0, bodyBytes, xattrsInput, opts)
-	require.Error(t, err)
+	bodyBytes := []byte(`{"a":123}`)
+
+	xattrsInput := map[string][]byte{
+		"_xattr1": []byte(`{"x":"abc"}`),
+		"_xattr2": []byte(`{"x":"def"}`),
+		"_xattr3": []byte(`{"x":"ghi"}`),
+	}
+	casOut, err := coll.WriteWithXattrs(ctx, "key", 0, 0, bodyBytes, xattrsInput, opts)
+	require.NoError(t, err)
+
+	_, xattrs, getCas, err := coll.GetWithXattrs(ctx, "key", []string{"_xattr1", "_xattr2", "_xattr3"})
+	require.NoError(t, err)
+	require.Equal(t, getCas, casOut)
+
+	for _, xattr := range []string{"_xattr1", "_xattr2", "_xattr3"} {
+		marshalledXval, ok := xattrs[xattr]
+		require.True(t, ok, "xattr %s not found", xattr)
+		var xattr1 map[string]string
+		err = json.Unmarshal(marshalledXval, &xattr1)
+		require.NoError(t, err)
+		if xattr == "_xattr1" || xattr == "_xattr2" {
+			require.Equal(t, casAsString(casOut), xattr1["testcas"])
+		} else {
+			require.NotContains(t, xattr1, "testcas")
+		}
+	}
 }
