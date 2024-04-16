@@ -532,6 +532,44 @@ func TestWriteCasWithXattrExistingXattr(t *testing.T) {
 
 }
 
+// Test WriteWithXattr that only updates the xattr.
+func TestWriteWithXattrNoBody(t *testing.T) {
+	col := makeTestBucket(t).DefaultDataStore()
+
+	const docID = "WriteWithXattrNoBody"
+
+	// Write a document with body
+	val := make(map[string]interface{})
+	val["type"] = docID
+
+	xattrVal := make(map[string]interface{})
+	xattrVal["rev"] = "1-1234"
+
+	var exp uint32
+	xattrs := map[string][]byte{syncXattrName: mustMarshalJSON(t, xattrVal)}
+	ctx := testCtx(t)
+	cas := uint64(0)
+	cas, err := col.WriteWithXattrs(ctx, docID, exp, cas, mustMarshalJSON(t, val), xattrs, nil)
+	require.NoError(t, err)
+
+	// Update the xattr only
+	updatedXattrVal := make(map[string]interface{})
+	updatedXattrVal["rev"] = "2-1234"
+	newXattrs := map[string][]byte{syncXattrName: mustMarshalJSON(t, updatedXattrVal)}
+
+	cas, err = col.WriteWithXattrs(ctx, docID, exp, cas, nil, newXattrs, nil)
+	require.NoError(t, err)
+
+	// Fetch, validate body and xattrs are correct
+	getVal, getXattrs, _, err := col.GetWithXattrs(testCtx(t), docID, []string{syncXattrName})
+	var fetchedVal, fetchedXattr map[string]interface{}
+	require.NoError(t, json.Unmarshal(getVal, &fetchedVal))
+	require.Equal(t, val, fetchedVal)
+
+	require.NoError(t, json.Unmarshal(getXattrs[syncXattrName], &fetchedXattr))
+	require.Equal(t, updatedXattrVal, fetchedXattr)
+}
+
 func TestWriteCasWithXattrNoXattr(t *testing.T) {
 	col := makeTestBucket(t).DefaultDataStore().(*Collection)
 	const docID = "DocExistsNoXattr"

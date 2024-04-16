@@ -183,7 +183,10 @@ func (c *Collection) GetWithXattrs(_ context.Context, key string, xattrKeys []st
 
 func (c *Collection) WriteWithXattrs(ctx context.Context, k string, exp uint32, cas uint64, value []byte, xattrValue map[string][]byte, opts *sgbucket.MutateInOptions) (casOut uint64, err error) {
 	expP := ifelse(opts != nil && opts.PreserveExpiry, nil, &exp)
-	vp := &payload{marshaled: value}
+	var vp *payload
+	if value != nil {
+		vp = &payload{marshaled: value}
+	}
 	xattrs := make(map[string]payload, len(xattrValue))
 	for xattrKey, xv := range xattrValue {
 		xattrs[xattrKey] = payload{marshaled: xv}
