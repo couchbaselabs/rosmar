@@ -10,6 +10,7 @@ package rosmar
 
 import (
 	"encoding/json"
+	"fmt"
 	"testing"
 
 	sgbucket "github.com/couchbase/sg-bucket"
@@ -58,7 +59,7 @@ func TestMacroExpansion(t *testing.T) {
 	xattrsInput := map[string][]byte{
 		"_sync": []byte(`{"x":456}`),
 	}
-	casOut, err := coll.WriteWithXattrs(ctx, "key", 0, 0, bodyBytes, xattrsInput, opts)
+	casOut, err := coll.WriteWithXattrs(ctx, "key", 0, 0, bodyBytes, xattrsInput, nil, opts)
 	require.NoError(t, err)
 
 	_, xattrs, getCas, err := coll.GetWithXattrs(ctx, "key", []string{syncXattrName})
@@ -110,7 +111,7 @@ func TestMacroExpansionMultipleXattrs(t *testing.T) {
 		"_xattr2": []byte(`{"x":"def"}`),
 		"_xattr3": []byte(`{"x":"ghi"}`),
 	}
-	casOut, err := coll.WriteWithXattrs(ctx, "key", 0, 0, bodyBytes, xattrsInput, opts)
+	casOut, err := coll.WriteWithXattrs(ctx, "key", 0, 0, bodyBytes, xattrsInput, nil, opts)
 	require.NoError(t, err)
 
 	_, xattrs, getCas, err := coll.GetWithXattrs(ctx, "key", []string{"_xattr1", "_xattr2", "_xattr3"})
@@ -129,4 +130,130 @@ func TestMacroExpansionMultipleXattrs(t *testing.T) {
 			require.NotContains(t, xattr1, "testcas")
 		}
 	}
+}
+
+func TestWriteWithXattrsSetAndDeleteError(t *testing.T) {
+	col := makeTestBucket(t).DefaultDataStore()
+	docID := t.Name()
+
+	ctx := testCtx(t)
+	fakeCas := uint64(1)
+	_, err := col.WriteWithXattrs(ctx, docID, 0, fakeCas, []byte(`{"foo": "bar"}`), map[string][]byte{"xattr1": []byte(`{"a" : "b"}`)}, []string{"xattr1"}, nil)
+	require.ErrorIs(t, err, sgbucket.ErrUpsertAndDeleteSameXattr)
+}
+
+func TestWriteWithXattrsSetXattrNil(t *testing.T) {
+	col := makeTestBucket(t).DefaultDataStore()
+	docID := t.Name()
+
+	ctx := testCtx(t)
+	for _, fakeCas := range []uint64{0, 1} {
+		t.Run(fmt.Sprintf("cas=%d", fakeCas), func(t *testing.T) {
+
+			_, err := col.WriteWithXattrs(ctx, docID, 0, fakeCas, []byte(`{"foo": "bar"}`), map[string][]byte{"xattr1": nil}, nil, nil)
+			require.ErrorIs(t, err, sgbucket.ErrNilXattrValue)
+		})
+	}
+}
+
+// TestXattrWriteUpdateXattr.  Validates basic write of document with xattr, and retrieval of the same doc w/ xattr.
+func TestWriteUpdateWithXattrs(t *testing.T) {
+	ctx := testCtx(t)
+	col := makeTestBucket(t).DefaultDataStore()
+
+	key := t.Name()
+	xattr1 := "xattr1"
+	xattr2 := "xattr2"
+	xattr3 := "xattr3"
+	xattrNames := []string{xattr1, xattr2, xattr3}
+	body := `{"counter": 1}`
+
+	xattrsToModify := xattrNames
+	var xattrsToDelete []string
+	// Dummy write update function that increments 'counter' in the doc and 'seq' in the xattr
+	writeUpdateFunc := func(doc []byte, xattrs map[string][]byte, cas uint64) (sgbucket.UpdatedDoc, error) {
+		var docMap map[string]float64
+		if doc == nil {
+			docMap = map[string]float64{"counter": 1}
+		} else {
+			require.NoError(t, json.Unmarshal(doc, &docMap))
+			docMap["counter"]++
+		}
+		updatedDoc := sgbucket.UpdatedDoc{
+			Doc:            mustMarshalJSON(t, docMap),
+			Xattrs:         make(map[string][]byte),
+			XattrsToDelete: xattrsToDelete,
+		}
+		for _, xattrName := range xattrsToModify {
+			xattr := xattrs[xattrName]
+			var xattrMap map[string]float64
+			if xattr == nil {
+				xattrMap = map[string]float64{"seq": 1}
+			} else {
+				require.NoError(t, json.Unmarshal(xattr, &xattrMap))
+				xattrMap["seq"]++
+			}
+			updatedDoc.Xattrs[xattrName] = mustMarshalJSON(t, xattrMap)
+		}
+		return updatedDoc, nil
+	}
+
+	// Insert
+	_, err := col.WriteUpdateWithXattrs(ctx, key, xattrNames, 0, nil, nil, writeUpdateFunc)
+	require.NoError(t, err)
+
+	rawVal, xattrs, _, err := col.GetWithXattrs(ctx, key, xattrNames)
+	require.NoError(t, err)
+
+	require.JSONEq(t, body, string(rawVal))
+	for _, xattrName := range xattrNames {
+		require.Contains(t, xattrs, xattrName)
+		var xattr map[string]float64
+		require.NoError(t, json.Unmarshal(xattrs[xattrName], &xattr))
+		assert.Equal(t, float64(1), xattr["seq"])
+	}
+
+	// Update
+	xattrsToModify = []string{xattr1, xattr2}
+	xattrsToDelete = []string{xattr3}
+	_, err = col.WriteUpdateWithXattrs(ctx, key, xattrNames, 0, nil, nil, writeUpdateFunc)
+	require.NoError(t, err)
+
+	rawVal, xattrs, _, err = col.GetWithXattrs(ctx, key, xattrNames)
+	require.NoError(t, err)
+
+	require.JSONEq(t, `{"counter": 2}`, string(rawVal))
+	for _, xattrName := range []string{xattr1, xattr2} {
+		require.Contains(t, xattrs, xattrName)
+		var xattr map[string]float64
+		require.NoError(t, json.Unmarshal(xattrs[xattrName], &xattr))
+		assert.Equal(t, float64(2), xattr["seq"])
+	}
+	require.NotContains(t, xattrs, xattr3)
+}
+
+func TestWriteUpdateDeleteXattrTombstone(t *testing.T) {
+	ctx := testCtx(t)
+	col := makeTestBucket(t).DefaultDataStore()
+
+	key := t.Name()
+	xattrKey := "_xattr1"
+	xattrBody := []byte(`{"foo": "bar"}`)
+
+	_, err := col.WriteTombstoneWithXattrs(ctx, key, 0, 0, map[string][]byte{xattrKey: xattrBody}, nil, false, nil)
+	require.NoError(t, err)
+
+	xattrs, _, err := col.GetXattrs(ctx, key, []string{xattrKey})
+	require.NoError(t, err)
+	require.JSONEq(t, string(xattrBody), string(xattrs[xattrKey]))
+
+	writeUpdateFunc := func(doc []byte, xattrs map[string][]byte, cas uint64) (sgbucket.UpdatedDoc, error) {
+		return sgbucket.UpdatedDoc{
+			XattrsToDelete: []string{xattrKey},
+			Doc:            []byte(`{"foo":"bar"}`),
+		}, nil
+	}
+
+	_, err = col.WriteUpdateWithXattrs(ctx, key, []string{xattrKey}, 0, nil, nil, writeUpdateFunc)
+	require.ErrorIs(t, err, sgbucket.ErrDeleteXattrOnTombstone)
 }

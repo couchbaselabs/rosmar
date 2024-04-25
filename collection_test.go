@@ -511,7 +511,7 @@ func TestWriteCasWithXattrExistingXattr(t *testing.T) {
 	xattrs := map[string][]byte{syncXattrName: mustMarshalJSON(t, xattrVal)}
 	ctx := testCtx(t)
 	cas := uint64(0)
-	cas, err := col.WriteWithXattrs(ctx, docID, exp, cas, mustMarshalJSON(t, val), xattrs, nil)
+	cas, err := col.WriteWithXattrs(ctx, docID, exp, cas, mustMarshalJSON(t, val), xattrs, nil, nil)
 	require.NoError(t, err)
 
 	updatedXattrVal := make(map[string]interface{})
@@ -521,11 +521,11 @@ func TestWriteCasWithXattrExistingXattr(t *testing.T) {
 
 	const deleteBody = true
 	// First attempt to update with a bad cas value, and ensure we're getting the expected error
-	_, err = col.WriteTombstoneWithXattrs(ctx, docID, exp, uint64(1234), newXattrs, deleteBody, nil)
+	_, err = col.WriteTombstoneWithXattrs(ctx, docID, exp, uint64(1234), newXattrs, nil, deleteBody, nil)
 
 	require.ErrorAs(t, err, &sgbucket.CasMismatchErr{})
 
-	_, err = col.WriteTombstoneWithXattrs(ctx, docID, exp, cas, newXattrs, deleteBody, nil)
+	_, err = col.WriteTombstoneWithXattrs(ctx, docID, exp, cas, newXattrs, nil, deleteBody, nil)
 	require.NoError(t, err)
 
 	verifyEmptyBodyAndSyncXattr(t, col.(*Collection), docID)
@@ -549,7 +549,7 @@ func TestWriteWithXattrNoBody(t *testing.T) {
 	xattrs := map[string][]byte{syncXattrName: mustMarshalJSON(t, xattrVal)}
 	ctx := testCtx(t)
 	cas := uint64(0)
-	cas, err := col.WriteWithXattrs(ctx, docID, exp, cas, mustMarshalJSON(t, val), xattrs, nil)
+	cas, err := col.WriteWithXattrs(ctx, docID, exp, cas, mustMarshalJSON(t, val), xattrs, nil, nil)
 	require.NoError(t, err)
 
 	// Update the xattr only
@@ -557,7 +557,7 @@ func TestWriteWithXattrNoBody(t *testing.T) {
 	updatedXattrVal["rev"] = "2-1234"
 	newXattrs := map[string][]byte{syncXattrName: mustMarshalJSON(t, updatedXattrVal)}
 
-	cas, err = col.WriteWithXattrs(ctx, docID, exp, cas, nil, newXattrs, nil)
+	cas, err = col.WriteWithXattrs(ctx, docID, exp, cas, nil, newXattrs, nil, nil)
 	require.NoError(t, err)
 
 	// Fetch, validate body and xattrs are correct
@@ -584,11 +584,11 @@ func TestWriteCasWithXattrNoXattr(t *testing.T) {
 	xattrs := map[string][]byte{syncXattrName: mustMarshalJSON(t, updatedXattrVal)}
 	const deleteBody = true
 	ctx := testCtx(t)
-	_, err = col.WriteTombstoneWithXattrs(ctx, docID, 0, uint64(1234), xattrs, deleteBody, nil)
+	_, err = col.WriteTombstoneWithXattrs(ctx, docID, 0, uint64(1234), xattrs, nil, deleteBody, nil)
 
 	require.ErrorAs(t, err, &sgbucket.CasMismatchErr{})
 
-	_, err = col.WriteTombstoneWithXattrs(ctx, docID, 0, cas, xattrs, deleteBody, nil)
+	_, err = col.WriteTombstoneWithXattrs(ctx, docID, 0, cas, xattrs, nil, deleteBody, nil)
 	require.NoError(t, err)
 	verifyEmptyBodyAndSyncXattr(t, col, docID)
 }
@@ -608,7 +608,7 @@ func TestWriteCasWithXattrXattrExistsNoDoc(t *testing.T) {
 	ctx := testCtx(t)
 	// Create w/ XATTR
 	cas := uint64(0)
-	cas, err := col.WriteWithXattrs(ctx, docID, 0, cas, mustMarshalJSON(t, val), xattrs, nil)
+	cas, err := col.WriteWithXattrs(ctx, docID, 0, cas, mustMarshalJSON(t, val), xattrs, nil, nil)
 	require.NoError(t, err)
 
 	// Delete the doc body
@@ -624,10 +624,10 @@ func TestWriteCasWithXattrXattrExistsNoDoc(t *testing.T) {
 	updatedXattrs := map[string][]byte{syncXattrName: xattrValBytes}
 	// First attempt to update with a bad cas value, and ensure we're getting the expected error
 	const deleteBody = false
-	_, err = col.WriteTombstoneWithXattrs(ctx, docID, 0, uint64(1234), updatedXattrs, deleteBody, nil)
+	_, err = col.WriteTombstoneWithXattrs(ctx, docID, 0, uint64(1234), updatedXattrs, nil, deleteBody, nil)
 	require.ErrorAs(t, err, &sgbucket.CasMismatchErr{})
 
-	_, err = col.WriteTombstoneWithXattrs(ctx, docID, 0, cas, updatedXattrs, deleteBody, nil)
+	_, err = col.WriteTombstoneWithXattrs(ctx, docID, 0, cas, updatedXattrs, nil, deleteBody, nil)
 	require.NoError(t, err)
 	verifyEmptyBodyAndSyncXattr(t, col, docID)
 }
@@ -645,14 +645,14 @@ func TestWriteCasWithXattrOnTombstone(t *testing.T) {
 
 	xattrs := map[string][]byte{syncXattrName: mustMarshalJSON(t, xattrVal)}
 	ctx := testCtx(t)
-	cas, err := col.WriteWithXattrs(ctx, docID, 0, 0, mustMarshalJSON(t, val), xattrs, nil)
+	cas, err := col.WriteWithXattrs(ctx, docID, 0, 0, mustMarshalJSON(t, val), xattrs, nil, nil)
 	require.NoError(t, err)
 
 	deleteCas, err := col.Remove(docID, cas)
 	require.NoError(t, err)
 	require.NotEqual(t, cas, deleteCas)
 
-	postDeleteCas, err := col.WriteWithXattrs(ctx, docID, 0, 0, mustMarshalJSON(t, val), xattrs, nil)
+	postDeleteCas, err := col.WriteWithXattrs(ctx, docID, 0, 0, mustMarshalJSON(t, val), xattrs, nil, nil)
 	require.ErrorAs(t, err, &sgbucket.CasMismatchErr{})
 	require.NotEqual(t, cas, postDeleteCas)
 }
@@ -857,7 +857,7 @@ func TestDeleteWithMetaXattr(t *testing.T) {
 	xattrVal[systemXattr] = mustMarshalJSON(t, systemXattrVal)
 
 	ctx := testCtx(t)
-	startingCas, err := col.WriteWithXattrs(ctx, docID, 0, 0, mustMarshalJSON(t, val), xattrVal, nil)
+	startingCas, err := col.WriteWithXattrs(ctx, docID, 0, 0, mustMarshalJSON(t, val), xattrVal, nil, nil)
 	require.NoError(t, err)
 
 	specifiedCas := CAS(1)

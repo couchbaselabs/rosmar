@@ -106,8 +106,8 @@ func (bucket *Bucket) IsError(err error, errorType sgbucket.DataStoreErrorType) 
 	}
 	switch errorType {
 	case sgbucket.KeyNotFoundError:
-		_, ok := err.(sgbucket.MissingError)
-		return ok
+		var missingError sgbucket.MissingError
+		return errors.As(err, &missingError)
 	default:
 		return false
 	}

@@ -13,6 +13,7 @@ import (
 	"database/sql"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -181,20 +182,43 @@ func (c *Collection) GetWithXattrs(_ context.Context, key string, xattrKeys []st
 	return rawDoc.Body, xattrs, rawDoc.Cas, nil
 }
 
-func (c *Collection) WriteWithXattrs(ctx context.Context, k string, exp uint32, cas uint64, value []byte, xattrValue map[string][]byte, opts *sgbucket.MutateInOptions) (casOut uint64, err error) {
+// Writes a document and updates xattr values. Fails on a CAS mismatch.
+// Parameters:
+// - k: The key (document ID)
+// - exp: Expiration timestamp (0 for never)
+// - cas: Expected CAS value
+// - opts: Options; use PreserveExpiry to avoid setting expiry
+// - value: The raw value to set, or nil to *leave unchanged*
+// - xattrValues: Each key represent a raw xattrs value to set, setting any of these values to nil will result in an error.
+// - xattrsToDelete: The names of xattrs to delete.
+func (c *Collection) WriteWithXattrs(ctx context.Context, k string, exp uint32, cas uint64, value []byte, xattrsValues map[string][]byte, xattrsToDelete []string, opts *sgbucket.MutateInOptions) (casOut uint64, err error) {
 	expP := ifelse(opts != nil && opts.PreserveExpiry, nil, &exp)
 	var vp *payload
 	if value != nil {
 		vp = &payload{marshaled: value}
 	}
-	xattrs := make(map[string]payload, len(xattrValue))
-	for xattrKey, xv := range xattrValue {
+	xattrs := make(map[string]payload, len(xattrsValues))
+	for xattrKey, xv := range xattrsValues {
+		if xv == nil {
+			return 0, fmt.Errorf("%s: %w", xattrKey, sgbucket.ErrNilXattrValue)
+		}
 		xattrs[xattrKey] = payload{marshaled: xv}
+	}
+	if cas == 0 && xattrsToDelete != nil {
+		return 0, sgbucket.ErrDeleteXattrOnDocumentInsert
+	} else if len(value) == 0 && len(xattrsValues) == 0 {
+		return 0, sgbucket.ErrNeedXattrs
+	}
+	for _, xattrKey := range xattrsToDelete {
+		if _, ok := xattrs[xattrKey]; ok {
+			return 0, fmt.Errorf("%s: %w", xattrKey, sgbucket.ErrUpsertAndDeleteSameXattr)
+		}
+		xattrs[xattrKey] = payload{}
 	}
 	return c.writeWithXattrs(k, vp, xattrs, &cas, expP, writeXattrOptions{}, opts)
 }
 
-// WriteUpdateWithXattr retrieves the existing doc from the c, invokes the callback to update
+// WriteUpdateWithXattrs retrieves the existing doc from the c, invokes the callback to update
 // the document, then writes the new document to the c.  Will repeat this process on CAS
 // failure.  If `previous` is provided, will pass those values to the callback on the first
 // iteration instead of retrieving from the c.
@@ -243,13 +267,22 @@ func (c *Collection) WriteUpdateWithXattrs(
 			opts.MacroExpansion = append(opts.MacroExpansion, updatedDoc.Spec...)
 		}
 		if updatedDoc.IsTombstone {
-			casOut, err = c.WriteTombstoneWithXattrs(ctx, key, exp, previous.Cas, updatedDoc.Xattrs, false, opts)
+			deleteBody := previous.Body != nil
+			casOut, err = c.WriteTombstoneWithXattrs(ctx, key, exp, previous.Cas, updatedDoc.Xattrs, updatedDoc.XattrsToDelete, deleteBody, opts)
 		} else {
-			// Update body and/or xattr:
-			casOut, err = c.WriteWithXattrs(ctx, key, exp, previous.Cas, updatedDoc.Doc, updatedDoc.Xattrs, opts)
+			cas := previous.Cas
+			if previous.IsTombstone {
+				if len(updatedDoc.XattrsToDelete) > 0 {
+					return 0, sgbucket.ErrDeleteXattrOnTombstone
+				}
+				casOut, err = c.WriteResurrectionWithXattrs(ctx, key, exp, updatedDoc.Doc, updatedDoc.Xattrs, opts)
+			} else {
+				// Update body and/or xattr:
+				casOut, err = c.WriteWithXattrs(ctx, key, exp, cas, updatedDoc.Doc, updatedDoc.Xattrs, updatedDoc.XattrsToDelete, opts)
+			}
 		}
 
-		if _, ok := err.(sgbucket.CasMismatchErr); !ok {
+		if _, ok := err.(sgbucket.CasMismatchErr); !ok && !errors.Is(err, sgbucket.ErrKeyExists) {
 			// Exit loop on success or failure
 			return casOut, err
 		}
@@ -284,14 +317,57 @@ func (c *Collection) WriteTombstoneWithXattrs(
 	exp uint32,
 	cas uint64,
 	xv map[string][]byte,
-	_ bool, // rosmar doesn't require different handling depending on whether body is present
+	xattrsToDelete []string,
+	deleteBody bool, // rosmar doesn't require different handling depending on whether body is present
 	opts *sgbucket.MutateInOptions,
 ) (casOut uint64, err error) {
+	if len(xv) == 0 {
+		return 0, sgbucket.ErrNeedXattrs
+	}
+	if !deleteBody && len(xattrsToDelete) == 0 && len(xv) == 0 {
+		return 0, sgbucket.ErrNeedXattrs
+	}
+
+	if cas == 0 && xattrsToDelete != nil {
+		return 0, sgbucket.ErrDeleteXattrOnDocumentInsert
+	}
+
 	xattrs := make(map[string]payload, len(xv))
 	for xattrKey, xattrVal := range xv {
+		if xattrVal == nil {
+			return 0, fmt.Errorf("%s: %w", xattrKey, sgbucket.ErrNilXattrValue)
+		}
 		xattrs[xattrKey] = payload{marshaled: xattrVal}
 	}
-	return c.writeWithXattrs(key, &payload{}, xattrs, &cas, &exp, writeXattrOptions{}, opts)
+	for _, xattrKey := range xattrsToDelete {
+		if _, ok := xattrs[xattrKey]; ok {
+			return 0, fmt.Errorf("%s: %w", xattrKey, sgbucket.ErrUpsertAndDeleteSameXattr)
+		}
+		xattrs[xattrKey] = payload{}
+	}
+	checkCas := &cas
+	requireExistingDoc := deleteBody || cas != 0
+	return c.writeWithXattrs(key, &payload{}, xattrs, checkCas, &exp, writeXattrOptions{requireExistingDoc: requireExistingDoc, deleteBody: deleteBody}, opts)
+}
+
+// WriteResurrectionWithXattrs creates an alive document with a given tombstone and xattrs.
+func (c *Collection) WriteResurrectionWithXattrs(ctx context.Context, k string, exp uint32, value []byte, xattrsValues map[string][]byte, opts *sgbucket.MutateInOptions) (casOut uint64, err error) {
+	if value == nil {
+		return 0, sgbucket.ErrNeedBody
+	}
+	expP := ifelse(opts != nil && opts.PreserveExpiry, nil, &exp)
+	var vp *payload
+	if value != nil {
+		vp = &payload{marshaled: value}
+	}
+	xattrs := make(map[string]payload, len(xattrsValues))
+	for xattrKey, xv := range xattrsValues {
+		if xv == nil {
+			return 0, fmt.Errorf("%s: %w", xattrKey, sgbucket.ErrNilXattrValue)
+		}
+		xattrs[xattrKey] = payload{marshaled: xv}
+	}
+	return c.writeWithXattrs(k, vp, xattrs, nil, expP, writeXattrOptions{insertDoc: true}, opts)
 }
 
 // Updates an xattr and deletes the body (making the doc a tombstone.)
@@ -323,12 +399,12 @@ func (c *Collection) getRawXattrs(txn *sql.Tx, key string) ([]byte, error) {
 
 // get doc's raw body and an xattr.
 func (c *Collection) getRawWithXattrs(key string, xattrKeys []string) (sgbucket.BucketDocument, error) {
-	row := c.db().QueryRow(`SELECT value, cas, xattrs FROM documents WHERE collection=?1 AND key=?2`, c.id, key)
+	row := c.db().QueryRow(`SELECT value, cas, xattrs, tombstone FROM documents WHERE collection=?1 AND key=?2`, c.id, key)
 	rawDoc := sgbucket.BucketDocument{
 		Xattrs: make(map[string][]byte, len(xattrKeys)),
 	}
 	var xattrs []byte
-	err := scan(row, &rawDoc.Body, &rawDoc.Cas, &xattrs)
+	err := scan(row, &rawDoc.Body, &rawDoc.Cas, &xattrs, &rawDoc.IsTombstone)
 	if err != nil {
 		return sgbucket.BucketDocument{}, remapKeyError(err, key)
 	}
@@ -377,27 +453,21 @@ func (c *Collection) DeleteWithXattrs(ctx context.Context, key string, xattrKeys
 
 // Option flags for writeWithXattr
 type writeXattrOptions struct {
-	insertDoc     bool // Create new doc; fail if it already exists
-	insertXattr   bool // Fail if `xattr` already exists
-	preserveXattr bool // Leave xattr value alone, just expand macros
-	isDelete      bool // Allow ressurecting a tombstone
-	deleteBody    bool // Delete the body along with updating tombstone
+	insertDoc          bool // Create new doc; fail if it already exists
+	insertXattr        bool // Fail if `xattr` already exists
+	preserveXattr      bool // Leave xattr value alone, just expand macros
+	isDelete           bool // Allow ressurecting a tombstone
+	requireExistingDoc bool // Return KeyNotFoundError if doc doesn't already exist
+	deleteBody         bool // Delete the body along with updating tombstone
 }
 
-// checkCasXattr checks the cas supplied against the current cas of the document. hasPreviousDocBody represents whether the existing document has a body. existingCas is the current Cas of the document (will be 0 if no document) and expectedCas is the expected value. Returns CasMismatchErr on an unsuccesful CAS check.
-func checkCasXattr(hasPreviousDocBody bool, existingCas, expectedCas *CAS, opts writeXattrOptions) error {
+// checkCasXattr checks the cas supplied against the current cas of the document. existingCas is the current Cas of the document (will be 0 if no document) and expectedCas is the expected value. Returns CasMismatchErr on an unsuccesful CAS check.
+func checkCasXattr(existingCas, expectedCas *CAS, opts writeXattrOptions) error {
 	// no cas supplied, nothing to check, this is different than zero when used with SetXattr
 	if expectedCas == nil {
 		return nil
 	}
 
-	// avoid a cas check if there is:
-	// 1. no previous body (could be xattrs)
-	// 2. we are writing a tombstone
-	// 3. we are not planning on writing a new body
-	if !hasPreviousDocBody && opts.isDelete && opts.deleteBody {
-		return nil
-	}
 	if *existingCas == *expectedCas {
 		return nil
 	}
@@ -439,16 +509,30 @@ func (c *Collection) writeWithXattrs(
 			c.id, key)
 		var prevCas CAS
 		if err := scan(row, &e.value, &e.isJSON, &prevCas, &e.exp, &e.xattrs, &wasTombstone); err == nil {
-			if wasTombstone == 1 {
+			if wasTombstone == 1 && (val != nil && !val.isNil()) {
+				// couchbase server can't perform a cas check on a tombstone so we return ErrKeyExists
+				if ifCas != nil && *ifCas != 0 {
+					return nil, sgbucket.ErrKeyExists
+				}
 				e.xattrs = nil // xattrs are cleared whenever resurrecting a tombstone
 			} else if opts.insertDoc {
 				return nil, sgbucket.ErrKeyExists
 			}
-		} else if err != sql.ErrNoRows {
+		} else if errors.Is(err, sql.ErrNoRows) {
+			if opts.requireExistingDoc {
+				return nil, sgbucket.MissingError{Key: key}
+			} else if ifCas != nil && *ifCas != 0 {
+				return nil, sgbucket.CasMismatchErr{Expected: *ifCas, Actual: 0}
+			}
+		} else {
 			return nil, remapKeyError(err, key)
 		}
 
-		err := checkCasXattr(e.value != nil, &prevCas, ifCas, opts)
+		if e.value == nil && opts.deleteBody && opts.requireExistingDoc {
+			return nil, fmt.Errorf("Calling deleteBody=true when the document is a tombstone: %w", sgbucket.MissingError{Key: key})
+		}
+
+		err := checkCasXattr(&prevCas, ifCas, opts)
 		if err != nil {
 			return nil, err
 		}
@@ -459,7 +543,6 @@ func (c *Collection) writeWithXattrs(
 				return nil, fmt.Errorf("document %q xattrs are unreadable: %w", key, err)
 			}
 		}
-
 		if val != nil {
 			if val.isNil() {
 				// Delete body:
@@ -526,7 +609,7 @@ func (c *Collection) writeWithXattrs(
 					delete(xattrs, xattrKey)
 					trace("\t\tDeleted doc %q xattr %s", key, xattrKey)
 				} else {
-					return nil, sgbucket.ErrPathNotFound
+					return nil, fmt.Errorf("%s: %w", xattrKey, sgbucket.ErrPathNotFound)
 				}
 			}
 		}
