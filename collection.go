@@ -12,6 +12,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strconv"
 	"sync"
@@ -438,10 +439,10 @@ func (c *Collection) Update(key string, exp Exp, callback sgbucket.UpdateFunc) (
 	traceEnter("Update", "%q, %d, ...", key, exp)
 	defer func() { traceExit("Update", err, "0x%x", casOut) }()
 	for {
-		var raw []byte
-		var cas CAS
-		if raw, cas, err = c.getRaw(c.db(), key); err != nil && !c.IsError(err, sgbucket.KeyNotFoundError) {
-			return
+		raw, cas, err := c.getRaw(c.db(), key)
+		var missingError sgbucket.MissingError
+		if err != nil && !errors.As(err, &missingError) {
+			return 0, err
 		}
 
 		var newRaw []byte
@@ -507,21 +508,6 @@ func (c *Collection) Incr(key string, amt, deflt uint64, exp Exp) (result uint64
 	})
 	traceExit("Incr", err, "%d", result)
 	return
-}
-
-//////// Interface TypedErrorStore
-
-func (c *Collection) IsError(err error, errorType sgbucket.DataStoreErrorType) bool {
-	if err == nil {
-		return false
-	}
-	switch errorType {
-	case sgbucket.KeyNotFoundError:
-		_, ok := err.(sgbucket.MissingError)
-		return ok
-	default:
-		return false
-	}
 }
 
 //////// Interface BucketStoreFeatureIsSupported

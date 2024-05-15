@@ -11,6 +11,7 @@ package rosmar
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -73,7 +74,8 @@ func (c *Collection) subdocWrite(key string, subdocKey string, cas CAS, value an
 		// Get doc (if it exists) to change sub doc value in
 		var fullDoc map[string]any
 		casOut, err = c.Get(key, &fullDoc)
-		if err != nil && !(!insert && c.IsError(err, sgbucket.KeyNotFoundError)) {
+		var missingError sgbucket.MissingError
+		if err != nil && !(!insert && errors.As(err, &missingError)) {
 			return 0, err // SubdocInsert should fail if doc doesn't exist; WriteSubDoc doesn't
 		}
 		if cas != 0 && casOut != cas {
