@@ -1,7 +1,7 @@
 github.com/chzyer/logex v1.1.10/go.mod h1:+Ywpsq7O8HXn0nuIou7OrIPyXbp3wmkHB+jjWRnGsAI=
 github.com/chzyer/test v0.0.0-20180213035817-a1ea475d72b1/go.mod h1:Q3SI9o4m/ZMnBNeIyt5eFwwo7qiLfzFZmjNmxjkiQlU=
-github.com/couchbase/sg-bucket v0.0.0-20240515192422-65113dc10339 h1:19edcUy6ESglvcYHO6CpDgHLTH8xYbXN62HB7hT1edQ=
-github.com/couchbase/sg-bucket v0.0.0-20240515192422-65113dc10339/go.mod h1:IQisEdcLRfS/pjSgmqG/8gerVm0Q7GrvpQtMIZ7oYt4=
+github.com/couchbase/sg-bucket v0.0.0-20240516142514-d65d1f2192a1 h1:saVwgFjPGNvDf8rM88C/RFsgyg370P1DJOVCy2+lqUA=
+github.com/couchbase/sg-bucket v0.0.0-20240516142514-d65d1f2192a1/go.mod h1:IQisEdcLRfS/pjSgmqG/8gerVm0Q7GrvpQtMIZ7oYt4=
 github.com/davecgh/go-spew v1.1.0/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
 github.com/davecgh/go-spew v1.1.1 h1:vj9j/u1bqnvCEfJOwUhtlOARqs3+rkHYY13jYWTU97c=
 github.com/davecgh/go-spew v1.1.1/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
