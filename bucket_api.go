@@ -100,19 +100,6 @@ func (bucket *Bucket) IsSupported(feature sgbucket.BucketStoreFeature) bool {
 	}
 }
 
-func (bucket *Bucket) IsError(err error, errorType sgbucket.DataStoreErrorType) bool {
-	if err == nil {
-		return false
-	}
-	switch errorType {
-	case sgbucket.KeyNotFoundError:
-		var missingError sgbucket.MissingError
-		return errors.As(err, &missingError)
-	default:
-		return false
-	}
-}
-
 func (bucket *Bucket) GetMaxVbno() (uint16, error) {
 	return kNumVbuckets, nil
 }
