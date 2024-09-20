@@ -591,7 +591,7 @@ func (c *Collection) setLastCas(txn *sql.Tx, cas CAS) (err error) {
 func (c *Collection) withNewCas(fn func(txn *sql.Tx, newCas CAS) (*event, error)) error {
 	var e *event
 	err := c.bucket.inTransaction(func(txn *sql.Tx) error {
-		newCas := uint64(c.bucket.hlc.Now())
+		newCas := uint64(hlc.Now())
 		var err error
 		e, err = fn(txn, newCas)
 		if err != nil {

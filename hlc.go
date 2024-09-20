@@ -13,6 +13,12 @@ import (
 	"time"
 )
 
+var hlc *hybridLogicalClock
+
+func init() {
+	hlc = NewHybridLogicalClock(0)
+}
+
 type timestamp uint64
 
 // hybridLogicalClock is a hybrid logical clock implementation for rosmar that produces timestamps that will always be increasing regardless of clock changes.
@@ -40,6 +46,14 @@ func NewHybridLogicalClock(lastTime timestamp) *hybridLogicalClock {
 	return &hybridLogicalClock{
 		highestTime: uint64(lastTime),
 		clock:       &systemClock{},
+	}
+}
+
+func (c *hybridLogicalClock) updateLatestTime(lastTime timestamp) {
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+	if uint64(lastTime) > c.highestTime {
+		c.highestTime = uint64(lastTime)
 	}
 }
 

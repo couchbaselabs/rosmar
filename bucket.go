@@ -42,7 +42,6 @@ type Bucket struct {
 	serial          uint32         // Serial number for logging
 	inMemory        bool           // True if it's an in-memory database
 	closed          bool           // represents state when it is closed
-	hlc             *hybridLogicalClock
 }
 
 type collectionsMap = map[sgbucket.DataStoreNameImpl]*Collection
@@ -196,7 +195,7 @@ func OpenBucket(urlStr string, bucketName string, mode OpenMode) (b *Bucket, err
 		return nil, err
 	}
 
-	bucket.hlc = NewHybridLogicalClock(bucket.getLastTimestamp())
+	hlc.updateLatestTime(bucket.getLastTimestamp())
 
 	exists, bucketCopy := registerBucket(bucket)
 	// someone else beat registered the bucket in the registry, that's OK we'll close ours
@@ -388,7 +387,6 @@ func (b *Bucket) copy() *Bucket {
 		expManager:      b.expManager,
 		serial:          b.serial,
 		inMemory:        b.inMemory,
-		hlc:             b.hlc,
 	}
 	return r
 }
