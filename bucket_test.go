@@ -41,10 +41,14 @@ func testBucketPath(t *testing.T) string {
 }
 
 func makeTestBucket(t *testing.T) *Bucket {
+	return makeTestBucketWithName(t, strings.ToLower(t.Name()))
+}
+
+func makeTestBucketWithName(t *testing.T, name string) *Bucket {
 	LoggingCallback = func(level LogLevel, fmt string, args ...any) {
 		t.Logf(logLevelNamesPrint[level]+fmt, args...)
 	}
-	bucket, err := OpenBucket(uriFromPath(testBucketPath(t)), strings.ToLower(t.Name()), CreateNew)
+	bucket, err := OpenBucket(uriFromPath(testBucketPath(t)), name, CreateNew)
 	require.NoError(t, err)
 	t.Cleanup(func() {
 		assert.NoError(t, bucket.CloseAndDelete(testCtx(t)))
