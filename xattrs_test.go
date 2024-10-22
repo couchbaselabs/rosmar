@@ -1740,3 +1740,57 @@ func requireDocNotFoundError(t testing.TB, err error) {
 func requireDocFoundError(t testing.TB, err error) {
 	require.ErrorIs(t, err, sgbucket.ErrKeyExists)
 }
+
+func TestGetAllXattrs(t *testing.T) {
+	testCases := []struct {
+		name   string
+		body   []byte
+		xattrs map[string][]byte
+	}{
+		{
+			name:   "no doc",
+			body:   nil,
+			xattrs: nil,
+		},
+		{
+			name:   "doc without xattrs",
+			body:   []byte(`{"foo": "bar"}`),
+			xattrs: nil,
+		},
+		{
+			name: "doc with xattrs",
+			body: []byte(`{"foo": "bar"}`),
+			xattrs: map[string][]byte{
+				"_xattr1": []byte(`{"a": "b"}`),
+				"xattr2":  []byte(`{"c": "d"}`),
+			},
+		},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			col := makeTestBucket(t).DefaultDataStore().(*Collection)
+			docID := t.Name()
+			ctx := testCtx(t)
+			var cas uint64
+			if tc.body != nil {
+				var err error
+				cas, err = col.WriteWithXattrs(ctx, docID, 0, 0, tc.body, tc.xattrs, nil, nil)
+				require.NoError(t, err)
+			}
+			xattrs, outputCas, err := col.GetAllXattrs(docID)
+			if tc.body == nil {
+				require.ErrorAs(t, err, &sgbucket.MissingError{})
+				require.Equal(t, uint64(0), outputCas)
+				require.Nil(t, xattrs)
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, cas, outputCas)
+			require.Len(t, xattrs, len(tc.xattrs))
+			for k, v := range tc.xattrs {
+				require.JSONEq(t, string(v), string(xattrs[k]))
+			}
+		})
+	}
+
+}

@@ -9,6 +9,7 @@
 package rosmar
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/binary"
@@ -743,4 +744,33 @@ func (e *event) expandXattrMacros(xattrKey string, xattr any, mutateOpts *sgbuck
 		}
 	}
 	return nil
+}
+
+// GetAllXattrs returns all xattrs for a document and the associated cas value. This is not a function that exists on couchbase server, but is used for a test XDCR implementation.
+func (c *Collection) GetAllXattrs(key string) (map[string][]byte, uint64, error) {
+	row := c.db().QueryRow(`SELECT cas, xattrs FROM documents WHERE collection=?1 AND key=?2`, c.id, key)
+	var rawXattrBytes []byte
+	var cas CAS
+	err := scan(row, &cas, &rawXattrBytes)
+	if err != nil {
+		return nil, 0, remapKeyError(err, key)
+	}
+	if len(rawXattrBytes) == 0 || bytes.Equal(rawXattrBytes, []byte("null")) {
+		return nil, cas, nil
+	}
+	var rawXattrs map[string]json.RawMessage
+	err = json.Unmarshal(rawXattrBytes, &rawXattrs)
+	if err != nil {
+		return nil, 0, fmt.Errorf("document %q xattrs are unreadable: %w %s", key, err, rawXattrs)
+	}
+	xattrs := make(map[string][]byte, len(rawXattrs))
+	for k, v := range rawXattrs {
+		var xattr []byte
+		err := decodeRaw(v, &xattr)
+		if err != nil {
+			return nil, 0, err
+		}
+		xattrs[k] = xattr
+	}
+	return xattrs, cas, nil
 }
