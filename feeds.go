@@ -132,8 +132,8 @@ func (c *Collection) StartDCPFeed(
 }
 
 func (c *Collection) enqueueBackfillEvents(startCas uint64, keysOnly bool, q *eventQueue) error {
-	sql := fmt.Sprintf(`SELECT key, %s, %s, isJSON, cas FROM documents
-						WHERE collection=?1 AND cas >= ?2 AND value NOT NULL
+	sql := fmt.Sprintf(`SELECT key, %s, %s, isJSON, cas, tombstone FROM documents
+						WHERE collection=?1 AND cas >= ?2 
 						ORDER BY cas`,
 		ifelse(keysOnly, `null`, `value`),
 		ifelse(keysOnly, `null`, `xattrs`))
@@ -143,7 +143,7 @@ func (c *Collection) enqueueBackfillEvents(startCas uint64, keysOnly bool, q *ev
 	}
 	e := event{}
 	for rows.Next() {
-		if err := rows.Scan(&e.key, &e.value, &e.xattrs, &e.isJSON, &e.cas); err != nil {
+		if err := rows.Scan(&e.key, &e.value, &e.xattrs, &e.isJSON, &e.cas, &e.isDeletion); err != nil {
 			return err
 		}
 		q.push(e.asFeedEvent(c.GetCollectionID()))
