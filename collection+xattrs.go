@@ -163,7 +163,8 @@ func (c *Collection) GetWithXattrs(_ context.Context, key string, xattrKeys []st
 	}
 
 	if rawDoc.Body == nil && len(rawDoc.Xattrs) == 0 {
-		return nil, nil, 0, sgbucket.MissingError{Key: key}
+		// Doc exists as tombstone, but not with any of the requested xattrs
+		return nil, nil, rawDoc.Cas, sgbucket.MissingError{Key: key}
 	}
 
 	xattrs = make(map[string][]byte, len(xattrKeys))
