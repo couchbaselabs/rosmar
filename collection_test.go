@@ -1,12 +1,13 @@
-//  Copyright (c) 2013 Couchbase, Inc.
-//  Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file
-//  except in compliance with the License. You may obtain a copy of the License at
-//    http://www.apache.org/licenses/LICENSE-2.0
-//  Unless required by applicable law or agreed to in writing, software distributed under the
-//  License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND,
-//  either express or implied. See the License for the specific language governing permissions
-//  and limitations under the License.
-
+// Copyright (c) 2013 Couchbase, Inc.
+// Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file
+// except in compliance with the License. You may obtain a copy of the License at
+//
+//	http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software distributed under the
+// License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND,
+// either express or implied. See the License for the specific language governing permissions
+// and limitations under the License.
 package rosmar
 
 import (
@@ -24,6 +25,7 @@ import (
 )
 
 const syncXattrName = "_sync" // name of xattr used for sync gateway metadata
+const vvXattrName = "_vv"     // name of xattr used for HLV
 
 func TestDeleteThenAdd(t *testing.T) {
 	ensureNoLeaks(t)
@@ -568,6 +570,7 @@ func TestWriteWithXattrNoBody(t *testing.T) {
 
 	require.NoError(t, json.Unmarshal(getXattrs[syncXattrName], &fetchedXattr))
 	require.Equal(t, updatedXattrVal, fetchedXattr)
+
 }
 
 func TestWriteCasWithXattrNoXattr(t *testing.T) {
@@ -652,9 +655,15 @@ func TestWriteCasWithXattrOnTombstone(t *testing.T) {
 	require.NoError(t, err)
 	require.NotEqual(t, cas, deleteCas)
 
-	postDeleteCas, err := col.WriteWithXattrs(ctx, docID, 0, 0, mustMarshalJSON(t, val), xattrs, nil, nil)
+	_, err = col.WriteWithXattrs(ctx, docID, 0, 0, mustMarshalJSON(t, val), xattrs, nil, nil)
 	require.ErrorAs(t, err, &sgbucket.CasMismatchErr{})
-	require.NotEqual(t, cas, postDeleteCas)
+
+	// Verify attempted retrieval of non-existent xattrs still returns the correct cas
+	retrievedVal, retrievedXattrs, getCas, err := col.GetWithXattrs(ctx, docID, []string{vvXattrName})
+	require.ErrorAs(t, err, &sgbucket.MissingError{})
+	require.Nil(t, retrievedVal)
+	require.Equal(t, 0, len(retrievedXattrs))
+	require.Equal(t, deleteCas, getCas)
 }
 
 func verifyEmptyBodyAndSyncXattr(t *testing.T, store sgbucket.DataStore, key string) {

@@ -163,7 +163,8 @@ func (c *Collection) GetWithXattrs(_ context.Context, key string, xattrKeys []st
 	}
 
 	if rawDoc.Body == nil && len(rawDoc.Xattrs) == 0 {
-		return nil, nil, 0, sgbucket.MissingError{Key: key}
+		// Doc exists as tombstone, but not with any of the requested xattrs
+		return nil, nil, rawDoc.Cas, sgbucket.MissingError{Key: key}
 	}
 
 	xattrs = make(map[string][]byte, len(xattrKeys))
@@ -476,12 +477,12 @@ func checkCasXattr(existingCas, expectedCas *CAS, opts writeXattrOptions) error 
 
 // Swiss Army knife method for modifying a document xattr, with or without changing the body.
 func (c *Collection) writeWithXattrs(
-	key string, // doc key
-	val *payload, // if non-nil, updates doc body; a nil payload means delete
-	xattrsPayload map[string]payload, // xattr key/val; a nil payload deletes the xattr
-	ifCas *CAS, // if non-nil, must match current CAS; 0 for insert
-	exp *Exp, // if non-nil, sets expiration to this value
-	opts writeXattrOptions, // option flags
+	key string,                           // doc key
+	val *payload,                         // if non-nil, updates doc body; a nil payload means delete
+	xattrsPayload map[string]payload,     // xattr key/val; a nil payload deletes the xattr
+	ifCas *CAS,                           // if non-nil, must match current CAS; 0 for insert
+	exp *Exp,                             // if non-nil, sets expiration to this value
+	opts writeXattrOptions,               // option flags
 	mutateOpts *sgbucket.MutateInOptions, // expiry and macro expansion options
 ) (casOut CAS, err error) {
 	parsedXattrs := make(map[string]any, len(xattrsPayload))
