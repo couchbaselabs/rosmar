@@ -28,6 +28,7 @@ CREATE TABLE documents (
 	isJSON 		integer default true,
 	value 		blob, 				/* document body, usually JSON; null if deleted */
 	tombstone 	integer default 0,
+	revSeqNo 	integer default 0,
 	UNIQUE (collection, key) );
 
 CREATE INDEX docs_cas ON documents (collection, cas);

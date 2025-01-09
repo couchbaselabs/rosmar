@@ -22,6 +22,8 @@ import (
 
 type semiParsedXattrs = map[string]json.RawMessage
 
+const virtualXattrRevSeqNo = "$document.revid"
+
 // ////// SGBUCKET XATTR STORE INTERFACE
 func (c *Collection) GetXattrs(
 	_ context.Context,
@@ -51,9 +53,10 @@ func (c *Collection) writeWithMeta(key string, body []byte, xattrs []byte, oldCa
 	var e *event
 	err := c.bucket.inTransaction(func(txn *sql.Tx) error {
 		var prevCas CAS
-		row := txn.QueryRow(`SELECT cas FROM documents WHERE collection=?1 AND key=?2`,
+		var revSeqNo uint64
+		row := txn.QueryRow(`SELECT cas, revSeqNo FROM documents WHERE collection=?1 AND key=?2`,
 			c.id, key)
-		err := scan(row, &prevCas)
+		err := scan(row, &prevCas, &revSeqNo)
 		if err != nil && err != sql.ErrNoRows {
 			return remapKeyError(err, key)
 		}
@@ -69,7 +72,7 @@ func (c *Collection) writeWithMeta(key string, body []byte, xattrs []byte, oldCa
 			isDeletion: isDeletion,
 			isJSON:     isJSON,
 		}
-		return c.storeDocument(txn, e)
+		return c.storeDocument(txn, e, revSeqNo)
 	})
 
 	if err != nil {
@@ -90,17 +93,17 @@ func (c *Collection) DeleteWithMeta(_ context.Context, key string, oldCas CAS, n
 }
 
 // storeDocument performs a write to the underlying sqlite database of a document from a given event.
-func (c *Collection) storeDocument(txn *sql.Tx, e *event) error {
+func (c *Collection) storeDocument(txn *sql.Tx, e *event, revSeqNo uint64) error {
 	tombstone := 0
 	if e.isDeletion {
 		tombstone = 1
 	}
-	_, err := txn.Exec(`INSERT INTO documents(collection,key,value,isJSON,cas,exp,xattrs,tombstone)
-							VALUES (?1,?2,?3,?4,?5,?6,?7,?8)
+	_, err := txn.Exec(`INSERT INTO documents(collection,key,value,isJSON,cas,exp,xattrs,tombstone,revSeqNo)
+							VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)
 							ON CONFLICT (collection,key) DO
-								UPDATE SET value=?3, isJSON=?4, cas=?5, exp=?6, xattrs=?7,tombstone=?8
+								UPDATE SET value=?3, isJSON=?4, cas=?5, exp=?6, xattrs=?7,tombstone=?8, revSeqNo=?9
 								WHERE collection=?1 AND key=?2`,
-		c.id, e.key, e.value, e.isJSON, e.cas, e.exp, e.xattrs, tombstone)
+		c.id, e.key, e.value, e.isJSON, e.cas, e.exp, e.xattrs, tombstone, revSeqNo)
 	return err
 }
 
@@ -138,9 +141,10 @@ func (c *Collection) DeleteSubDocPaths(
 			key: key,
 			cas: newCas,
 		}
-		row := txn.QueryRow(`SELECT value, xattrs FROM documents WHERE collection=?1 AND key=?2`, c.id, key)
+		var revSeqNo uint64
+		row := txn.QueryRow(`SELECT value, xattrs, revSeqNo FROM documents WHERE collection=?1 AND key=?2`, c.id, key)
 		var rawXattrs []byte
-		err := scan(row, &e.value, &rawXattrs)
+		err := scan(row, &e.value, &rawXattrs, &revSeqNo)
 		if err != nil {
 			return nil, remapKeyError(err, key)
 		}
@@ -148,7 +152,7 @@ func (c *Collection) DeleteSubDocPaths(
 			return nil, err
 		}
 		e.xattrs = rawXattrs
-		_, err = txn.Exec(`UPDATE documents SET xattrs=?1, cas=?2 WHERE collection=?2 AND key=?3`, rawXattrs, newCas, c.id, key)
+		_, err = txn.Exec(`UPDATE documents SET xattrs=?1, cas=?2, revSeqNo=?3 WHERE collection=?4 AND key=?5`, rawXattrs, newCas, revSeqNo, c.id, key)
 		return e, err
 	})
 	traceExit("DeleteXattrs", err, "ok")
@@ -400,32 +404,36 @@ func (c *Collection) getRawXattrs(txn *sql.Tx, key string) ([]byte, error) {
 
 // get doc's raw body and an xattr.
 func (c *Collection) getRawWithXattrs(key string, xattrKeys []string) (sgbucket.BucketDocument, error) {
-	row := c.db().QueryRow(`SELECT value, cas, xattrs, tombstone FROM documents WHERE collection=?1 AND key=?2`, c.id, key)
+	var revSeqNo int64
+	row := c.db().QueryRow(`SELECT value, cas, xattrs, tombstone, revSeqNo FROM documents WHERE collection=?1 AND key=?2`, c.id, key)
 	rawDoc := sgbucket.BucketDocument{
 		Xattrs: make(map[string][]byte, len(xattrKeys)),
 	}
 	var xattrs []byte
-	err := scan(row, &rawDoc.Body, &rawDoc.Cas, &xattrs, &rawDoc.IsTombstone)
+	err := scan(row, &rawDoc.Body, &rawDoc.Cas, &xattrs, &rawDoc.IsTombstone, &revSeqNo)
 	if err != nil {
 		return sgbucket.BucketDocument{}, remapKeyError(err, key)
 	}
+	var xattrMap map[string]json.RawMessage
 	if xattrs != nil {
-		var xattrMap map[string]json.RawMessage
 		err = json.Unmarshal(xattrs, &xattrMap)
 		if err != nil {
 			return sgbucket.BucketDocument{}, fmt.Errorf("document %q xattrs are unreadable: %w %s", key, err, xattrs)
 		}
-		for _, xattrKey := range xattrKeys {
-			if xattrKey == "$document" {
-				rawDoc.Xattrs[xattrKey] = []byte(fmt.Sprintf(`{"value_crc32c":%q}`, encodedCRC32c(rawDoc.Body)))
-				continue
-			}
-			val, ok := xattrMap[xattrKey]
-			if !ok {
-				continue
-			}
-			rawDoc.Xattrs[xattrKey] = val
+	}
+	for _, xattrKey := range xattrKeys {
+		if xattrKey == "$document" {
+			rawDoc.Xattrs[xattrKey] = []byte(fmt.Sprintf(`{"value_crc32c":%q}`, encodedCRC32c(rawDoc.Body)))
+			continue
+		} else if xattrKey == virtualXattrRevSeqNo {
+			rawDoc.Xattrs[xattrKey] = []byte(fmt.Sprintf(`"%d"`, revSeqNo))
+			continue
 		}
+		val, ok := xattrMap[xattrKey]
+		if !ok {
+			continue
+		}
+		rawDoc.Xattrs[xattrKey] = val
 	}
 	return rawDoc, nil
 }
@@ -439,14 +447,16 @@ func (c *Collection) DeleteWithXattrs(ctx context.Context, key string, xattrKeys
 			isDeletion: true,
 		}
 		var bodyExists bool
-		row := txn.QueryRow(`SELECT xattrs, value NOT NULL FROM documents WHERE collection=?1 AND key=?2`, c.id, key)
-		err := scan(row, &e.xattrs, &bodyExists)
+		var revSeqNo int64
+		row := txn.QueryRow(`SELECT xattrs, value NOT NULL, revSeqNo FROM documents WHERE collection=?1 AND key=?2`, c.id, key)
+		err := scan(row, &e.xattrs, &bodyExists, &revSeqNo)
 		if err != nil {
 			return nil, remapKeyError(err, key)
 		} else if e.xattrs, err = removeXattrs(e.xattrs, xattrKeys...); err != nil {
 			return nil, err
 		}
-		_, err = txn.Exec(`UPDATE documents SET value=null, xattrs=?1, cas=?2 WHERE collection=?3 AND key=?4`, e.xattrs, newCas, c.id, key)
+		revSeqNo++
+		_, err = txn.Exec(`UPDATE documents SET value=null, xattrs=?1, cas=?2, revSeqNo=?3 WHERE collection=?4 AND key=?5`, e.xattrs, newCas, c.id, revSeqNo, key)
 		return e, err
 	})
 	return err
@@ -506,10 +516,11 @@ func (c *Collection) writeWithXattrs(
 		}
 		var wasTombstone int
 		// First read the existing doc, if any:
-		row := txn.QueryRow(`SELECT value, isJSON, cas, exp, xattrs, tombstone FROM documents WHERE collection=?1 AND key=?2`,
+		row := txn.QueryRow(`SELECT value, isJSON, cas, exp, xattrs, tombstone, revSeqNo FROM documents WHERE collection=?1 AND key=?2`,
 			c.id, key)
 		var prevCas CAS
-		if err := scan(row, &e.value, &e.isJSON, &prevCas, &e.exp, &e.xattrs, &wasTombstone); err == nil {
+		var revSeqNo uint64
+		if err := scan(row, &e.value, &e.isJSON, &prevCas, &e.exp, &e.xattrs, &wasTombstone, &revSeqNo); err == nil {
 			if wasTombstone == 1 && (val != nil && !val.isNil()) {
 				// couchbase server can't perform a cas check on a tombstone so we return ErrKeyExists
 				if ifCas != nil && *ifCas != 0 {
@@ -528,7 +539,7 @@ func (c *Collection) writeWithXattrs(
 		} else {
 			return nil, remapKeyError(err, key)
 		}
-
+		revSeqNo++
 		if e.value == nil && opts.deleteBody && opts.requireExistingDoc {
 			return nil, fmt.Errorf("Calling deleteBody=true when the document is a tombstone: %w", sgbucket.MissingError{Key: key})
 		}
@@ -625,7 +636,7 @@ func (c *Collection) writeWithXattrs(
 			e.exp = absoluteExpiry(*exp)
 		}
 
-		err = c.storeDocument(txn, e)
+		err = c.storeDocument(txn, e, revSeqNo)
 		if err != nil {
 			return nil, err
 		}

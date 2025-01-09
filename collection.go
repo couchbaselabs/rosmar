@@ -97,7 +97,7 @@ func (c *Collection) exists(q queryable, key string) (exists bool, err error) {
 
 func (c *Collection) GetRaw(key string) (val []byte, cas CAS, err error) {
 	traceEnter("GetRaw", "%q", key)
-	val, cas, err = c.getRaw(c.db(), key)
+	val, cas, _, err = c.getRaw(c.db(), key)
 	traceExit("GetRaw", err, "cas=0x%x, val %s", cas, val)
 	return
 }
@@ -110,9 +110,9 @@ func (c *Collection) isTombstone(q queryable, key string) bool {
 	return err == nil
 }
 
-func (c *Collection) getRaw(q queryable, key string) (val []byte, cas CAS, err error) {
-	row := q.QueryRow("SELECT value, cas FROM documents WHERE collection=? AND key=?", c.id, key)
-	if err = scan(row, &val, &cas); err != nil {
+func (c *Collection) getRaw(q queryable, key string) (val []byte, cas CAS, revSeqNo int64, err error) {
+	row := q.QueryRow("SELECT value, cas, revSeqNo FROM documents WHERE collection=? AND key=?", c.id, key)
+	if err = scan(row, &val, &cas, &revSeqNo); err != nil {
 		err = remapKeyError(err, key)
 	} else if val == nil {
 		err = sgbucket.MissingError{Key: key}
@@ -124,9 +124,11 @@ func (c *Collection) GetAndTouchRaw(key string, exp Exp) (val []byte, cas CAS, e
 	traceEnter("GetAndTouchRaw", "%q, %d", key, exp)
 	err = c.withNewCas(func(txn *sql.Tx, newCas CAS) (e *event, err error) {
 		exp = absoluteExpiry(exp)
-		val, cas, err = c.getRaw(txn, key)
+		var revSeqNo int64
+		val, cas, revSeqNo, err = c.getRaw(txn, key)
 		if err == nil {
-			_, err = txn.Exec(`UPDATE documents SET exp=?1 WHERE key=?2`, exp, key)
+			revSeqNo++
+			_, err = txn.Exec(`UPDATE documents SET exp=?1, revSeqNo=?2 WHERE key=?3`, exp, revSeqNo, key)
 		}
 		return
 	})
@@ -150,11 +152,11 @@ func (c *Collection) add(key string, exp Exp, val []byte, isJSON bool) (added bo
 	err = c.withNewCas(func(txn *sql.Tx, newCas CAS) (e *event, err error) {
 		exp = absoluteExpiry(exp)
 		result, err := txn.Exec(
-			`INSERT INTO documents (collection,key,value,cas,exp,isJSON) VALUES (?1,?2,?3,?4,?5,?6)
+			`INSERT INTO documents (collection,key,value,cas,exp,isJSON, revSeqNo) VALUES (?1,?2,?3,?4,?5,?6,?7)
 				ON CONFLICT(collection,key) DO
 					UPDATE SET value=?3, xattrs=null, cas=?4, exp=?5, isJSON=?6
 					WHERE tombstone != 0`,
-			c.id, key, val, newCas, exp, isJSON)
+			c.id, key, val, newCas, exp, isJSON, 1, 1)
 		if err != nil {
 			return
 		}
@@ -212,9 +214,10 @@ func (c *Collection) _set(txn *sql.Tx, key string, exp Exp, opts *sgbucket.Upser
 	exists := false
 	hadValue := false
 	var oldExp Exp = 0
-	row := txn.QueryRow(`SELECT value NOT NULL, xattrs, exp FROM documents
+	revSeqNo := 0
+	row := txn.QueryRow(`SELECT value NOT NULL, xattrs, exp, revSeqNo FROM documents
 						WHERE collection=? AND key=?`, c.id, key)
-	if err = scan(row, &hadValue, &xattrs, &oldExp); err == nil {
+	if err = scan(row, &hadValue, &xattrs, &oldExp, &revSeqNo); err == nil {
 		exists = true
 		if !hadValue {
 			xattrs = nil // xattrs are cleared whenever resurrecting a tombstone
@@ -223,6 +226,7 @@ func (c *Collection) _set(txn *sql.Tx, key string, exp Exp, opts *sgbucket.Upser
 		err = remapKeyError(err, key)
 		return
 	}
+	revSeqNo++
 
 	// Now write the new state:
 	var stmt string
@@ -230,13 +234,13 @@ func (c *Collection) _set(txn *sql.Tx, key string, exp Exp, opts *sgbucket.Upser
 		if opts != nil && opts.PreserveExpiry {
 			exp = oldExp
 		}
-		stmt = `UPDATE documents SET value=?3, xattrs=?4, cas=?5, exp=?6, isJSON=?7
+		stmt = `UPDATE documents SET value=?3, xattrs=?4, cas=?5, exp=?6, isJSON=?7, revSeqNo=?8
 				WHERE collection=?1 AND key=?2`
 	} else {
-		stmt = `INSERT INTO documents (collection,key,value,xattrs,cas,exp,isJSON)
-				VALUES (?1,?2,?3,?4,?5,?6,?7)`
+		stmt = `INSERT INTO documents (collection,key,value,xattrs,cas,exp,isJSON,revSeqNo)
+				VALUES (?1,?2,?3,?4,?5,?6,?7,?8)`
 	}
-	_, err = txn.Exec(stmt, c.id, key, val, xattrs, newCas, exp, isJSON)
+	_, err = txn.Exec(stmt, c.id, key, val, xattrs, newCas, exp, isJSON, revSeqNo)
 	return
 }
 
@@ -250,7 +254,7 @@ func (c *Collection) Get(key string, outVal any) (cas CAS, err error) {
 }
 
 func (c *Collection) get(q queryable, key string, outVal any) (cas CAS, err error) {
-	raw, cas, err := c.getRaw(q, key)
+	raw, cas, _, err := c.getRaw(q, key)
 	if err == nil {
 		err = decodeRaw(raw, outVal)
 	}
@@ -309,38 +313,44 @@ func (c *Collection) WriteCas(key string, exp Exp, cas CAS, val any, opt sgbucke
 
 	err = c.withNewCas(func(txn *sql.Tx, newCas CAS) (*event, error) {
 		wasTombstone := false
+		revSeqNo := 0
 		if cas != 0 {
-			wasTombstone = c.isTombstone(txn, key)
+			row := txn.QueryRow("SELECT revSeqNo, tombstone FROM documents WHERE collection=? AND key=?", c.id, key)
+			err = scan(row, &revSeqNo, &wasTombstone)
+			if err != nil {
+				return nil, remapKeyError(err, key)
+			}
 		}
+		revSeqNo++
 		exp = absoluteExpiry(exp)
 		var sql string
 		if (opt & sgbucket.Append) != 0 {
 			// Append:
-			sql = `UPDATE documents SET value=value || ?1, cas=?2, exp=?6, isJSON=?7,
+			sql = `UPDATE documents SET value=value || ?1, cas=?2, exp=?6, isJSON=?7,revSeqNo=?8,
 						xattrs=iif(tombstone != 0, null, xattrs)
 				   WHERE collection=?3 AND key=?4 AND cas=?5`
 		} else if (opt&sgbucket.AddOnly) != 0 || cas == 0 {
 			// Insert, but fall back to Update if the doc is a tombstone
-			sql = `INSERT INTO documents (collection, key, value, cas, exp, isJSON) VALUES(?3,?4,?1,?2,?6,?7)
+			sql = `INSERT INTO documents (collection, key, value, cas, exp, isJSON,revSeqNo) VALUES(?3,?4,?1,?2,?6,?7,?8)
 					ON CONFLICT(collection,key) DO
-						UPDATE SET value=?1, xattrs=null, cas=?2, exp=?6, isJSON=?7, tombstone=0
+						UPDATE SET value=?1, xattrs=null, cas=?2, exp=?6, isJSON=?7, tombstone=0, revSeqNo=?8
 						WHERE tombstone == 1`
 			if !wasTombstone && cas != 0 {
 				sql += ` AND cas=?5`
 			}
 		} else {
 			// Regular write:
-			sql = `UPDATE documents SET value=?1, cas=?2, exp=?6, isJSON=?7,
+			sql = `UPDATE documents SET value=?1, cas=?2, exp=?6, isJSON=?7, revSeqNo=?8,
 						xattrs=iif(tombstone != 0, null, xattrs)
 				   WHERE collection=?3 AND key=?4 AND cas=?5`
 		}
-		result, err := txn.Exec(sql, raw, newCas, c.id, key, cas, exp, isJSON)
+		result, err := txn.Exec(sql, raw, newCas, c.id, key, cas, exp, isJSON, revSeqNo)
 		if err != nil {
 			return nil, err
 		}
 		if nRows, _ := result.RowsAffected(); nRows == 0 {
 			// SQLite didn't insert/update anything. Why not?
-			if _, existingCas, err2 := c.getRaw(txn, key); err2 == nil {
+			if _, existingCas, _, err2 := c.getRaw(txn, key); err2 == nil {
 				if opt&sgbucket.AddOnly != 0 {
 					err = sgbucket.ErrKeyExists
 				} else {
@@ -392,14 +402,16 @@ func (c *Collection) remove(key string, ifCas *CAS) (casOut CAS, err error) {
 		// Get the doc, possibly checking cas:
 		var cas CAS
 		var rawXattrs []byte
+		var revSeqNo int
 		row := txn.QueryRow(
-			`SELECT cas, xattrs FROM documents WHERE collection=?1 AND key=?2`,
+			`SELECT cas, xattrs, revSeqNo FROM documents WHERE collection=?1 AND key=?2`,
 			c.id, key)
-		if err = scan(row, &cas, &rawXattrs); err != nil {
+		if err = scan(row, &cas, &rawXattrs, &revSeqNo); err != nil {
 			return nil, remapKeyError(err, key)
 		} else if ifCas != nil && cas != *ifCas {
 			return nil, sgbucket.CasMismatchErr{Expected: *ifCas, Actual: cas}
 		}
+		revSeqNo++
 
 		// Deleting a doc removes user xattrs but not system ones:
 		if len(rawXattrs) > 0 {
@@ -418,9 +430,9 @@ func (c *Collection) remove(key string, ifCas *CAS) (casOut CAS, err error) {
 		}
 		// Now update, setting value=null, isJSON=false, and updating the xattrs:
 		_, err = txn.Exec(
-			`UPDATE documents SET value=null, cas=?1, exp=0, isJSON=0, xattrs=?2, tombstone=1
-			 WHERE collection=?3 AND key=?4`,
-			newCas, rawXattrs, c.id, key)
+			`UPDATE documents SET value=null, cas=?1, exp=0, isJSON=0, xattrs=?2, tombstone=1, revSeqNo=?3
+			 WHERE collection=?4 AND key=?5`,
+			newCas, rawXattrs, revSeqNo, c.id, key)
 		if err == nil {
 			e = &event{
 				key:        key,
@@ -439,7 +451,7 @@ func (c *Collection) Update(key string, exp Exp, callback sgbucket.UpdateFunc) (
 	traceEnter("Update", "%q, %d, ...", key, exp)
 	defer func() { traceExit("Update", err, "0x%x", casOut) }()
 	for {
-		raw, cas, err := c.getRaw(c.db(), key)
+		raw, cas, _, err := c.getRaw(c.db(), key)
 		var missingError sgbucket.MissingError
 		if err != nil && !errors.As(err, &missingError) {
 			return 0, err

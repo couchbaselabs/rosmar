@@ -893,6 +893,61 @@ func TestDeleteWithMetaXattr(t *testing.T) {
 	require.NotContains(t, xattrs, userXattr)
 }
 
+func TestRevSeqNo(t *testing.T) {
+	col := makeTestBucket(t).DefaultDataStore().(*Collection)
+	docID := t.Name()
+
+	require.NoError(t, col.Set(docID, 0, nil, []byte(`{"foo": 1}`)))
+	assertRevSeqNo(t, col, docID, `"1"`)
+
+	require.NoError(t, col.Set(docID, 0, nil, []byte(`{"foo": 2}`)))
+	assertRevSeqNo(t, col, docID, `"2"`)
+
+	require.NoError(t, col.Delete(docID))
+	assertRevSeqNo(t, col, docID, `"3"`)
+
+	// ressurected doc
+	require.NoError(t, col.Set(docID, 0, nil, []byte(`{"foo": 4`)))
+	assertRevSeqNo(t, col, docID, `"4"`)
+
+	_, _, err := col.GetAndTouchRaw(docID, 0)
+	require.NoError(t, err)
+	assertRevSeqNo(t, col, docID, `"5"`)
+
+	_, err = col.Touch(docID, 0)
+	require.NoError(t, err)
+	assertRevSeqNo(t, col, docID, `"6"`)
+
+	ctx := testCtx(t)
+	writeWithXattrsDocID := "writeWithXattrs"
+	_, err = col.WriteWithXattrs(ctx, writeWithXattrsDocID, 0, 0, []byte(`{"foo": 1}`), nil, nil, nil)
+	require.NoError(t, err)
+	assertRevSeqNo(t, col, writeWithXattrsDocID, `"1"`)
+
+	addRawDocID := "addRaw"
+	_, err = col.AddRaw(addRawDocID, 0, []byte(`{"foo": 1}`))
+	require.NoError(t, err)
+	assertRevSeqNo(t, col, addRawDocID, `"1"`)
+
+	setRawDocID := "setRaw"
+	require.NoError(t, col.SetRaw(setRawDocID, 0, nil, []byte(`{"foo": 1}`)))
+	assertRevSeqNo(t, col, setRawDocID, `"1"`)
+
+	writeCasDocID := "writeCas"
+	_, err = col.WriteCas(writeCasDocID, 0, 0, []byte(`{"foo": 1}`), 0)
+	require.NoError(t, err)
+	assertRevSeqNo(t, col, writeCasDocID, `"1"`)
+}
+
+func assertRevSeqNo(t *testing.T, col *Collection, docID string, expectedRevSeqNo string) {
+	ctx := testCtx(t)
+	xattrs, _, err := col.GetXattrs(ctx, docID, []string{virtualXattrRevSeqNo})
+	require.NoError(t, err)
+
+	require.Contains(t, xattrs, virtualXattrRevSeqNo)
+	require.Equal(t, expectedRevSeqNo, string(xattrs[virtualXattrRevSeqNo]))
+}
+
 func mustMarshalJSON(t *testing.T, obj any) []byte {
 	bytes, err := json.Marshal(obj)
 	require.NoError(t, err)
