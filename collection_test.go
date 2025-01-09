@@ -948,6 +948,16 @@ func assertRevSeqNo(t *testing.T, col *Collection, docID string, expectedRevSeqN
 	require.Equal(t, expectedRevSeqNo, string(xattrs[virtualXattrRevSeqNo]))
 }
 
+func TestDeleteWithXattrs(t *testing.T) {
+	bucket := makeTestBucket(t)
+	col := bucket.DefaultDataStore()
+	docID := t.Name()
+
+	_, err := col.Add(docID, 0, []byte(`{"foo": "bar"}`))
+	require.NoError(t, err)
+
+	require.NoError(t, col.DeleteWithXattrs(testCtx(t), docID, []string{"_systemXattr"}))
+}
 func mustMarshalJSON(t *testing.T, obj any) []byte {
 	bytes, err := json.Marshal(obj)
 	require.NoError(t, err)

@@ -456,7 +456,7 @@ func (c *Collection) DeleteWithXattrs(ctx context.Context, key string, xattrKeys
 			return nil, err
 		}
 		revSeqNo++
-		_, err = txn.Exec(`UPDATE documents SET value=null, xattrs=?1, cas=?2, revSeqNo=?3 WHERE collection=?4 AND key=?5`, e.xattrs, newCas, c.id, revSeqNo, key)
+		_, err = txn.Exec(`UPDATE documents SET value=null, xattrs=?1, cas=?2, revSeqNo=?3 WHERE collection=?4 AND key=?5`, e.xattrs, newCas, revSeqNo, c.id, key)
 		return e, err
 	})
 	return err
