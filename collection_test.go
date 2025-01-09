@@ -877,7 +877,7 @@ func TestDeleteWithMetaXattr(t *testing.T) {
 	require.ErrorAs(t, err, &sgbucket.CasMismatchErr{})
 
 	// tombstone with a good cas
-	err = col.DeleteWithMeta(ctx, docID, startingCas, specifiedCas, 0, []byte(fmt.Sprintf(fmt.Sprintf(`{"%s": "%s"}`, systemXattr, systemXattrVal))))
+	err = col.DeleteWithMeta(ctx, docID, startingCas, specifiedCas, 0, []byte(fmt.Sprintf(`{"%s": "%s"}`, systemXattr, systemXattrVal)))
 	require.NoError(t, err)
 
 	_, err = col.Get(docID, nil)
