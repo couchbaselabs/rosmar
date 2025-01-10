@@ -151,12 +151,13 @@ func (c *Collection) add(key string, exp Exp, val []byte, isJSON bool) (added bo
 	var casOut CAS
 	err = c.withNewCas(func(txn *sql.Tx, newCas CAS) (e *event, err error) {
 		exp = absoluteExpiry(exp)
+		var revSeqNo uint64 = 1
 		result, err := txn.Exec(
 			`INSERT INTO documents (collection,key,value,cas,exp,isJSON, revSeqNo) VALUES (?1,?2,?3,?4,?5,?6,?7)
 				ON CONFLICT(collection,key) DO
 					UPDATE SET value=?3, xattrs=null, cas=?4, exp=?5, isJSON=?6
 					WHERE tombstone != 0`,
-			c.id, key, val, newCas, exp, isJSON, 1, 1)
+			c.id, key, val, newCas, exp, isJSON, 1, revSeqNo)
 		if err != nil {
 			return
 		}
@@ -165,11 +166,12 @@ func (c *Collection) add(key string, exp Exp, val []byte, isJSON bool) (added bo
 		added = (n > 0)
 
 		e = &event{
-			key:    key,
-			value:  val,
-			cas:    casOut,
-			exp:    exp,
-			isJSON: isJSON,
+			key:      key,
+			value:    val,
+			cas:      casOut,
+			exp:      exp,
+			isJSON:   isJSON,
+			revSeqNo: revSeqNo,
 		}
 		e.xattrs, err = c.getRawXattrs(txn, key) // needed for the DCP event
 		return
@@ -191,30 +193,30 @@ func (c *Collection) set(key string, exp Exp, opts *sgbucket.UpsertOptions, val 
 	}
 	return c.withNewCas(func(txn *sql.Tx, newCas CAS) (*event, error) {
 		exp = absoluteExpiry(exp)
-		xattrs, err := c._set(txn, key, exp, opts, val, isJSON, newCas)
+		xattrs, revSeqNo, err := c._set(txn, key, exp, opts, val, isJSON, newCas)
 		if err != nil {
 			return nil, err
 		}
 		return &event{
-			key:    key,
-			value:  val,
-			cas:    newCas,
-			exp:    exp,
-			isJSON: isJSON,
-			xattrs: xattrs,
+			key:      key,
+			value:    val,
+			cas:      newCas,
+			exp:      exp,
+			isJSON:   isJSON,
+			xattrs:   xattrs,
+			revSeqNo: revSeqNo,
 		}, err
 	})
 }
 
 // Core code of Set/SetRaw/Incr. Must be in a transaction when called.
-func (c *Collection) _set(txn *sql.Tx, key string, exp Exp, opts *sgbucket.UpsertOptions, val []byte, isJSON bool, newCas CAS) (xattrs []byte, err error) {
+func (c *Collection) _set(txn *sql.Tx, key string, exp Exp, opts *sgbucket.UpsertOptions, val []byte, isJSON bool, newCas CAS) (xattrs []byte, revSeqNo uint64, err error) {
 	exp = absoluteExpiry(exp)
 
 	// First get the existing xattrs and exp, and check whether the doc is a tombstone:
 	exists := false
 	hadValue := false
 	var oldExp Exp = 0
-	revSeqNo := 0
 	row := txn.QueryRow(`SELECT value NOT NULL, xattrs, exp, revSeqNo FROM documents
 						WHERE collection=? AND key=?`, c.id, key)
 	if err = scan(row, &hadValue, &xattrs, &oldExp, &revSeqNo); err == nil {
@@ -313,7 +315,7 @@ func (c *Collection) WriteCas(key string, exp Exp, cas CAS, val any, opt sgbucke
 
 	err = c.withNewCas(func(txn *sql.Tx, newCas CAS) (*event, error) {
 		wasTombstone := false
-		revSeqNo := 0
+		var revSeqNo uint64
 		if cas != 0 {
 			row := txn.QueryRow("SELECT revSeqNo, tombstone FROM documents WHERE collection=? AND key=?", c.id, key)
 			err = scan(row, &revSeqNo, &wasTombstone)
@@ -374,6 +376,7 @@ func (c *Collection) WriteCas(key string, exp Exp, cas CAS, val any, opt sgbucke
 			cas:        newCas,
 			exp:        exp,
 			isJSON:     isJSON,
+			revSeqNo:   revSeqNo,
 			xattrs:     xattrs,
 		}, nil
 	})
@@ -402,7 +405,7 @@ func (c *Collection) remove(key string, ifCas *CAS) (casOut CAS, err error) {
 		// Get the doc, possibly checking cas:
 		var cas CAS
 		var rawXattrs []byte
-		var revSeqNo int
+		var revSeqNo uint64
 		row := txn.QueryRow(
 			`SELECT cas, xattrs, revSeqNo FROM documents WHERE collection=?1 AND key=?2`,
 			c.id, key)
@@ -439,6 +442,7 @@ func (c *Collection) remove(key string, ifCas *CAS) (casOut CAS, err error) {
 				cas:        newCas,
 				isDeletion: true,
 				xattrs:     rawXattrs,
+				revSeqNo:   revSeqNo,
 			}
 		}
 		casOut = newCas
@@ -506,16 +510,17 @@ func (c *Collection) Incr(key string, amt, deflt uint64, exp Exp) (result uint64
 
 		raw := []byte(strconv.FormatUint(result, 10))
 
-		xattrs, err := c._set(txn, key, exp, nil, raw, true, newCas)
+		xattrs, revSeqNo, err := c._set(txn, key, exp, nil, raw, true, newCas)
 		if err != nil {
 			return nil, err
 		}
 		return &event{
-			key:    key,
-			value:  raw,
-			xattrs: xattrs,
-			cas:    newCas,
-			exp:    exp,
+			key:      key,
+			value:    raw,
+			xattrs:   xattrs,
+			cas:      newCas,
+			exp:      exp,
+			revSeqNo: revSeqNo,
 		}, nil
 	})
 	traceExit("Incr", err, "%d", result)

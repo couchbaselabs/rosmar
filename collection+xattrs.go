@@ -63,6 +63,7 @@ func (c *Collection) writeWithMeta(key string, body []byte, xattrs []byte, oldCa
 		if oldCas != prevCas {
 			return sgbucket.CasMismatchErr{Expected: oldCas, Actual: prevCas}
 		}
+		revSeqNo++
 		e = &event{
 			key:        key,
 			value:      body,
@@ -71,8 +72,9 @@ func (c *Collection) writeWithMeta(key string, body []byte, xattrs []byte, oldCa
 			exp:        exp,
 			isDeletion: isDeletion,
 			isJSON:     isJSON,
+			revSeqNo:   revSeqNo,
 		}
-		return c.storeDocument(txn, e, revSeqNo)
+		return c.storeDocument(txn, e)
 	})
 
 	if err != nil {
@@ -93,7 +95,7 @@ func (c *Collection) DeleteWithMeta(_ context.Context, key string, oldCas CAS, n
 }
 
 // storeDocument performs a write to the underlying sqlite database of a document from a given event.
-func (c *Collection) storeDocument(txn *sql.Tx, e *event, revSeqNo uint64) error {
+func (c *Collection) storeDocument(txn *sql.Tx, e *event) error {
 	tombstone := 0
 	if e.isDeletion {
 		tombstone = 1
@@ -103,7 +105,7 @@ func (c *Collection) storeDocument(txn *sql.Tx, e *event, revSeqNo uint64) error
 							ON CONFLICT (collection,key) DO
 								UPDATE SET value=?3, isJSON=?4, cas=?5, exp=?6, xattrs=?7,tombstone=?8, revSeqNo=?9
 								WHERE collection=?1 AND key=?2`,
-		c.id, e.key, e.value, e.isJSON, e.cas, e.exp, e.xattrs, tombstone, revSeqNo)
+		c.id, e.key, e.value, e.isJSON, e.cas, e.exp, e.xattrs, tombstone, e.revSeqNo)
 	return err
 }
 
@@ -447,16 +449,15 @@ func (c *Collection) DeleteWithXattrs(ctx context.Context, key string, xattrKeys
 			isDeletion: true,
 		}
 		var bodyExists bool
-		var revSeqNo int64
 		row := txn.QueryRow(`SELECT xattrs, value NOT NULL, revSeqNo FROM documents WHERE collection=?1 AND key=?2`, c.id, key)
-		err := scan(row, &e.xattrs, &bodyExists, &revSeqNo)
+		err := scan(row, &e.xattrs, &bodyExists, &e.revSeqNo)
 		if err != nil {
 			return nil, remapKeyError(err, key)
 		} else if e.xattrs, err = removeXattrs(e.xattrs, xattrKeys...); err != nil {
 			return nil, err
 		}
-		revSeqNo++
-		_, err = txn.Exec(`UPDATE documents SET value=null, xattrs=?1, cas=?2, revSeqNo=?3 WHERE collection=?4 AND key=?5`, e.xattrs, newCas, revSeqNo, c.id, key)
+		e.revSeqNo++
+		_, err = txn.Exec(`UPDATE documents SET value=null, xattrs=?1, cas=?2, revSeqNo=?3 WHERE collection=?4 AND key=?5`, e.xattrs, newCas, e.revSeqNo, c.id, key)
 		return e, err
 	})
 	return err
@@ -519,8 +520,7 @@ func (c *Collection) writeWithXattrs(
 		row := txn.QueryRow(`SELECT value, isJSON, cas, exp, xattrs, tombstone, revSeqNo FROM documents WHERE collection=?1 AND key=?2`,
 			c.id, key)
 		var prevCas CAS
-		var revSeqNo uint64
-		if err := scan(row, &e.value, &e.isJSON, &prevCas, &e.exp, &e.xattrs, &wasTombstone, &revSeqNo); err == nil {
+		if err := scan(row, &e.value, &e.isJSON, &prevCas, &e.exp, &e.xattrs, &wasTombstone, &e.revSeqNo); err == nil {
 			if wasTombstone == 1 && (val != nil && !val.isNil()) {
 				// couchbase server can't perform a cas check on a tombstone so we return ErrKeyExists
 				if ifCas != nil && *ifCas != 0 {
@@ -539,7 +539,7 @@ func (c *Collection) writeWithXattrs(
 		} else {
 			return nil, remapKeyError(err, key)
 		}
-		revSeqNo++
+		e.revSeqNo++
 		if e.value == nil && opts.deleteBody && opts.requireExistingDoc {
 			return nil, fmt.Errorf("Calling deleteBody=true when the document is a tombstone: %w", sgbucket.MissingError{Key: key})
 		}
@@ -636,7 +636,7 @@ func (c *Collection) writeWithXattrs(
 			e.exp = absoluteExpiry(*exp)
 		}
 
-		err = c.storeDocument(txn, e, revSeqNo)
+		err = c.storeDocument(txn, e)
 		if err != nil {
 			return nil, err
 		}

@@ -132,7 +132,7 @@ func (c *Collection) StartDCPFeed(
 }
 
 func (c *Collection) enqueueBackfillEvents(startCas uint64, keysOnly bool, q *eventQueue) error {
-	sql := fmt.Sprintf(`SELECT key, %s, %s, isJSON, cas, tombstone FROM documents
+	sql := fmt.Sprintf(`SELECT key, %s, %s, isJSON, cas, tombstone, revSeqNo FROM documents
 						WHERE collection=?1 AND cas >= ?2 
 						ORDER BY cas`,
 		ifelse(keysOnly, `null`, `value`),
@@ -143,7 +143,7 @@ func (c *Collection) enqueueBackfillEvents(startCas uint64, keysOnly bool, q *ev
 	}
 	e := event{}
 	for rows.Next() {
-		if err := rows.Scan(&e.key, &e.value, &e.xattrs, &e.isJSON, &e.cas, &e.isDeletion); err != nil {
+		if err := rows.Scan(&e.key, &e.value, &e.xattrs, &e.isJSON, &e.cas, &e.isDeletion, &e.revSeqNo); err != nil {
 			return err
 		}
 		q.push(e.asFeedEvent(c.GetCollectionID()))
@@ -310,11 +310,15 @@ type event struct {
 	xattrs     []byte // Extended attributes
 	cas        CAS    // Sequence in collection
 	exp        Exp    // Expiration time
+	revSeqNo   uint64 // Revision sequence number
 }
 
 func (e *event) asFeedEvent(collectionID uint32) *sgbucket.FeedEvent {
 	if e.exp != absoluteExpiry(e.exp) {
 		panic(fmt.Sprintf("expiry %d isn't absolute", e.exp)) // caller forgot absoluteExpiry()
+	}
+	if e.revSeqNo == 0 {
+		panic("event missing revSeqNo")
 	}
 	feedEvent := sgbucket.FeedEvent{
 		Opcode:       ifelse(e.isDeletion, sgbucket.FeedOpDeletion, sgbucket.FeedOpMutation),
@@ -325,6 +329,7 @@ func (e *event) asFeedEvent(collectionID uint32) *sgbucket.FeedEvent {
 		Expiry:       e.exp,
 		DataType:     ifelse(e.isJSON, sgbucket.FeedDataTypeJSON, sgbucket.FeedDataTypeRaw),
 		// VbNo:     uint16(sgbucket.VBHash(doc.key, kNumVbuckets)),
+		RevNo:        e.revSeqNo,
 		TimeReceived: time.Now(),
 	}
 	if len(e.xattrs) > 0 {
