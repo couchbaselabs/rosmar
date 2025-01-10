@@ -939,13 +939,33 @@ func TestRevSeqNo(t *testing.T) {
 	assertRevSeqNo(t, col, writeCasDocID, `"1"`)
 }
 
+func TestVirtualXattr(t *testing.T) {
+	col := makeTestBucket(t).DefaultDataStore().(*Collection)
+	docID := t.Name()
+
+	require.NoError(t, col.Set(docID, 0, nil, []byte(`{"foo": 1}`)))
+	assertRevSeqNo(t, col, docID, `"1"`)
+
+	// GetXattrs should return the virtual xattr
+	xattrs, _, err := col.GetXattrs(testCtx(t), docID, []string{"$document"})
+	require.NoError(t, err)
+	require.Contains(t, xattrs, "$document")
+	var virtualXattr struct {
+		RevNo string `json:"revid"`
+		Crc32 string `json:"value_crc32c"`
+	}
+	require.NoError(t, json.Unmarshal(xattrs["$document"], &virtualXattr))
+	require.Equal(t, "1", virtualXattr.RevNo)
+	require.NotZero(t, virtualXattr.Crc32)
+}
+
 func assertRevSeqNo(t *testing.T, col *Collection, docID string, expectedRevSeqNo string) {
+	xattrName := "$document.revid"
 	ctx := testCtx(t)
-	xattrs, _, err := col.GetXattrs(ctx, docID, []string{virtualXattrRevSeqNo})
+	xattrs, _, err := col.GetXattrs(ctx, docID, []string{xattrName})
 	require.NoError(t, err)
 
-	require.Contains(t, xattrs, virtualXattrRevSeqNo)
-	require.Equal(t, expectedRevSeqNo, string(xattrs[virtualXattrRevSeqNo]))
+	require.Equal(t, expectedRevSeqNo, string(xattrs[xattrName]))
 }
 
 func TestDeleteWithXattrs(t *testing.T) {

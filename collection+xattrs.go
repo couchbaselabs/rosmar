@@ -22,7 +22,10 @@ import (
 
 type semiParsedXattrs = map[string]json.RawMessage
 
-const virtualXattrRevSeqNo = "$document.revid"
+const (
+	virtualXattrName     = "$document"
+	virtualXattrRevSeqNo = "revid"
+)
 
 // ////// SGBUCKET XATTR STORE INTERFACE
 func (c *Collection) GetXattrs(
@@ -424,10 +427,10 @@ func (c *Collection) getRawWithXattrs(key string, xattrKeys []string) (sgbucket.
 		}
 	}
 	for _, xattrKey := range xattrKeys {
-		if xattrKey == "$document" {
-			rawDoc.Xattrs[xattrKey] = []byte(fmt.Sprintf(`{"value_crc32c":%q}`, encodedCRC32c(rawDoc.Body)))
+		if xattrKey == virtualXattrName {
+			rawDoc.Xattrs[xattrKey] = []byte(fmt.Sprintf(`{"value_crc32c":%q,"%s":"%d"}`, encodedCRC32c(rawDoc.Body), virtualXattrRevSeqNo, revSeqNo))
 			continue
-		} else if xattrKey == virtualXattrRevSeqNo {
+		} else if xattrKey == virtualXattrName+"."+virtualXattrRevSeqNo {
 			rawDoc.Xattrs[xattrKey] = []byte(fmt.Sprintf(`"%d"`, revSeqNo))
 			continue
 		}
