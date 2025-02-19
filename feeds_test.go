@@ -73,7 +73,7 @@ func TestMutations(t *testing.T) {
 	// Read the mutation of "eskimo":
 	e := <-events
 	e.TimeReceived = time.Time{}
-	assertEventEquals(t, sgbucket.FeedEvent{Opcode: sgbucket.FeedOpDeletion, Key: []byte("eskimo"), DataType: sgbucket.FeedDataTypeRaw}, e)
+	assertEventEquals(t, sgbucket.FeedEvent{Opcode: sgbucket.FeedOpDeletion, Key: []byte("eskimo"), DataType: sgbucket.FeedDataTypeRaw, RevNo: 2}, e)
 
 	require.NoError(t, bucket.CloseAndDelete(testCtx(t)))
 
@@ -162,30 +162,32 @@ func assertEventEquals(t *testing.T, expected sgbucket.FeedEvent, actual sgbucke
 	assert.Equal(t, expected.Key, actual.Key)
 	assert.Equal(t, expected.Value, actual.Value)
 	assert.Equal(t, expected.DataType, actual.DataType)
+	assert.NotZero(t, actual.RevNo)
+	assert.Equal(t, expected.RevNo, actual.RevNo)
 }
 
 func readExpectedEventsABC(t *testing.T, events chan sgbucket.FeedEvent) {
 	e := <-events
 	e.TimeReceived = time.Time{}
-	assertEventEquals(t, sgbucket.FeedEvent{Opcode: sgbucket.FeedOpMutation, Key: []byte("able"), Value: []byte(`"A"`), DataType: sgbucket.FeedDataTypeJSON}, e)
+	assertEventEquals(t, sgbucket.FeedEvent{Opcode: sgbucket.FeedOpMutation, Key: []byte("able"), Value: []byte(`"A"`), DataType: sgbucket.FeedDataTypeJSON, RevNo: 1}, e)
 	e = <-events
 	e.TimeReceived = time.Time{}
-	assertEventEquals(t, sgbucket.FeedEvent{Opcode: sgbucket.FeedOpMutation, Key: []byte("baker"), Value: []byte(`"B"`), DataType: sgbucket.FeedDataTypeJSON}, e)
+	assertEventEquals(t, sgbucket.FeedEvent{Opcode: sgbucket.FeedOpMutation, Key: []byte("baker"), Value: []byte(`"B"`), DataType: sgbucket.FeedDataTypeJSON, RevNo: 1}, e)
 	e = <-events
 	e.TimeReceived = time.Time{}
-	assertEventEquals(t, sgbucket.FeedEvent{Opcode: sgbucket.FeedOpMutation, Key: []byte("charlie"), Value: []byte(`"C"`), DataType: sgbucket.FeedDataTypeJSON}, e)
+	assertEventEquals(t, sgbucket.FeedEvent{Opcode: sgbucket.FeedOpMutation, Key: []byte("charlie"), Value: []byte(`"C"`), DataType: sgbucket.FeedDataTypeJSON, RevNo: 1}, e)
 }
 
 func readExpectedEventsDEF(t *testing.T, events chan sgbucket.FeedEvent) {
 	e := <-events
 	e.TimeReceived = time.Time{}
-	assertEventEquals(t, sgbucket.FeedEvent{Opcode: sgbucket.FeedOpMutation, Key: []byte("delta"), Value: []byte(`"D"`), DataType: sgbucket.FeedDataTypeJSON}, e)
+	assertEventEquals(t, sgbucket.FeedEvent{Opcode: sgbucket.FeedOpMutation, Key: []byte("delta"), Value: []byte(`"D"`), DataType: sgbucket.FeedDataTypeJSON, RevNo: 1}, e)
 	e = <-events
 	e.TimeReceived = time.Time{}
-	assertEventEquals(t, sgbucket.FeedEvent{Opcode: sgbucket.FeedOpMutation, Key: []byte("eskimo"), Value: []byte(`"E"`), DataType: sgbucket.FeedDataTypeJSON}, e)
+	assertEventEquals(t, sgbucket.FeedEvent{Opcode: sgbucket.FeedOpMutation, Key: []byte("eskimo"), Value: []byte(`"E"`), DataType: sgbucket.FeedDataTypeJSON, RevNo: 1}, e)
 	e = <-events
 	e.TimeReceived = time.Time{}
-	assertEventEquals(t, sgbucket.FeedEvent{Opcode: sgbucket.FeedOpMutation, Key: []byte("fahrvergnügen"), Value: []byte(`"F"`), DataType: sgbucket.FeedDataTypeJSON}, e)
+	assertEventEquals(t, sgbucket.FeedEvent{Opcode: sgbucket.FeedOpMutation, Key: []byte("fahrvergnügen"), Value: []byte(`"F"`), DataType: sgbucket.FeedDataTypeJSON, RevNo: 1}, e)
 }
 
 func TestCrossBucketEvents(t *testing.T) {

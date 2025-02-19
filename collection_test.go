@@ -893,6 +893,91 @@ func TestDeleteWithMetaXattr(t *testing.T) {
 	require.NotContains(t, xattrs, userXattr)
 }
 
+func TestRevSeqNo(t *testing.T) {
+	col := makeTestBucket(t).DefaultDataStore().(*Collection)
+	docID := t.Name()
+
+	require.NoError(t, col.Set(docID, 0, nil, []byte(`{"foo": 1}`)))
+	assertRevSeqNo(t, col, docID, `"1"`)
+
+	require.NoError(t, col.Set(docID, 0, nil, []byte(`{"foo": 2}`)))
+	assertRevSeqNo(t, col, docID, `"2"`)
+
+	require.NoError(t, col.Delete(docID))
+	assertRevSeqNo(t, col, docID, `"3"`)
+
+	// ressurected doc
+	require.NoError(t, col.Set(docID, 0, nil, []byte(`{"foo": 4`)))
+	assertRevSeqNo(t, col, docID, `"4"`)
+
+	_, _, err := col.GetAndTouchRaw(docID, 0)
+	require.NoError(t, err)
+	assertRevSeqNo(t, col, docID, `"5"`)
+
+	_, err = col.Touch(docID, 0)
+	require.NoError(t, err)
+	assertRevSeqNo(t, col, docID, `"6"`)
+
+	ctx := testCtx(t)
+	writeWithXattrsDocID := "writeWithXattrs"
+	_, err = col.WriteWithXattrs(ctx, writeWithXattrsDocID, 0, 0, []byte(`{"foo": 1}`), nil, nil, nil)
+	require.NoError(t, err)
+	assertRevSeqNo(t, col, writeWithXattrsDocID, `"1"`)
+
+	addRawDocID := "addRaw"
+	_, err = col.AddRaw(addRawDocID, 0, []byte(`{"foo": 1}`))
+	require.NoError(t, err)
+	assertRevSeqNo(t, col, addRawDocID, `"1"`)
+
+	setRawDocID := "setRaw"
+	require.NoError(t, col.SetRaw(setRawDocID, 0, nil, []byte(`{"foo": 1}`)))
+	assertRevSeqNo(t, col, setRawDocID, `"1"`)
+
+	writeCasDocID := "writeCas"
+	_, err = col.WriteCas(writeCasDocID, 0, 0, []byte(`{"foo": 1}`), 0)
+	require.NoError(t, err)
+	assertRevSeqNo(t, col, writeCasDocID, `"1"`)
+}
+
+func TestVirtualXattr(t *testing.T) {
+	col := makeTestBucket(t).DefaultDataStore().(*Collection)
+	docID := t.Name()
+
+	require.NoError(t, col.Set(docID, 0, nil, []byte(`{"foo": 1}`)))
+	assertRevSeqNo(t, col, docID, `"1"`)
+
+	// GetXattrs should return the virtual xattr
+	xattrs, _, err := col.GetXattrs(testCtx(t), docID, []string{"$document"})
+	require.NoError(t, err)
+	require.Contains(t, xattrs, "$document")
+	var virtualXattr struct {
+		RevNo string `json:"revid"`
+		Crc32 string `json:"value_crc32c"`
+	}
+	require.NoError(t, json.Unmarshal(xattrs["$document"], &virtualXattr))
+	require.Equal(t, "1", virtualXattr.RevNo)
+	require.NotZero(t, virtualXattr.Crc32)
+}
+
+func assertRevSeqNo(t *testing.T, col *Collection, docID string, expectedRevSeqNo string) {
+	xattrName := "$document.revid"
+	ctx := testCtx(t)
+	xattrs, _, err := col.GetXattrs(ctx, docID, []string{xattrName})
+	require.NoError(t, err)
+
+	require.Equal(t, expectedRevSeqNo, string(xattrs[xattrName]))
+}
+
+func TestDeleteWithXattrs(t *testing.T) {
+	bucket := makeTestBucket(t)
+	col := bucket.DefaultDataStore()
+	docID := t.Name()
+
+	_, err := col.Add(docID, 0, []byte(`{"foo": "bar"}`))
+	require.NoError(t, err)
+
+	require.NoError(t, col.DeleteWithXattrs(testCtx(t), docID, []string{"_systemXattr"}))
+}
 func mustMarshalJSON(t *testing.T, obj any) []byte {
 	bytes, err := json.Marshal(obj)
 	require.NoError(t, err)
