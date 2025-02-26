@@ -13,16 +13,16 @@ import (
 	"time"
 )
 
-var hlc *hybridLogicalClock
+var hlc *HybridLogicalClock
 
 func init() {
 	hlc = NewHybridLogicalClock(0)
 }
 
-type timestamp uint64
+type Timestamp uint64
 
-// hybridLogicalClock is a hybrid logical clock implementation for rosmar that produces timestamps that will always be increasing regardless of clock changes.
-type hybridLogicalClock struct {
+// HybridLogicalClock is a hybrid logical clock implementation for rosmar that produces timestamps that will always be increasing regardless of clock changes.
+type HybridLogicalClock struct {
 	clock       clock
 	highestTime uint64
 	mutex       sync.Mutex
@@ -42,14 +42,14 @@ func (c *systemClock) getTime() uint64 {
 }
 
 // NewHybridLogicalClock returns a new HLC from a previously initialized time.
-func NewHybridLogicalClock(lastTime timestamp) *hybridLogicalClock {
-	return &hybridLogicalClock{
+func NewHybridLogicalClock(lastTime Timestamp) *HybridLogicalClock {
+	return &HybridLogicalClock{
 		highestTime: uint64(lastTime),
 		clock:       &systemClock{},
 	}
 }
 
-func (c *hybridLogicalClock) updateLatestTime(lastTime timestamp) {
+func (c *HybridLogicalClock) updateLatestTime(lastTime Timestamp) {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
 	if uint64(lastTime) > c.highestTime {
@@ -57,8 +57,8 @@ func (c *hybridLogicalClock) updateLatestTime(lastTime timestamp) {
 	}
 }
 
-// Now returns the next time represented in nanoseconds. This can be the current timestamp, or if multiple occur in the same nanosecond, an increasing timestamp.
-func (c *hybridLogicalClock) Now() timestamp {
+// Now returns the next time represented in nanoseconds. This can be the current Timestamp, or if multiple occur in the same nanosecond, an increasing Timestamp.
+func (c *HybridLogicalClock) Now() Timestamp {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
 	physicalTime := c.clock.getTime() &^ 0xFFFF // round to 48 bits
@@ -67,5 +67,5 @@ func (c *hybridLogicalClock) Now() timestamp {
 	} else {
 		c.highestTime = physicalTime
 	}
-	return timestamp(c.highestTime)
+	return Timestamp(c.highestTime)
 }
