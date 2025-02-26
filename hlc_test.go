@@ -18,15 +18,15 @@ import (
 )
 
 func TestHybridLogicalClockNow(t *testing.T) {
-	clock := hybridLogicalClock{clock: &systemClock{}}
+	clock := HybridLogicalClock{clock: &systemClock{}}
 	timestamp1 := clock.Now()
 	timestamp2 := clock.Now()
 	require.Greater(t, timestamp2, timestamp1)
 }
 
-func generateTimestamps(wg *sync.WaitGroup, clock *hybridLogicalClock, n int, result chan []timestamp) {
+func generateTimestamps(wg *sync.WaitGroup, clock *HybridLogicalClock, n int, result chan []Timestamp) {
 	defer wg.Done()
-	timestamps := make([]timestamp, n)
+	timestamps := make([]Timestamp, n)
 	for i := 0; i < n; i++ {
 		timestamps[i] = clock.Now()
 	}
@@ -34,12 +34,12 @@ func generateTimestamps(wg *sync.WaitGroup, clock *hybridLogicalClock, n int, re
 }
 
 func TestHLCNowConcurrent(t *testing.T) {
-	clock := hybridLogicalClock{clock: &systemClock{}}
+	clock := HybridLogicalClock{clock: &systemClock{}}
 	goroutines := 100
 	timestampCount := 100
 
 	wg := sync.WaitGroup{}
-	results := make(chan []timestamp)
+	results := make(chan []Timestamp)
 	for i := 0; i < goroutines; i++ {
 		wg.Add(1)
 		go generateTimestamps(&wg, &clock, timestampCount, results)
@@ -50,7 +50,7 @@ func TestHLCNowConcurrent(t *testing.T) {
 		wg.Wait()
 		doneChan <- struct{}{}
 	}()
-	allTimestamps := make([]timestamp, 0, goroutines*timestampCount)
+	allTimestamps := make([]Timestamp, 0, goroutines*timestampCount)
 loop:
 	for {
 		select {
@@ -60,7 +60,7 @@ loop:
 			break loop
 		}
 	}
-	uniqueTimestamps := make(map[timestamp]struct{})
+	uniqueTimestamps := make(map[Timestamp]struct{})
 	for _, timestamp := range allTimestamps {
 		if _, ok := uniqueTimestamps[timestamp]; ok {
 			t.Errorf("Timestamp %d is not unique", timestamp)
@@ -79,32 +79,32 @@ func (c *fakeClock) getTime() uint64 {
 
 func TestHLCReverseTime(t *testing.T) {
 	clock := &fakeClock{}
-	hlc := hybridLogicalClock{clock: clock}
+	hlc := HybridLogicalClock{clock: clock}
 	startTime := uint64(1000000) // 1 second
 	clock.time = startTime
-	require.Equal(t, timestamp(0xf0000), hlc.Now())
-	require.Equal(t, timestamp(0xf0001), hlc.Now())
+	require.Equal(t, Timestamp(0xf0000), hlc.Now())
+	require.Equal(t, Timestamp(0xf0001), hlc.Now())
 
 	// reverse time no counter
 	clock.time = 0
-	require.Equal(t, timestamp(0xf0002), hlc.Now())
+	require.Equal(t, Timestamp(0xf0002), hlc.Now())
 
 	// reset time to normal
 	clock.time = startTime
-	require.Equal(t, timestamp(0xf0003), hlc.Now())
+	require.Equal(t, Timestamp(0xf0003), hlc.Now())
 
 	// reverse time again
 	clock.time = 1
-	require.Equal(t, timestamp(0xf0004), hlc.Now())
+	require.Equal(t, Timestamp(0xf0004), hlc.Now())
 
 	// jump to a value we had previously
 	clock.time = startTime * 2
-	require.Equal(t, timestamp(0x1e0000), hlc.Now())
-	require.Equal(t, timestamp(0x1e0001), hlc.Now())
+	require.Equal(t, Timestamp(0x1e0000), hlc.Now())
+	require.Equal(t, Timestamp(0x1e0001), hlc.Now())
 
 	// continue forward
 	clock.time *= 2
-	require.Equal(t, timestamp(0x3d0000), hlc.Now())
+	require.Equal(t, Timestamp(0x3d0000), hlc.Now())
 
 }
 

@@ -587,11 +587,11 @@ func (c *Collection) getLastCas(q queryable) (cas CAS, err error) {
 }
 
 // getLastTimestamp returns the last timestamp assigned to any doc in bucket. Returns 0 in the case of no cas values assigned.
-func (bucket *Bucket) getLastTimestamp() timestamp {
-	var lastTimestamp timestamp
+func (bucket *Bucket) getLastTimestamp() Timestamp {
+	var lastTimestamp Timestamp
 	row := bucket.db().QueryRow("SELECT lastCas FROM bucket")
 	_ = scan(row, &lastTimestamp)
-	return timestamp(lastTimestamp)
+	return Timestamp(lastTimestamp)
 }
 
 // Updates the collection's and the bucket's lastCas.
