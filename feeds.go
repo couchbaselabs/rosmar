@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"expvar"
 	"fmt"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -276,6 +277,11 @@ func (feed *dcpFeed) run() {
 
 	for {
 		if event := feed.events.pull(); event != nil {
+			filteredKey, eventType := feed.filteredKey(event.Key)
+			if filteredKey {
+				continue
+			}
+			event.ItemType = eventType
 			feed.callback(*event)
 			if event.Cas > feed.lastCas {
 				feed.lastCas = event.Cas
@@ -298,6 +304,41 @@ func (feed *dcpFeed) run() {
 
 func (feed *dcpFeed) close() {
 	feed.events.close()
+}
+
+// filteredKey will filter keys we don't care about off the mutation DCP feed and will return DCP event type on non-filtered docs
+func (feed *dcpFeed) filteredKey(key []byte) (bool, sgbucket.FeedItemDocType) {
+	// if not metadata keys are defined then don't filter, this will be nil for non sharded import feed
+	if feed.args.MetadataKeys == nil {
+		return false, 0
+	}
+	docID := string(key)
+	// any keys that doesn't have _sync prefix need to be processed
+	if !strings.HasPrefix(docID, feed.args.MetadataKeys.SyncPrefix) {
+		return false, sgbucket.FeedItemTypeCustomerDocument
+	}
+
+	if strings.HasPrefix(docID, feed.args.MetadataKeys.UserPrefix) {
+		return false, sgbucket.FeedItemTypeUserDoc
+	}
+
+	if strings.HasPrefix(docID, feed.args.MetadataKeys.RolePrefix) {
+		return false, sgbucket.FeedItemTypeRoleDoc
+	}
+
+	if strings.HasPrefix(docID, feed.args.MetadataKeys.UnusedSeqPrefix) {
+		return false, sgbucket.FeedItemTypeUnusedSeqDoc
+	}
+
+	if strings.HasPrefix(docID, feed.args.MetadataKeys.UnusedSeqRange) {
+		return false, sgbucket.FeedItemTypeUnusedSeqRangeDoc
+	}
+
+	if strings.HasPrefix(docID, feed.args.MetadataKeys.SgCFGPrefix) {
+		return false, sgbucket.FeedItemTypeSgCFGDoc
+	}
+
+	return true, 0
 }
 
 //////// EVENTS
