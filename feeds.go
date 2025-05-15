@@ -276,6 +276,13 @@ func (feed *dcpFeed) run() {
 
 	for {
 		if event := feed.events.pull(); event != nil {
+			if feed.args.FilterFunc != nil {
+				var shouldFilter bool
+				shouldFilter, event.FilterType = feed.args.FilterFunc(event.Key)
+				if shouldFilter {
+					continue
+				}
+			}
 			feed.callback(*event)
 			if event.Cas > feed.lastCas {
 				feed.lastCas = event.Cas
