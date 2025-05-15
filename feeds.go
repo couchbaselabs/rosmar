@@ -183,7 +183,8 @@ func (c *Collection) postEvent(event *sgbucket.FeedEvent) {
 				eventNoValue.Value = nil
 				feed.events.push(&eventNoValue)
 			} else {
-				feed.events.push(event)
+				copyEvent := *event // copies the struct
+				feed.events.push(&copyEvent)
 			}
 		}
 	}
