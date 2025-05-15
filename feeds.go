@@ -111,7 +111,7 @@ func (c *Collection) StartDCPFeed(
 
 		debug("%s starting backfill from CAS 0x%x", feed, startCas)
 		feed.events.push(&sgbucket.FeedEvent{Opcode: sgbucket.FeedOpBeginBackfill})
-		err := c.enqueueBackfillEvents(startCas, args.KeysOnly, &feed.events)
+		err := c.enqueueBackfillEvents(startCas, args.FeedContent, &feed.events)
 		if err != nil {
 			return err
 		}
@@ -131,7 +131,28 @@ func (c *Collection) StartDCPFeed(
 	return nil
 }
 
-func (c *Collection) enqueueBackfillEvents(startCas uint64, keysOnly bool, q *eventQueue) error {
+func valueForFeedContent(feedContent sgbucket.FeedContent, value []byte) []byte {
+	switch feedContent {
+	case sgbucket.FeedContentKeysOnly:
+		return nil
+	case sgbucket.FeedContentBodyOnly:
+		body, _, err := sgbucket.DecodeValueWithAllXattrs(value)
+		if err != nil {
+			panic(fmt.Errorf("couldn't decode value %q: %w", value, err))
+		}
+		return sgbucket.EncodeValueWithXattrs(body)
+	case sgbucket.FeedContentXattrOnly:
+		_, xattrs, err := sgbucket.DecodeValueWithAllXattrs(value)
+		if err != nil {
+			panic(fmt.Errorf("couldn't decode value %q: %w", value, err))
+		}
+		return sgbucket.EncodeValueWithXattrs(nil, sgbucket.Xattrs(xattrs)...)
+	}
+	return value
+}
+
+func (c *Collection) enqueueBackfillEvents(startCas uint64, feedContent sgbucket.FeedContent, q *eventQueue) error {
+	keysOnly := feedContent == sgbucket.FeedContentKeysOnly
 	sql := fmt.Sprintf(`SELECT key, %s, %s, isJSON, cas, tombstone, revSeqNo FROM documents
 						WHERE collection=?1 AND cas >= ?2 
 						ORDER BY cas`,
@@ -146,6 +167,7 @@ func (c *Collection) enqueueBackfillEvents(startCas uint64, keysOnly bool, q *ev
 		if err := rows.Scan(&e.key, &e.value, &e.xattrs, &e.isJSON, &e.cas, &e.isDeletion, &e.revSeqNo); err != nil {
 			return err
 		}
+		e.value = valueForFeedContent(feedContent, e.value)
 		q.push(e.asFeedEvent(c.GetCollectionID()))
 	}
 	return rows.Close()
@@ -177,13 +199,14 @@ func (c *Collection) postEvent(event *sgbucket.FeedEvent) {
 
 	for _, feed := range feeds {
 		if feed != nil {
-			if feed.args.KeysOnly {
-				var eventNoValue sgbucket.FeedEvent = *event // copies the struct
-				eventNoValue.Value = nil
-				feed.events.push(&eventNoValue)
-			} else {
+			if feed.args.FeedContent == sgbucket.FeedContentDefault {
 				feed.events.push(event)
+				continue
 			}
+
+			eventCopy := *event
+			eventCopy.Value = valueForFeedContent(feed.args.FeedContent, eventCopy.Value)
+			feed.events.push(&eventCopy)
 		}
 	}
 }

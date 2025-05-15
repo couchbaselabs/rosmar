@@ -309,3 +309,69 @@ func TestCollectionMutations(t *testing.T) {
 	assert.Equal(t, len(c1Keys), numDocs)
 	assert.Equal(t, len(c2Keys), numDocs)
 }
+
+func TestFeedContent(t *testing.T) {
+	tests := []struct {
+		name        string
+		feedContent sgbucket.FeedContent
+	}{
+		{"Default", sgbucket.FeedContentDefault},
+		{"KeysOnly", sgbucket.FeedContentKeysOnly},
+		{"BodyOnly", sgbucket.FeedContentBodyOnly},
+		{"XattrOnly", sgbucket.FeedContentXattrOnly},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			ensureNoLeakedFeeds(t)
+			bucket := makeTestBucket(t)
+			c := bucket.DefaultDataStore()
+
+			// write a doc with a body and xattrs
+			addToCollection(t, c, "able", 0,
+				sgbucket.EncodeValueWithXattrs(
+					[]byte(`{"doc_body_value":true}`),
+					sgbucket.Xattr{"xattr_name", []byte(`{"xattr_value":12345}`)},
+				))
+
+			args := sgbucket.FeedArguments{
+				Backfill:    0,
+				Dump:        true, // stop on end
+				FeedContent: test.feedContent,
+			}
+			events, doneChan := startFeedWithArgs(t, bucket, args)
+
+			event := <-events
+			assert.Equal(t, sgbucket.FeedOpBeginBackfill, event.Opcode)
+
+			event = <-events
+			assert.Equal(t, sgbucket.FeedOpMutation, event.Opcode)
+			t.Logf("event value: %s", event.Value)
+			switch test.feedContent {
+			case sgbucket.FeedContentKeysOnly:
+				assert.Nil(t, event.Value)
+			case sgbucket.FeedContentDefault:
+				require.NotNil(t, event.Value)
+				assert.Contains(t, string(event.Value), `"doc_body_value":true`)
+				assert.Contains(t, string(event.Value), `"xattr_value":12345`)
+				assert.Contains(t, string(event.Value), `xattr_name`)
+			case sgbucket.FeedContentBodyOnly:
+				require.NotNil(t, event.Value)
+				assert.Contains(t, string(event.Value), `"doc_body_value":true`)
+				assert.NotContains(t, string(event.Value), `"xattr_value":12345`)
+				assert.NotContains(t, string(event.Value), `xattr_name`)
+			case sgbucket.FeedContentXattrOnly:
+				require.NotNil(t, event.Value)
+				assert.NotContains(t, string(event.Value), `"doc_body_value":true`)
+				assert.Contains(t, string(event.Value), `"xattr_value":12345`)
+				assert.Contains(t, string(event.Value), `xattr_name`)
+			}
+
+			event = <-events
+			assert.Equal(t, sgbucket.FeedOpEndBackfill, event.Opcode)
+
+			_, ok := <-doneChan
+			assert.False(t, ok)
+		})
+	}
+}
