@@ -190,6 +190,58 @@ func readExpectedEventsDEF(t *testing.T, events chan sgbucket.FeedEvent) {
 	assertEventEquals(t, sgbucket.FeedEvent{Opcode: sgbucket.FeedOpMutation, Key: []byte("fahrvergnügen"), Value: []byte(`"F"`), DataType: sgbucket.FeedDataTypeJSON, RevNo: 1}, e)
 }
 
+func TestFilterFeeds(t *testing.T) {
+	ensureNoLeakedFeeds(t)
+	bucket := makeTestBucket(t)
+	c := bucket.DefaultDataStore()
+
+	addToCollection(t, c, "able", 0, "A")
+	addToCollection(t, c, "baker", 0, "B")
+	addToCollection(t, c, "charlie", 0, "C")
+
+	const (
+		fourCharType  sgbucket.FeedFilterType = "four"
+		sevenCharType sgbucket.FeedFilterType = "seven"
+	)
+	filterFunc := func(docID []byte) (bool, sgbucket.FeedFilterType) {
+		switch len(docID) {
+		case 0:
+			return false, ""
+		case 4:
+			return false, fourCharType
+		case 7:
+			return false, sevenCharType
+		default:
+			return true, ""
+		}
+	}
+	// Run the feed:
+	args := sgbucket.FeedArguments{
+		ID:               "myID",
+		Backfill:         sgbucket.FeedResume,
+		Dump:             true,
+		CheckpointPrefix: "Checkpoint",
+		FilterFunc:       filterFunc,
+	}
+
+	events, doneChan := startFeedWithArgs(t, bucket, args)
+
+	event := <-events
+	require.Equal(t, sgbucket.FeedOpBeginBackfill, event.Opcode)
+
+	event = <-events
+	assertEventEquals(t, sgbucket.FeedEvent{Opcode: sgbucket.FeedOpMutation, Key: []byte("able"), Value: []byte(`"A"`), DataType: sgbucket.FeedDataTypeJSON, RevNo: 1, FilterType: fourCharType}, event)
+
+	event = <-events
+	assertEventEquals(t, sgbucket.FeedEvent{Opcode: sgbucket.FeedOpMutation, Key: []byte("charlie"), Value: []byte(`"C"`), DataType: sgbucket.FeedDataTypeJSON, RevNo: 1, FilterType: sevenCharType}, event)
+
+	event = <-events
+	assert.Equal(t, sgbucket.FeedOpEndBackfill, event.Opcode)
+
+	_, ok := <-doneChan
+	assert.False(t, ok)
+}
+
 func TestCrossBucketEvents(t *testing.T) {
 	ensureNoLeakedFeeds(t)
 	bucket := makeTestBucket(t)
