@@ -131,17 +131,24 @@ func (c *Collection) StartDCPFeed(
 	return nil
 }
 
-func valueForFeedContent(feedContent sgbucket.FeedContent, value []byte) []byte {
+func valueForFeedContent(feedContent sgbucket.FeedContent, value []byte, hasXattrs bool) []byte {
 	switch feedContent {
 	case sgbucket.FeedContentKeysOnly:
 		return nil
 	case sgbucket.FeedContentBodyOnly:
-		body, _, err := sgbucket.DecodeValueWithAllXattrs(value)
-		if err != nil {
-			panic(fmt.Errorf("couldn't decode value %q: %w", value, err))
+		body := value
+		if hasXattrs {
+			var err error
+			body, _, err = sgbucket.DecodeValueWithAllXattrs(value)
+			if err != nil {
+				panic(fmt.Errorf("couldn't decode value %q: %w", value, err))
+			}
 		}
 		return sgbucket.EncodeValueWithXattrs(body)
 	case sgbucket.FeedContentXattrOnly:
+		if !hasXattrs {
+			return nil
+		}
 		_, xattrs, err := sgbucket.DecodeValueWithAllXattrs(value)
 		if err != nil {
 			panic(fmt.Errorf("couldn't decode value %q: %w", value, err))
@@ -167,7 +174,7 @@ func (c *Collection) enqueueBackfillEvents(startCas uint64, feedContent sgbucket
 		if err := rows.Scan(&e.key, &e.value, &e.xattrs, &e.isJSON, &e.cas, &e.isDeletion, &e.revSeqNo); err != nil {
 			return err
 		}
-		e.value = valueForFeedContent(feedContent, e.value)
+		e.value = valueForFeedContent(feedContent, e.value, len(e.xattrs) > 0)
 		q.push(e.asFeedEvent(c.GetCollectionID()))
 	}
 	return rows.Close()
@@ -205,7 +212,7 @@ func (c *Collection) postEvent(event *sgbucket.FeedEvent) {
 			}
 
 			eventCopy := *event
-			eventCopy.Value = valueForFeedContent(feed.args.FeedContent, eventCopy.Value)
+			eventCopy.Value = valueForFeedContent(feed.args.FeedContent, eventCopy.Value, event.DataType&sgbucket.FeedDataTypeXattr != 0)
 			feed.events.push(&eventCopy)
 		}
 	}
