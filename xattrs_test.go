@@ -1740,3 +1740,20 @@ func requireDocNotFoundError(t testing.TB, err error) {
 func requireDocFoundError(t testing.TB, err error) {
 	require.ErrorIs(t, err, sgbucket.ErrKeyExists)
 }
+
+func TestSetHierarchicalPath(t *testing.T) {
+	ctx := testCtx(t)
+	ensureNoLeakedFeeds(t)
+	coll := makeTestBucket(t).DefaultDataStore().(*Collection)
+
+	addToCollection(t, coll, "key", 0, "value")
+
+	_, err := coll.SetXattrs(ctx, "key", map[string][]byte{"_sync.foo": []byte(`"bar"`)})
+	require.NoError(t, err)
+
+	xattrs, _, err := coll.GetXattrs(ctx, "key", []string{"_sync"})
+	require.NoError(t, err)
+	var syncXattr map[string]string
+	require.NoError(t, json.Unmarshal(xattrs["_sync"], &syncXattr))
+	require.Equal(t, map[string]string{"foo": "bar"}, syncXattr)
+}

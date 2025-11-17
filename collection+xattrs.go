@@ -501,10 +501,6 @@ func (c *Collection) writeWithXattrs(
 ) (casOut CAS, err error) {
 	parsedXattrs := make(map[string]any, len(xattrsPayload))
 	for xattrKey, xattrVal := range xattrsPayload {
-		// Validate xattr key/value before going into the transaction:
-		if err = validateXattrKey(xattrKey); err != nil {
-			return
-		}
 		if !xattrVal.isNil() {
 			parsedXattr, err := xattrVal.unmarshalJSON()
 			if err != nil {
@@ -580,7 +576,9 @@ func (c *Collection) writeWithXattrs(
 			if opts.insertXattr {
 				return nil, fmt.Errorf("illegal options to rosmar.Collection.writeWithXattr")
 			}
-			for xattrKey := range xattrsPayload {
+			for xattrPath := range xattrsPayload {
+				subpaths := strings.Split(xattrPath, ".")
+				xattrKey := subpaths[0]
 				existingVal, ok := xattrs[xattrKey]
 				if !ok {
 					existingVal = json.RawMessage(`{}`)
@@ -596,14 +594,23 @@ func (c *Collection) writeWithXattrs(
 			}
 		}
 
-		for xattrKey, xattrVal := range xattrsPayload {
+		for xattrPath, xattrVal := range xattrsPayload {
 			if !xattrVal.isNil() {
 				// Set xattr:
-				if opts.insertXattr && xattrs[xattrKey] != nil {
+				if opts.insertXattr && xattrs[xattrPath] != nil {
 					return nil, sgbucket.ErrPathExists
 				}
+				subpaths := strings.Split(xattrPath, ".")
+				xattrKey := subpaths[0]
 				// Expand any macros specified in the mutateOpts
 				parsedXattr := parsedXattrs[xattrKey]
+				fmt.Printf("parsedXattrBefore=%s\n", parsedXattr)
+				err := upsertSubdocValue(parsedXattr, subpaths[1:], xattrVal)
+				if err != nil {
+					return nil, fmt.Errorf("Could not set subpath %q in xattr %q: %w", xattrPath, xattrKey, err)
+				}
+				fmt.Printf("subpaths=%q, xattrKey=%q, xattrVal=%s\n", subpaths, xattrKey, xattrVal)
+				fmt.Printf("parsedXattrAfter=%s\n", parsedXattr)
 				if err := e.expandXattrMacros(xattrKey, parsedXattr, mutateOpts); err != nil {
 					return nil, err
 				}
@@ -616,15 +623,15 @@ func (c *Collection) writeWithXattrs(
 				if xattrs == nil {
 					xattrs = semiParsedXattrs{}
 				}
-				xattrs[xattrKey] = json.RawMessage(rawXattr)
-				trace("\t\tSet doc %q xattr %q = %s", key, xattrKey, rawXattr)
+				xattrs[xattrPath] = json.RawMessage(rawXattr)
+				trace("\t\tSet doc %q xattr %q = %s", key, xattrPath, rawXattr)
 			} else {
 				// Delete xattr:
-				if _, found := xattrs[xattrKey]; found {
-					delete(xattrs, xattrKey)
-					trace("\t\tDeleted doc %q xattr %s", key, xattrKey)
+				if _, found := xattrs[xattrPath]; found {
+					delete(xattrs, xattrPath)
+					trace("\t\tDeleted doc %q xattr %s", key, xattrPath)
 				} else {
-					return nil, fmt.Errorf("%s: %w", xattrKey, sgbucket.ErrPathNotFound)
+					return nil, fmt.Errorf("%s: %w", xattrPath, sgbucket.ErrPathNotFound)
 				}
 			}
 		}
