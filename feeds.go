@@ -174,8 +174,9 @@ func (c *Collection) enqueueBackfillEvents(startCas uint64, feedContent sgbucket
 		if err := rows.Scan(&e.key, &e.value, &e.xattrs, &e.isJSON, &e.cas, &e.isDeletion, &e.revSeqNo); err != nil {
 			return err
 		}
-		e.value = valueForFeedContent(feedContent, e.value, len(e.xattrs) > 0)
-		q.push(e.asFeedEvent(c.GetCollectionID()))
+		feedEvent := e.asFeedEvent(c.GetCollectionID())
+		feedEvent.Value = valueForFeedContent(feedContent, feedEvent.Value, feedEvent.DataType&sgbucket.FeedDataTypeXattr != 0)
+		q.push(feedEvent)
 	}
 	return rows.Close()
 }

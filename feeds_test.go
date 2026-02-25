@@ -328,11 +328,11 @@ func TestFeedContent(t *testing.T) {
 			c := bucket.DefaultDataStore()
 
 			// write a doc with a body and xattrs
-			addToCollection(t, c, "able", 0,
-				sgbucket.EncodeValueWithXattrs(
-					[]byte(`{"doc_body_value":true}`),
-					sgbucket.Xattr{"xattr_name", []byte(`{"xattr_value":12345}`)},
-				))
+			_, err := c.WriteWithXattrs(testCtx(t), "able", 0, 0,
+				[]byte(`{"doc_body_value":true}`),
+				map[string][]byte{"xattr_name": []byte(`{"xattr_value":12345}`)},
+				nil, nil)
+			require.NoError(t, err)
 
 			args := sgbucket.FeedArguments{
 				Backfill:    0,
