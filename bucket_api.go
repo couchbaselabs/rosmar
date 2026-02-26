@@ -110,6 +110,8 @@ func (bucket *Bucket) IsSupported(feature sgbucket.BucketStoreFeature) bool {
 		return true
 	case sgbucket.BucketStoreFeatureSystemCollections:
 		return true
+	case sgbucket.BucketStoreFeatureRangeScan:
+		return true
 	default:
 		return false
 	}
