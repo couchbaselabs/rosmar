@@ -212,7 +212,12 @@ func (c *Collection) updateView(ctx context.Context, designDoc string, viewName 
 		if err != nil {
 			return err
 		}
-		defer rows.Close()
+		defer func() {
+			err := rows.Close()
+			if err != nil {
+				logError("Error closing rows for view update: %s", err)
+			}
+		}()
 
 		// One goroutine reads documents from the db:
 		mapInputChan := make(chan *mapInput, 100)

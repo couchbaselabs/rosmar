@@ -51,7 +51,10 @@ func (bucket *Bucket) UUID() (string, error) {
 func (bucket *Bucket) Close(_ context.Context) {
 	traceEnter("Bucket.Close", "%s", bucket)
 
-	unregisterBucket(bucket)
+	err := unregisterBucket(bucket)
+	if err != nil {
+		warn("Error closing bucket %s: %v", bucket, err)
+	}
 
 	bucket.mutex.Lock()
 	defer bucket.mutex.Unlock()
@@ -60,22 +63,26 @@ func (bucket *Bucket) Close(_ context.Context) {
 }
 
 // _closeSqliteDB closes the underlying sqlite database and shuts down dcpFeeds. Must have a lock to call this function.
-func (bucket *Bucket) _closeSqliteDB() {
+func (bucket *Bucket) _closeSqliteDB() error {
 	bucket.expManager.stop()
 	for _, c := range bucket.collections {
 		c.close()
 	}
-	if bucket.sqliteDB != nil {
-		bucket.sqliteDB.Close()
-		bucket.collections = nil
+	if bucket.sqliteDB == nil {
+		return nil
 	}
+	bucket.collections = nil
+	return bucket.sqliteDB.Close()
 }
 
 // Closes a bucket and deletes its directory and files (unless it's in-memory.)
-func (bucket *Bucket) CloseAndDelete(ctx context.Context) (err error) {
+func (bucket *Bucket) CloseAndDelete(ctx context.Context) error {
 	bucket.mutex.Lock()
 	defer bucket.mutex.Unlock()
-	bucket._closeSqliteDB()
+	err := bucket._closeSqliteDB()
+	if err != nil {
+		return err
+	}
 	return deleteBucket(ctx, bucket)
 }
 
