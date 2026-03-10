@@ -154,8 +154,9 @@ func valueForFeedContent(feedContent sgbucket.FeedContent, value []byte, hasXatt
 			panic(fmt.Errorf("couldn't decode value %q: %w", value, err))
 		}
 		return sgbucket.EncodeValueWithXattrs(nil, sgbucket.Xattrs(xattrs)...)
+	default:
+		return value
 	}
-	return value
 }
 
 func (c *Collection) enqueueBackfillEvents(startCas uint64, feedContent sgbucket.FeedContent, q *eventQueue) error {
