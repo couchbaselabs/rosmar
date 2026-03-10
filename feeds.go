@@ -159,12 +159,13 @@ func valueForFeedContent(feedContent sgbucket.FeedContent, value []byte, hasXatt
 }
 
 func (c *Collection) enqueueBackfillEvents(startCas uint64, feedContent sgbucket.FeedContent, q *eventQueue) error {
-	keysOnly := feedContent == sgbucket.FeedContentKeysOnly
+	needsValue := feedContent != sgbucket.FeedContentKeysOnly && feedContent != sgbucket.FeedContentXattrOnly
+	needsXattrs := feedContent != sgbucket.FeedContentKeysOnly && feedContent != sgbucket.FeedContentBodyOnly
 	sql := fmt.Sprintf(`SELECT key, %s, %s, isJSON, cas, tombstone, revSeqNo FROM documents
 						WHERE collection=?1 AND cas >= ?2 
 						ORDER BY cas`,
-		ifelse(keysOnly, `null`, `value`),
-		ifelse(keysOnly, `null`, `xattrs`))
+		ifelse(needsValue, `value`, `null`),
+		ifelse(needsXattrs, `xattrs`, `null`))
 	rows, err := c.db().Query(sql, c.id, startCas)
 	if err != nil {
 		return err
