@@ -95,6 +95,8 @@ func (bucket *Bucket) IsSupported(feature sgbucket.BucketStoreFeature) bool {
 		return false
 	case sgbucket.BucketStoreFeatureMultiXattrSubdocOperations:
 		return true
+	case sgbucket.BucketStoreFeatureRangeScan:
+		return true
 	default:
 		return false
 	}
