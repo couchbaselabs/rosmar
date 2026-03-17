@@ -110,13 +110,13 @@ func (c *Collection) StartDCPFeed(
 		}
 
 		debug("%s starting backfill from CAS 0x%x", feed, startCas)
-		feed.events.push(&sgbucket.FeedEvent{Opcode: sgbucket.FeedOpBeginBackfill})
+		feed.events.push(&event{opcode: sgbucket.FeedOpBeginBackfill})
 		err := c.enqueueBackfillEvents(startCas, args.FeedContent, &feed.events)
 		if err != nil {
 			return err
 		}
 		debug("%s ended backfill", feed)
-		feed.events.push(&sgbucket.FeedEvent{Opcode: sgbucket.FeedOpEndBackfill})
+		feed.events.push(&event{opcode: sgbucket.FeedOpEndBackfill})
 	}
 
 	if args.Dump {
@@ -131,39 +131,11 @@ func (c *Collection) StartDCPFeed(
 	return nil
 }
 
-func valueForFeedContent(feedContent sgbucket.FeedContent, value []byte, hasXattrs bool) []byte {
-	switch feedContent {
-	case sgbucket.FeedContentKeysOnly:
-		return nil
-	case sgbucket.FeedContentBodyOnly:
-		body := value
-		if hasXattrs {
-			var err error
-			body, _, err = sgbucket.DecodeValueWithAllXattrs(value)
-			if err != nil {
-				panic(fmt.Errorf("couldn't decode value %q: %w", value, err))
-			}
-		}
-		return sgbucket.EncodeValueWithXattrs(body)
-	case sgbucket.FeedContentXattrOnly:
-		if !hasXattrs {
-			return nil
-		}
-		_, xattrs, err := sgbucket.DecodeValueWithAllXattrs(value)
-		if err != nil {
-			panic(fmt.Errorf("couldn't decode value %q: %w", value, err))
-		}
-		return sgbucket.EncodeValueWithXattrs(nil, sgbucket.Xattrs(xattrs)...)
-	default:
-		return value
-	}
-}
-
 func (c *Collection) enqueueBackfillEvents(startCas uint64, feedContent sgbucket.FeedContent, q *eventQueue) error {
 	needsValue := feedContent != sgbucket.FeedContentKeysOnly && feedContent != sgbucket.FeedContentXattrOnly
 	needsXattrs := feedContent != sgbucket.FeedContentKeysOnly && feedContent != sgbucket.FeedContentBodyOnly
 	sql := fmt.Sprintf(`SELECT key, %s, %s, isJSON, cas, tombstone, revSeqNo FROM documents
-						WHERE collection=?1 AND cas >= ?2 
+						WHERE collection=?1 AND cas >= ?2
 						ORDER BY cas`,
 		ifelse(needsValue, `value`, `null`),
 		ifelse(needsXattrs, `xattrs`, `null`))
@@ -176,47 +148,28 @@ func (c *Collection) enqueueBackfillEvents(startCas uint64, feedContent sgbucket
 		if err := rows.Scan(&e.key, &e.value, &e.xattrs, &e.isJSON, &e.cas, &e.isDeletion, &e.revSeqNo); err != nil {
 			return err
 		}
-		feedEvent := e.asFeedEvent(c.GetCollectionID())
-		feedEvent.Value = valueForFeedContent(feedContent, feedEvent.Value, feedEvent.DataType&sgbucket.FeedDataTypeXattr != 0)
-		q.push(feedEvent)
+		e.opcode = ifelse(e.isDeletion, sgbucket.FeedOpDeletion, sgbucket.FeedOpMutation)
+		eCopy := e
+		q.push(&eCopy)
 	}
 	return rows.Close()
 }
 
 func (c *Collection) postNewEvent(e *event) {
 	info("DCP: %s cas 0x%x: %q = %#.50q ---- xattrs %#q", c, e.cas, e.key, e.value, e.xattrs)
-	feedEvent := e.asFeedEvent(c.GetCollectionID())
-
-	c.postEvent(feedEvent)
+	e.opcode = ifelse(e.isDeletion, sgbucket.FeedOpDeletion, sgbucket.FeedOpMutation)
+	c.postEvent(e)
 	c.bucket.expManager.scheduleExpirationAtOrBefore(e.exp)
-
-	/*
-		// Tell collections of other buckets on the same db file to post the event too:
-		for _, otherBucket := range bucketsAtURL(c.bucket.url) {
-			if otherBucket != c.bucket {
-				if otherCollection := otherBucket.getOpenCollectionByID(c.id); otherCollection != nil {
-					otherCollection.postEvent(feedEvent)
-				}
-			}
-		}
-	*/
 }
 
-func (c *Collection) postEvent(event *sgbucket.FeedEvent) {
+func (c *Collection) postEvent(e *event) {
 	c.bucket.mutex.Lock()
 	feeds := c.bucket.collectionFeeds[c.DataStoreNameImpl]
 	c.bucket.mutex.Unlock()
 
 	for _, feed := range feeds {
 		if feed != nil {
-			if feed.args.FeedContent == sgbucket.FeedContentDefault {
-				feed.events.push(event)
-				continue
-			}
-
-			eventCopy := *event
-			eventCopy.Value = valueForFeedContent(feed.args.FeedContent, eventCopy.Value, event.DataType&sgbucket.FeedDataTypeXattr != 0)
-			feed.events.push(&eventCopy)
+			feed.events.push(e)
 		}
 	}
 }
@@ -231,7 +184,7 @@ func (c *Collection) _stopFeeds() {
 
 //////// DCPFEED:
 
-type eventQueue = queue[*sgbucket.FeedEvent]
+type eventQueue = queue[*event]
 
 type checkpoint struct {
 	LastSeq uint64 `json:"last_seq"`
@@ -307,11 +260,18 @@ func (feed *dcpFeed) run() {
 		defer close(feed.args.DoneChan)
 	}
 
+	collectionID := feed.collection.GetCollectionID()
+	feedContent := feed.args.FeedContent
 	for {
-		if event := feed.events.pull(); event != nil {
-			feed.callback(*event)
-			if event.Cas > feed.lastCas {
-				feed.lastCas = event.Cas
+		if e := feed.events.pull(); e != nil {
+			feedEvent, err := e.asFeedEvent(collectionID, feedContent)
+			if err != nil {
+				logError("Error converting %s event to feed event: %v", feed, err)
+				continue
+			}
+			feed.callback(*feedEvent)
+			if feedEvent.Cas > feed.lastCas {
+				feed.lastCas = feedEvent.Cas
 				feed.lastCasChanged = true
 				debug("%s lastCas = 0x%x", feed, feed.lastCas)
 				// TODO: Set a timer to write the checkpoint "soon"
@@ -336,44 +296,80 @@ func (feed *dcpFeed) close() {
 //////// EVENTS
 
 type event struct {
-	key        string // Doc ID
-	value      []byte // Raw data content, or nil if deleted
-	isDeletion bool   // True if it's a deletion event
-	isJSON     bool   // Is the data a JSON document?
-	xattrs     []byte // Extended attributes
-	cas        CAS    // Sequence in collection
-	exp        Exp    // Expiration time
-	revSeqNo   uint64 // Revision sequence number
+	opcode     sgbucket.FeedOpcode // FeedOpMutation, FeedOpDeletion, or sentinel opcodes
+	key        string              // Doc ID
+	value      []byte              // Raw data content, or nil if deleted
+	isDeletion bool                // True if it's a deletion event (used for SQL scan)
+	isJSON     bool                // Is the data a JSON document?
+	xattrs     []byte              // Extended attributes (JSON-encoded)
+	cas        CAS                 // Sequence in collection
+	exp        Exp                 // Expiration time
+	revSeqNo   uint64              // Revision sequence number
 }
 
-func (e *event) asFeedEvent(collectionID uint32) *sgbucket.FeedEvent {
+func (e *event) asFeedEvent(collectionID uint32, feedContent sgbucket.FeedContent) (*sgbucket.FeedEvent, error) {
+	// Sentinel events (backfill markers) have no document data
+	if e.opcode == sgbucket.FeedOpBeginBackfill || e.opcode == sgbucket.FeedOpEndBackfill {
+		return &sgbucket.FeedEvent{Opcode: e.opcode}, nil
+	}
+
 	if e.exp != absoluteExpiry(e.exp) {
 		panic(fmt.Sprintf("expiry %d isn't absolute", e.exp)) // caller forgot absoluteExpiry()
 	}
 	if e.revSeqNo == 0 {
 		panic("event missing revSeqNo")
 	}
+
 	feedEvent := sgbucket.FeedEvent{
-		Opcode:       ifelse(e.isDeletion, sgbucket.FeedOpDeletion, sgbucket.FeedOpMutation),
+		Opcode:       e.opcode,
 		CollectionID: collectionID,
 		Key:          []byte(e.key),
-		Value:        e.value,
 		Cas:          e.cas,
 		Expiry:       e.exp,
 		DataType:     ifelse(e.isJSON, sgbucket.FeedDataTypeJSON, sgbucket.FeedDataTypeRaw),
-		// VbNo:     uint16(sgbucket.VBHash(doc.key, kNumVbuckets)),
 		RevNo:        e.revSeqNo,
 		TimeReceived: time.Now(),
 	}
-	if len(e.xattrs) > 0 {
-		var xattrMap map[string]json.RawMessage
-		_ = json.Unmarshal(e.xattrs, &xattrMap)
-		var xattrs []sgbucket.Xattr
-		for k, v := range xattrMap {
-			xattrs = append(xattrs, sgbucket.Xattr{Name: k, Value: v})
+
+	switch feedContent {
+	case sgbucket.FeedContentKeysOnly:
+		// No value or xattrs needed
+	case sgbucket.FeedContentBodyOnly:
+		feedEvent.Value = e.value
+	case sgbucket.FeedContentXattrOnly:
+		if len(e.xattrs) > 0 {
+			xattrs, err := e.parseXattrs()
+			if err != nil {
+				return nil, fmt.Errorf("couldn't parse xattrs for key %q: %w", e.key, err)
+			}
+			feedEvent.Value = sgbucket.EncodeValueWithXattrs(nil, xattrs...)
+			feedEvent.DataType |= sgbucket.FeedDataTypeXattr
 		}
-		feedEvent.Value = sgbucket.EncodeValueWithXattrs(e.value, xattrs...)
-		feedEvent.DataType |= sgbucket.FeedDataTypeXattr
+	default: // FeedContentDefault
+		if len(e.xattrs) > 0 {
+			xattrs, err := e.parseXattrs()
+			if err != nil {
+				return nil, fmt.Errorf("couldn't parse xattrs for key %q: %w", e.key, err)
+			}
+			feedEvent.Value = sgbucket.EncodeValueWithXattrs(e.value, xattrs...)
+			feedEvent.DataType |= sgbucket.FeedDataTypeXattr
+		} else {
+			feedEvent.Value = e.value
+		}
 	}
-	return &feedEvent
+
+	return &feedEvent, nil
+}
+
+// parseXattrs decodes the JSON-encoded xattrs into sgbucket.Xattr slice.
+func (e *event) parseXattrs() ([]sgbucket.Xattr, error) {
+	var xattrMap map[string]json.RawMessage
+	if err := json.Unmarshal(e.xattrs, &xattrMap); err != nil {
+		return nil, err
+	}
+	xattrs := make([]sgbucket.Xattr, 0, len(xattrMap))
+	for k, v := range xattrMap {
+		xattrs = append(xattrs, sgbucket.Xattr{Name: k, Value: v})
+	}
+	return xattrs, nil
 }

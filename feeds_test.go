@@ -321,13 +321,38 @@ func TestFeedContent(t *testing.T) {
 		{"XattrOnly", sgbucket.FeedContentXattrOnly},
 	}
 
+	assertFeedContentEvent := func(t *testing.T, feedContent sgbucket.FeedContent, event sgbucket.FeedEvent) {
+		t.Helper()
+		assert.Equal(t, sgbucket.FeedOpMutation, event.Opcode)
+		t.Logf("event value: %s", event.Value)
+		switch feedContent {
+		case sgbucket.FeedContentKeysOnly:
+			assert.Nil(t, event.Value)
+		case sgbucket.FeedContentDefault:
+			require.NotNil(t, event.Value)
+			assert.Contains(t, string(event.Value), `"doc_body_value":true`)
+			assert.Contains(t, string(event.Value), `"xattr_value":12345`)
+			assert.Contains(t, string(event.Value), `xattr_name`)
+		case sgbucket.FeedContentBodyOnly:
+			require.NotNil(t, event.Value)
+			assert.Contains(t, string(event.Value), `"doc_body_value":true`)
+			assert.NotContains(t, string(event.Value), `"xattr_value":12345`)
+			assert.NotContains(t, string(event.Value), `xattr_name`)
+		case sgbucket.FeedContentXattrOnly:
+			require.NotNil(t, event.Value)
+			assert.NotContains(t, string(event.Value), `"doc_body_value":true`)
+			assert.Contains(t, string(event.Value), `"xattr_value":12345`)
+			assert.Contains(t, string(event.Value), `xattr_name`)
+		}
+	}
+
 	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
+		t.Run(test.name+"/Backfill", func(t *testing.T) {
 			ensureNoLeakedFeeds(t)
 			bucket := makeTestBucket(t)
 			c := bucket.DefaultDataStore()
 
-			// write a doc with a body and xattrs
+			// write a doc with a body and xattrs before starting the feed
 			_, err := c.WriteWithXattrs(testCtx(t), "able", 0, 0,
 				[]byte(`{"doc_body_value":true}`),
 				map[string][]byte{"xattr_name": []byte(`{"xattr_value":12345}`)},
@@ -336,7 +361,7 @@ func TestFeedContent(t *testing.T) {
 
 			args := sgbucket.FeedArguments{
 				Backfill:    0,
-				Dump:        true, // stop on end
+				Dump:        true,
 				FeedContent: test.feedContent,
 			}
 			events, doneChan := startFeedWithArgs(t, bucket, args)
@@ -344,34 +369,39 @@ func TestFeedContent(t *testing.T) {
 			event := <-events
 			assert.Equal(t, sgbucket.FeedOpBeginBackfill, event.Opcode)
 
-			event = <-events
-			assert.Equal(t, sgbucket.FeedOpMutation, event.Opcode)
-			t.Logf("event value: %s", event.Value)
-			switch test.feedContent {
-			case sgbucket.FeedContentKeysOnly:
-				assert.Nil(t, event.Value)
-			case sgbucket.FeedContentDefault:
-				require.NotNil(t, event.Value)
-				assert.Contains(t, string(event.Value), `"doc_body_value":true`)
-				assert.Contains(t, string(event.Value), `"xattr_value":12345`)
-				assert.Contains(t, string(event.Value), `xattr_name`)
-			case sgbucket.FeedContentBodyOnly:
-				require.NotNil(t, event.Value)
-				assert.Contains(t, string(event.Value), `"doc_body_value":true`)
-				assert.NotContains(t, string(event.Value), `"xattr_value":12345`)
-				assert.NotContains(t, string(event.Value), `xattr_name`)
-			case sgbucket.FeedContentXattrOnly:
-				require.NotNil(t, event.Value)
-				assert.NotContains(t, string(event.Value), `"doc_body_value":true`)
-				assert.Contains(t, string(event.Value), `"xattr_value":12345`)
-				assert.Contains(t, string(event.Value), `xattr_name`)
-			}
+			assertFeedContentEvent(t, test.feedContent, <-events)
 
 			event = <-events
 			assert.Equal(t, sgbucket.FeedOpEndBackfill, event.Opcode)
 
 			_, ok := <-doneChan
 			assert.False(t, ok)
+		})
+
+		t.Run(test.name+"/Live", func(t *testing.T) {
+			ensureNoLeakedFeeds(t)
+			bucket := makeTestBucket(t)
+			c := bucket.DefaultDataStore()
+
+			// start feed before writing the doc (no backfill)
+			terminator := make(chan bool)
+			args := sgbucket.FeedArguments{
+				Backfill:    sgbucket.FeedNoBackfill,
+				FeedContent: test.feedContent,
+				Terminator:  terminator,
+			}
+			events, _ := startFeedWithArgs(t, bucket, args)
+
+			// write a doc with a body and xattrs after feed is started
+			_, err := c.WriteWithXattrs(testCtx(t), "able", 0, 0,
+				[]byte(`{"doc_body_value":true}`),
+				map[string][]byte{"xattr_name": []byte(`{"xattr_value":12345}`)},
+				nil, nil)
+			require.NoError(t, err)
+
+			assertFeedContentEvent(t, test.feedContent, <-events)
+
+			close(terminator)
 		})
 	}
 }
