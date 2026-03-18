@@ -143,18 +143,20 @@ func (c *Collection) enqueueBackfillEvents(startCas uint64, feedContent sgbucket
 	if err != nil {
 		return err
 	}
-	e := event{}
 	for rows.Next() {
+		var e event
 		if err := rows.Scan(&e.key, &e.value, &e.xattrs, &e.isJSON, &e.cas, &e.isDeletion, &e.revSeqNo); err != nil {
 			return err
 		}
 		e.opcode = ifelse(e.isDeletion, sgbucket.FeedOpDeletion, sgbucket.FeedOpMutation)
-		eCopy := e
-		q.push(&eCopy)
+		q.push(&e)
 	}
 	return rows.Close()
 }
 
+// postNewEvent pushes a new live event to all registered feeds. The full event (body + xattrs) is
+// always sent; FeedContent filtering is applied consumer-side in asFeedEvent. Only backfill events
+// are filtered at the SQL level in enqueueBackfillEvents.
 func (c *Collection) postNewEvent(e *event) {
 	info("DCP: %s cas 0x%x: %q = %#.50q ---- xattrs %#q", c, e.cas, e.key, e.value, e.xattrs)
 	e.opcode = ifelse(e.isDeletion, sgbucket.FeedOpDeletion, sgbucket.FeedOpMutation)
@@ -169,7 +171,8 @@ func (c *Collection) postEvent(e *event) {
 
 	for _, feed := range feeds {
 		if feed != nil {
-			feed.events.push(e)
+			eCopy := *e // each feed gets its own copy to avoid data races
+			feed.events.push(&eCopy)
 		}
 	}
 }
@@ -266,8 +269,8 @@ func (feed *dcpFeed) run() {
 		if e := feed.events.pull(); e != nil {
 			feedEvent, err := e.asFeedEvent(collectionID, feedContent)
 			if err != nil {
-				logError("Error converting %s event to feed event: %v", feed, err)
-				continue
+				logError("Fatal error converting %s event to feed event: %v", feed, err)
+				break
 			}
 			feed.callback(*feedEvent)
 			if feedEvent.Cas > feed.lastCas {
