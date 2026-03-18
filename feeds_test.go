@@ -321,7 +321,7 @@ func TestFeedContent(t *testing.T) {
 		{"XattrOnly", sgbucket.FeedContentXattrOnly},
 	}
 
-	assertFeedContentEvent := func(t *testing.T, feedContent sgbucket.FeedContent, event sgbucket.FeedEvent) {
+	assertFeedContentEvent := func(t *testing.T, feedContent sgbucket.FeedContent, hasXattrs bool, event sgbucket.FeedEvent) {
 		t.Helper()
 		assert.Equal(t, sgbucket.FeedOpMutation, event.Opcode)
 		t.Logf("event value: %s", event.Value)
@@ -331,18 +331,24 @@ func TestFeedContent(t *testing.T) {
 		case sgbucket.FeedContentDefault:
 			require.NotNil(t, event.Value)
 			assert.Contains(t, string(event.Value), `"doc_body_value":true`)
-			assert.Contains(t, string(event.Value), `"xattr_value":12345`)
-			assert.Contains(t, string(event.Value), `xattr_name`)
+			if hasXattrs {
+				assert.Contains(t, string(event.Value), `"xattr_value":12345`)
+				assert.Contains(t, string(event.Value), `xattr_name`)
+			}
 		case sgbucket.FeedContentBodyOnly:
 			require.NotNil(t, event.Value)
 			assert.Contains(t, string(event.Value), `"doc_body_value":true`)
 			assert.NotContains(t, string(event.Value), `"xattr_value":12345`)
 			assert.NotContains(t, string(event.Value), `xattr_name`)
 		case sgbucket.FeedContentXattrOnly:
-			require.NotNil(t, event.Value)
-			assert.NotContains(t, string(event.Value), `"doc_body_value":true`)
-			assert.Contains(t, string(event.Value), `"xattr_value":12345`)
-			assert.Contains(t, string(event.Value), `xattr_name`)
+			if hasXattrs {
+				require.NotNil(t, event.Value)
+				assert.NotContains(t, string(event.Value), `"doc_body_value":true`)
+				assert.Contains(t, string(event.Value), `"xattr_value":12345`)
+				assert.Contains(t, string(event.Value), `xattr_name`)
+			} else {
+				assert.Nil(t, event.Value)
+			}
 		}
 	}
 
@@ -369,7 +375,7 @@ func TestFeedContent(t *testing.T) {
 			event := <-events
 			assert.Equal(t, sgbucket.FeedOpBeginBackfill, event.Opcode)
 
-			assertFeedContentEvent(t, test.feedContent, <-events)
+			assertFeedContentEvent(t, test.feedContent, true, <-events)
 
 			event = <-events
 			assert.Equal(t, sgbucket.FeedOpEndBackfill, event.Opcode)
@@ -399,7 +405,60 @@ func TestFeedContent(t *testing.T) {
 				nil, nil)
 			require.NoError(t, err)
 
-			assertFeedContentEvent(t, test.feedContent, <-events)
+			assertFeedContentEvent(t, test.feedContent, true, <-events)
+
+			close(terminator)
+		})
+
+		t.Run(test.name+"/Backfill/NoXattrs", func(t *testing.T) {
+			ensureNoLeakedFeeds(t)
+			bucket := makeTestBucket(t)
+			c := bucket.DefaultDataStore()
+
+			// write a doc with body only (no xattrs)
+			ok, err := c.Add("able", 0, []byte(`{"doc_body_value":true}`))
+			require.NoError(t, err)
+			require.True(t, ok)
+
+			args := sgbucket.FeedArguments{
+				Backfill:    0,
+				Dump:        true,
+				FeedContent: test.feedContent,
+			}
+			events, doneChan := startFeedWithArgs(t, bucket, args)
+
+			event := <-events
+			assert.Equal(t, sgbucket.FeedOpBeginBackfill, event.Opcode)
+
+			assertFeedContentEvent(t, test.feedContent, false, <-events)
+
+			event = <-events
+			assert.Equal(t, sgbucket.FeedOpEndBackfill, event.Opcode)
+
+			_, ok = <-doneChan
+			assert.False(t, ok)
+		})
+
+		t.Run(test.name+"/Live/NoXattrs", func(t *testing.T) {
+			ensureNoLeakedFeeds(t)
+			bucket := makeTestBucket(t)
+			c := bucket.DefaultDataStore()
+
+			// start feed before writing the doc (no backfill)
+			terminator := make(chan bool)
+			args := sgbucket.FeedArguments{
+				Backfill:    sgbucket.FeedNoBackfill,
+				FeedContent: test.feedContent,
+				Terminator:  terminator,
+			}
+			events, _ := startFeedWithArgs(t, bucket, args)
+
+			// write a doc with body only (no xattrs) after feed is started
+			ok, err := c.Add("able", 0, []byte(`{"doc_body_value":true}`))
+			require.NoError(t, err)
+			require.True(t, ok)
+
+			assertFeedContentEvent(t, test.feedContent, false, <-events)
 
 			close(terminator)
 		})
