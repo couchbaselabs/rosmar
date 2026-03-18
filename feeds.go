@@ -171,7 +171,7 @@ func (c *Collection) postEvent(e *event) {
 
 	for _, feed := range feeds {
 		if feed != nil {
-			eCopy := *e // each feed gets its own copy to avoid data races
+			eCopy := *e // each feed gets its own copy to avoid cross-feed event mutations and data races
 			feed.events.push(&eCopy)
 		}
 	}
