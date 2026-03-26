@@ -46,6 +46,7 @@ func makeTestBucket(t *testing.T) *Bucket {
 
 func makeTestBucketWithName(t *testing.T, name string) *Bucket {
 	LoggingCallback = func(level LogLevel, fmt string, args ...any) {
+		t.Helper()
 		t.Logf(logLevelNamesPrint[level]+fmt, args...)
 	}
 	bucket, err := OpenBucket(uriFromPath(testBucketPath(t)), name, CreateNew)

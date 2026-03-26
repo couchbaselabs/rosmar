@@ -309,3 +309,283 @@ func TestCollectionMutations(t *testing.T) {
 	assert.Equal(t, len(c1Keys), numDocs)
 	assert.Equal(t, len(c2Keys), numDocs)
 }
+
+// TestFeedEventIsolation verifies that multiple feeds on the same collection receive independent
+// copies of events, so mutating one feed's event does not affect another's.
+func TestFeedEventIsolation(t *testing.T) {
+	ensureNoLeakedFeeds(t)
+	bucket := makeTestBucket(t)
+	c := bucket.DefaultDataStore()
+
+	// Start two feeds on the same collection with different FeedContent modes.
+	// Feed 1 wants full content (default), feed 2 wants keys only.
+	terminator1 := make(chan bool)
+	args1 := sgbucket.FeedArguments{
+		Backfill:    sgbucket.FeedNoBackfill,
+		FeedContent: sgbucket.FeedContentDefault,
+		Terminator:  terminator1,
+	}
+	events1, _ := startFeedWithArgs(t, bucket, args1)
+
+	terminator2 := make(chan bool)
+	args2 := sgbucket.FeedArguments{
+		Backfill:    sgbucket.FeedNoBackfill,
+		FeedContent: sgbucket.FeedContentKeysOnly,
+		Terminator:  terminator2,
+	}
+	events2, _ := startFeedWithArgs(t, bucket, args2)
+
+	// Write a doc with body and xattrs
+	_, err := c.WriteWithXattrs(testCtx(t), "doc1", 0, 0,
+		[]byte(`{"body":true}`),
+		map[string][]byte{"_xattr": []byte(`{"x":1}`)},
+		nil, nil)
+	require.NoError(t, err)
+
+	e1 := <-events1
+	e2 := <-events2
+
+	// Feed 1 (default) should have value with body+xattrs
+	assert.Equal(t, sgbucket.FeedOpMutation, e1.Opcode)
+	require.NotNil(t, e1.Value)
+	assert.Contains(t, string(e1.Value), `"body":true`)
+
+	// Feed 2 (keys only) should have nil value
+	assert.Equal(t, sgbucket.FeedOpMutation, e2.Opcode)
+	assert.Nil(t, e2.Value)
+
+	// Both should have the same key
+	assert.Equal(t, "doc1", string(e1.Key))
+	assert.Equal(t, "doc1", string(e2.Key))
+
+	// Mutate the event from feed 1 — feed 2's event must not be affected
+	e1.Key = []byte("MUTATED")
+	e1.Value = []byte("MUTATED")
+	assert.Equal(t, "doc1", string(e2.Key), "mutating feed 1 event should not affect feed 2")
+	assert.Nil(t, e2.Value, "mutating feed 1 event should not affect feed 2")
+
+	close(terminator1)
+	close(terminator2)
+}
+
+// TestAsFeedEventErrorOnCorruptXattrs verifies that asFeedEvent returns an error when xattrs
+// contain invalid JSON, and that feeds which don't need xattrs are unaffected.
+func TestAsFeedEventErrorOnCorruptXattrs(t *testing.T) {
+	e := &event{
+		opcode:   sgbucket.FeedOpMutation,
+		key:      "doc1",
+		value:    []byte(`"value1"`),
+		xattrs:   []byte(`not valid json`),
+		cas:      1,
+		exp:      0,
+		revSeqNo: 1,
+	}
+
+	// FeedContentDefault parses xattrs — should fail
+	_, err := e.asFeedEvent(0, sgbucket.FeedContentDefault)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `couldn't parse xattrs for key "doc1"`)
+
+	// FeedContentXattrOnly also parses xattrs — should fail
+	_, err = e.asFeedEvent(0, sgbucket.FeedContentXattrOnly)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `couldn't parse xattrs for key "doc1"`)
+
+	// FeedContentKeysOnly doesn't touch xattrs — should succeed
+	feedEvent, err := e.asFeedEvent(0, sgbucket.FeedContentKeysOnly)
+	require.NoError(t, err)
+	assert.Nil(t, feedEvent.Value)
+
+	// FeedContentBodyOnly doesn't touch xattrs — should succeed
+	feedEvent, err = e.asFeedEvent(0, sgbucket.FeedContentBodyOnly)
+	require.NoError(t, err)
+	assert.Equal(t, []byte(`"value1"`), feedEvent.Value)
+}
+
+// TestFeedStopsOnCorruptEvent verifies that a feed stops (closes DoneChan) when it encounters
+// a corrupt event that cannot be converted to a FeedEvent.
+func TestFeedStopsOnCorruptEvent(t *testing.T) {
+	ensureNoLeakedFeeds(t)
+	bucket := makeTestBucket(t)
+	c := bucket.DefaultDataStore()
+
+	// Write a doc then corrupt its xattrs directly in SQLite
+	addToCollection(t, c, "doc1", 0, "value1")
+	col := c.(*Collection)
+	_, err := col.db().Exec(
+		`UPDATE documents SET xattrs=? WHERE collection=? AND key=?`,
+		[]byte(`not valid json`), col.id, "doc1")
+	require.NoError(t, err)
+
+	args := sgbucket.FeedArguments{
+		Backfill: 0,
+		Dump:     true,
+	}
+	events, doneChan := startFeedWithArgs(t, bucket, args)
+
+	event := <-events
+	assert.Equal(t, sgbucket.FeedOpBeginBackfill, event.Opcode)
+
+	// The feed should stop without delivering doc1 — DoneChan closes
+	select {
+	case _, ok := <-doneChan:
+		assert.False(t, ok, "DoneChan should be closed after corrupt event")
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for feed to stop after corrupt event")
+	}
+}
+
+func TestFeedContent(t *testing.T) {
+	tests := []struct {
+		name        string
+		feedContent sgbucket.FeedContent
+	}{
+		{"Default", sgbucket.FeedContentDefault},
+		{"KeysOnly", sgbucket.FeedContentKeysOnly},
+		{"BodyOnly", sgbucket.FeedContentBodyOnly},
+		{"XattrOnly", sgbucket.FeedContentXattrOnly},
+	}
+
+	assertFeedContentEvent := func(t *testing.T, feedContent sgbucket.FeedContent, hasXattrs bool, event sgbucket.FeedEvent) {
+		t.Helper()
+		assert.Equal(t, sgbucket.FeedOpMutation, event.Opcode)
+		t.Logf("event value: %s", event.Value)
+		switch feedContent {
+		case sgbucket.FeedContentKeysOnly:
+			assert.Nil(t, event.Value)
+		case sgbucket.FeedContentDefault:
+			require.NotNil(t, event.Value)
+			assert.Contains(t, string(event.Value), `"doc_body_value":true`)
+			if hasXattrs {
+				assert.Contains(t, string(event.Value), `"xattr_value":12345`)
+				assert.Contains(t, string(event.Value), `xattr_name`)
+			}
+		case sgbucket.FeedContentBodyOnly:
+			require.NotNil(t, event.Value)
+			assert.Contains(t, string(event.Value), `"doc_body_value":true`)
+			assert.NotContains(t, string(event.Value), `"xattr_value":12345`)
+			assert.NotContains(t, string(event.Value), `xattr_name`)
+		case sgbucket.FeedContentXattrOnly:
+			if hasXattrs {
+				require.NotNil(t, event.Value)
+				assert.NotContains(t, string(event.Value), `"doc_body_value":true`)
+				assert.Contains(t, string(event.Value), `"xattr_value":12345`)
+				assert.Contains(t, string(event.Value), `xattr_name`)
+			} else {
+				assert.Nil(t, event.Value)
+			}
+		}
+	}
+
+	for _, test := range tests {
+		t.Run(test.name+"/Backfill", func(t *testing.T) {
+			ensureNoLeakedFeeds(t)
+			bucket := makeTestBucket(t)
+			c := bucket.DefaultDataStore()
+
+			// write a doc with a body and xattrs before starting the feed
+			_, err := c.WriteWithXattrs(testCtx(t), "able", 0, 0,
+				[]byte(`{"doc_body_value":true}`),
+				map[string][]byte{"xattr_name": []byte(`{"xattr_value":12345}`)},
+				nil, nil)
+			require.NoError(t, err)
+
+			args := sgbucket.FeedArguments{
+				Backfill:    0,
+				Dump:        true,
+				FeedContent: test.feedContent,
+			}
+			events, doneChan := startFeedWithArgs(t, bucket, args)
+
+			event := <-events
+			assert.Equal(t, sgbucket.FeedOpBeginBackfill, event.Opcode)
+
+			assertFeedContentEvent(t, test.feedContent, true, <-events)
+
+			event = <-events
+			assert.Equal(t, sgbucket.FeedOpEndBackfill, event.Opcode)
+
+			_, ok := <-doneChan
+			assert.False(t, ok)
+		})
+
+		t.Run(test.name+"/Live", func(t *testing.T) {
+			ensureNoLeakedFeeds(t)
+			bucket := makeTestBucket(t)
+			c := bucket.DefaultDataStore()
+
+			// start feed before writing the doc (no backfill)
+			terminator := make(chan bool)
+			args := sgbucket.FeedArguments{
+				Backfill:    sgbucket.FeedNoBackfill,
+				FeedContent: test.feedContent,
+				Terminator:  terminator,
+			}
+			events, _ := startFeedWithArgs(t, bucket, args)
+
+			// write a doc with a body and xattrs after feed is started
+			_, err := c.WriteWithXattrs(testCtx(t), "able", 0, 0,
+				[]byte(`{"doc_body_value":true}`),
+				map[string][]byte{"xattr_name": []byte(`{"xattr_value":12345}`)},
+				nil, nil)
+			require.NoError(t, err)
+
+			assertFeedContentEvent(t, test.feedContent, true, <-events)
+
+			close(terminator)
+		})
+
+		t.Run(test.name+"/Backfill/NoXattrs", func(t *testing.T) {
+			ensureNoLeakedFeeds(t)
+			bucket := makeTestBucket(t)
+			c := bucket.DefaultDataStore()
+
+			// write a doc with body only (no xattrs)
+			ok, err := c.Add("able", 0, []byte(`{"doc_body_value":true}`))
+			require.NoError(t, err)
+			require.True(t, ok)
+
+			args := sgbucket.FeedArguments{
+				Backfill:    0,
+				Dump:        true,
+				FeedContent: test.feedContent,
+			}
+			events, doneChan := startFeedWithArgs(t, bucket, args)
+
+			event := <-events
+			assert.Equal(t, sgbucket.FeedOpBeginBackfill, event.Opcode)
+
+			assertFeedContentEvent(t, test.feedContent, false, <-events)
+
+			event = <-events
+			assert.Equal(t, sgbucket.FeedOpEndBackfill, event.Opcode)
+
+			_, ok = <-doneChan
+			assert.False(t, ok)
+		})
+
+		t.Run(test.name+"/Live/NoXattrs", func(t *testing.T) {
+			ensureNoLeakedFeeds(t)
+			bucket := makeTestBucket(t)
+			c := bucket.DefaultDataStore()
+
+			// start feed before writing the doc (no backfill)
+			terminator := make(chan bool)
+			args := sgbucket.FeedArguments{
+				Backfill:    sgbucket.FeedNoBackfill,
+				FeedContent: test.feedContent,
+				Terminator:  terminator,
+			}
+			events, _ := startFeedWithArgs(t, bucket, args)
+
+			// write a doc with body only (no xattrs) after feed is started
+			ok, err := c.Add("able", 0, []byte(`{"doc_body_value":true}`))
+			require.NoError(t, err)
+			require.True(t, ok)
+
+			assertFeedContentEvent(t, test.feedContent, false, <-events)
+
+			close(terminator)
+		})
+	}
+}
