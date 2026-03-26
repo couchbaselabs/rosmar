@@ -72,7 +72,7 @@ func (r *bucketRegistry) getCachedBucket(name, url string, mode OpenMode) (*Buck
 }
 
 // unregisterBucket removes a Bucket from the registry. Must be called before closing.
-func (r *bucketRegistry) unregisterBucket(bucket *Bucket) {
+func (r *bucketRegistry) unregisterBucket(bucket *Bucket) error {
 	name := bucket.name
 	debug("UNregisterBucket %v %s at %s", bucket, name, bucket.url)
 	r.lock.Lock()
@@ -81,19 +81,20 @@ func (r *bucketRegistry) unregisterBucket(bucket *Bucket) {
 	bucketCount := r.bucketCount[name]
 	if bucketCount < 0 {
 		warn("unregisterBucket couldn't find %v", bucket)
-		return
+		return nil
 	}
 	if bucketCount == 1 {
 		delete(r.bucketCount, name)
 		// if an in memory bucket, don't close the sqlite db since it will vanish
 		if !bucket.inMemory {
-			bucket._closeSqliteDB()
+			err := bucket._closeSqliteDB()
 			delete(r.buckets, name)
+			return err
 		}
-		return
+		return nil
 	}
 	r.bucketCount[name] -= 1
-	return
+	return nil
 }
 
 // deleteBucket deletes a bucket from the registry and disk. Closes all existing buckets of the same name.
@@ -133,8 +134,8 @@ func registerBucket(bucket *Bucket) (bool, *Bucket) {
 }
 
 // unregisterBucket removes a Bucket from the registry. Must be called before closing.
-func unregisterBucket(bucket *Bucket) {
-	cluster.unregisterBucket(bucket)
+func unregisterBucket(bucket *Bucket) error {
+	return cluster.unregisterBucket(bucket)
 }
 
 // deleteBucket will delete a bucket from the registry and from disk.
