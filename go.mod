@@ -6,7 +6,7 @@ require (
 	github.com/couchbase/sg-bucket v0.0.0-20260318163448-98d99b4d9cd0
 	github.com/google/uuid v1.6.0
 	github.com/mattn/go-sqlite3 v1.14.37
-	github.com/stretchr/testify v1.10.0
+	github.com/stretchr/testify v1.11.1
 )
 
 require (
