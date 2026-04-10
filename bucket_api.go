@@ -102,6 +102,8 @@ func (bucket *Bucket) IsSupported(feature sgbucket.BucketStoreFeature) bool {
 		return false
 	case sgbucket.BucketStoreFeatureMultiXattrSubdocOperations:
 		return true
+	case sgbucket.BucketStoreFeatureSystemCollections:
+		return true
 	default:
 		return false
 	}
@@ -118,6 +120,11 @@ var defaultDataStoreName = sgbucket.DataStoreNameImpl{
 	Collection: sgbucket.DefaultCollection,
 }
 
+var mobileSystemDataStoreName = sgbucket.DataStoreNameImpl{
+	Scope:      sgbucket.MobileSystemScope,
+	Collection: sgbucket.MobileSystemCollection,
+}
+
 func validateName(name sgbucket.DataStoreName) (sgbucket.DataStoreNameImpl, error) {
 	return sgbucket.NewValidDataStoreName(name.ScopeName(), name.CollectionName())
 }
@@ -127,6 +134,16 @@ func (bucket *Bucket) DefaultDataStore() sgbucket.DataStore {
 	collection, err := bucket.getOrCreateCollection(defaultDataStoreName, true)
 	if err != nil {
 		warn("DefaultDataStore() ->  %v", err)
+		return nil
+	}
+	return collection
+}
+
+func (bucket *Bucket) MobileSystemDataStore() sgbucket.DataStore {
+	traceEnter("MobileSystemDataStore", "%s", bucket)
+	collection, err := bucket.getOrCreateCollection(mobileSystemDataStoreName, true)
+	if err != nil {
+		warn("MobileSystemDataStore() ->  %v", err)
 		return nil
 	}
 	return collection
@@ -181,6 +198,10 @@ func (bucket *Bucket) ListDataStores() (result []sgbucket.DataStoreName, err err
 		var scope, name string
 		if err := rows.Scan(&id, &scope, &name); err != nil {
 			return nil, err
+		}
+		if scope == sgbucket.MobileSystemScope {
+			// skip listing _system._mobile in available data stores
+			continue
 		}
 		result = append(result, sgbucket.DataStoreNameImpl{Scope: scope, Collection: name})
 	}
