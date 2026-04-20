@@ -102,6 +102,17 @@ func (c *Collection) GetRaw(key string) (val []byte, cas CAS, err error) {
 	return
 }
 
+// GetCas returns the CAS of a document, including tombstones.
+func (c *Collection) GetCas(key string) (cas CAS, err error) {
+	traceEnter("GetCas", "%q", key)
+	row := c.db().QueryRow("SELECT cas FROM documents WHERE collection=? AND key=?", c.id, key)
+	if err = scan(row, &cas); err != nil {
+		err = remapKeyError(err, key)
+	}
+	traceExit("GetCas", err, "cas=0x%x", cas)
+	return
+}
+
 // isTombstone returns true if the document is a tombstone.
 func (c *Collection) isTombstone(q queryable, key string) bool {
 	row := q.QueryRow("SELECT 1 FROM documents WHERE collection=? AND key=? AND tombstone=1", c.id, key)
