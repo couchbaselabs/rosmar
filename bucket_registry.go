@@ -87,9 +87,9 @@ func (r *bucketRegistry) unregisterBucket(bucket *Bucket) error {
 		delete(r.bucketCount, name)
 		// if an in memory bucket, don't close the sqlite db since it will vanish
 		if !bucket.inMemory {
-			err := bucket._closeSqliteDB()
-			delete(r.buckets, name)
-			return err
+			// delete from register even if deletion fails
+			defer func() { delete(r.buckets, name) }()
+			return bucket.close()
 		}
 		return nil
 	}
