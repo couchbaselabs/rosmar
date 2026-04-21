@@ -15,6 +15,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 
 	sgbucket "github.com/couchbase/sg-bucket"
@@ -25,6 +26,7 @@ type semiParsedXattrs = map[string]json.RawMessage
 const (
 	virtualXattrName     = "$document"
 	virtualXattrRevSeqNo = "revid"
+	virtualXattrCAS      = "CAS"
 )
 
 // ////// SGBUCKET XATTR STORE INTERFACE
@@ -428,10 +430,13 @@ func (c *Collection) getRawWithXattrs(key string, xattrKeys []string) (sgbucket.
 	}
 	for _, xattrKey := range xattrKeys {
 		if xattrKey == virtualXattrName {
-			rawDoc.Xattrs[xattrKey] = []byte(fmt.Sprintf(`{"value_crc32c":%q,"%s":"%d"}`, encodedCRC32c(rawDoc.Body), virtualXattrRevSeqNo, revSeqNo))
+			rawDoc.Xattrs[xattrKey] = []byte(fmt.Sprintf(`{"value_crc32c":%q,"%s":"%d","%s":"0x%s"}`, encodedCRC32c(rawDoc.Body), virtualXattrRevSeqNo, revSeqNo, virtualXattrCAS, strconv.FormatUint(rawDoc.Cas, 16)))
 			continue
 		} else if xattrKey == virtualXattrName+"."+virtualXattrRevSeqNo {
 			rawDoc.Xattrs[xattrKey] = []byte(fmt.Sprintf(`"%d"`, revSeqNo))
+			continue
+		} else if xattrKey == virtualXattrName+"."+virtualXattrCAS {
+			rawDoc.Xattrs[xattrKey] = []byte(fmt.Sprintf(`"0x%s"`, strconv.FormatUint(rawDoc.Cas, 16)))
 			continue
 		}
 		val, ok := xattrMap[xattrKey]
