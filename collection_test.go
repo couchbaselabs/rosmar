@@ -14,6 +14,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -974,12 +975,13 @@ func TestVirtualXattr(t *testing.T) {
 	// $document.CAS returns a raw JSON number equal to the document's CAS.
 	t.Run("cas", func(t *testing.T) {
 		xattrKey := fmt.Sprintf("%s.%s", virtualXattrName, virtualXattrCAS)
-		xattrs, _, err := col.GetXattrs(testCtx(t), docID, []string{xattrKey})
+		xattrs, cas, err := col.GetXattrs(testCtx(t), docID, []string{xattrKey})
 		require.NoError(t, err)
 		require.Contains(t, xattrs, xattrKey)
-		var fetchedCAS uint64
+		var fetchedCAS string
 		require.NoError(t, json.Unmarshal(xattrs[xattrKey], &fetchedCAS))
-		require.NoError(t, err)
+		expectedCAS := fmt.Sprintf(`0x%s`, strconv.FormatUint(cas, 16))
+		require.Equal(t, expectedCAS, fetchedCAS)
 	})
 }
 
