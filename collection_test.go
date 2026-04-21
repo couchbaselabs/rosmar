@@ -946,17 +946,41 @@ func TestVirtualXattr(t *testing.T) {
 	require.NoError(t, col.Set(docID, 0, nil, []byte(`{"foo": 1}`)))
 	assertRevSeqNo(t, col, docID, `"1"`)
 
-	// GetXattrs should return the virtual xattr
-	xattrs, _, err := col.GetXattrs(testCtx(t), docID, []string{"$document"})
-	require.NoError(t, err)
-	require.Contains(t, xattrs, "$document")
-	var virtualXattr struct {
-		RevNo string `json:"revid"`
-		Crc32 string `json:"value_crc32c"`
-	}
-	require.NoError(t, json.Unmarshal(xattrs["$document"], &virtualXattr))
-	require.Equal(t, "1", virtualXattr.RevNo)
-	require.NotZero(t, virtualXattr.Crc32)
+	// $document returns an object — unmarshal into a struct.
+	t.Run("default virtual xattr", func(t *testing.T) {
+		type virtualXattrDoc struct {
+			RevNo string `json:"revid,omitempty"`
+			Crc32 string `json:"value_crc32c,omitempty"`
+		}
+		xattrs, _, err := col.GetXattrs(testCtx(t), docID, []string{virtualXattrName})
+		require.NoError(t, err)
+		require.Contains(t, xattrs, virtualXattrName)
+		var vx virtualXattrDoc
+		require.NoError(t, json.Unmarshal(xattrs[virtualXattrName], &vx))
+		require.Equal(t, virtualXattrDoc{RevNo: "1", Crc32: "0xe9a4f542"}, vx)
+	})
+
+	// $document.revid returns a raw JSON string.
+	t.Run("rev seq no", func(t *testing.T) {
+		xattrKey := fmt.Sprintf("%s.%s", virtualXattrName, virtualXattrRevSeqNo)
+		xattrs, _, err := col.GetXattrs(testCtx(t), docID, []string{xattrKey})
+		require.NoError(t, err)
+		require.Contains(t, xattrs, xattrKey)
+		var revNo string
+		require.NoError(t, json.Unmarshal(xattrs[xattrKey], &revNo))
+		require.Equal(t, "1", revNo)
+	})
+
+	// $document.CAS returns a raw JSON number equal to the document's CAS.
+	t.Run("cas", func(t *testing.T) {
+		xattrKey := fmt.Sprintf("%s.%s", virtualXattrName, virtualXattrCAS)
+		xattrs, _, err := col.GetXattrs(testCtx(t), docID, []string{xattrKey})
+		require.NoError(t, err)
+		require.Contains(t, xattrs, xattrKey)
+		var fetchedCAS uint64
+		require.NoError(t, json.Unmarshal(xattrs[xattrKey], &fetchedCAS))
+		require.NoError(t, err)
+	})
 }
 
 func assertRevSeqNo(t *testing.T, col *Collection, docID string, expectedRevSeqNo string) {

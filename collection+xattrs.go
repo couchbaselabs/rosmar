@@ -25,6 +25,7 @@ type semiParsedXattrs = map[string]json.RawMessage
 const (
 	virtualXattrName     = "$document"
 	virtualXattrRevSeqNo = "revid"
+	virtualXattrCAS           = "CAS"
 )
 
 // ////// SGBUCKET XATTR STORE INTERFACE
@@ -433,6 +434,8 @@ func (c *Collection) getRawWithXattrs(key string, xattrKeys []string) (sgbucket.
 		} else if xattrKey == virtualXattrName+"."+virtualXattrRevSeqNo {
 			rawDoc.Xattrs[xattrKey] = []byte(fmt.Sprintf(`"%d"`, revSeqNo))
 			continue
+		} else if xattrKey == virtualXattrName+"."+virtualXattrCAS {
+			rawDoc.Xattrs[xattrKey] = []byte(fmt.Sprintf("%d", rawDoc.Cas))
 		}
 		val, ok := xattrMap[xattrKey]
 		if !ok {
