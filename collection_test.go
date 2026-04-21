@@ -952,13 +952,15 @@ func TestVirtualXattr(t *testing.T) {
 		type virtualXattrDoc struct {
 			RevNo string `json:"revid,omitempty"`
 			Crc32 string `json:"value_crc32c,omitempty"`
+			CAS   string `json:"cas,omitempty"`
 		}
-		xattrs, _, err := col.GetXattrs(testCtx(t), docID, []string{virtualXattrName})
+		xattrs, cas, err := col.GetXattrs(testCtx(t), docID, []string{virtualXattrName})
 		require.NoError(t, err)
 		require.Contains(t, xattrs, virtualXattrName)
 		var vx virtualXattrDoc
 		require.NoError(t, json.Unmarshal(xattrs[virtualXattrName], &vx))
-		require.Equal(t, virtualXattrDoc{RevNo: "1", Crc32: "0xe9a4f542"}, vx)
+		expectedCAS := fmt.Sprintf(`0x%s`, strconv.FormatUint(cas, 16))
+		require.Equal(t, virtualXattrDoc{RevNo: "1", Crc32: "0xe9a4f542", CAS: expectedCAS}, vx)
 	})
 
 	// $document.revid returns a raw JSON string.
