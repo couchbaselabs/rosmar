@@ -25,7 +25,7 @@ type semiParsedXattrs = map[string]json.RawMessage
 const (
 	virtualXattrName     = "$document"
 	virtualXattrRevSeqNo = "revid"
-	virtualXattrCAS           = "CAS"
+	virtualXattrCAS      = "CAS"
 )
 
 // ////// SGBUCKET XATTR STORE INTERFACE
