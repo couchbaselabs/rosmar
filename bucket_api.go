@@ -77,13 +77,19 @@ func (bucket *Bucket) _closeSqliteDB() error {
 
 // Closes a bucket and deletes its directory and files (unless it's in-memory.)
 func (bucket *Bucket) CloseAndDelete(ctx context.Context) error {
-	bucket.mutex.Lock()
-	defer bucket.mutex.Unlock()
-	err := bucket._closeSqliteDB()
+	err := bucket.close()
 	if err != nil {
 		return err
 	}
 	return deleteBucket(ctx, bucket)
+}
+
+// close a bucket, but doesn't delete its directory or files.
+func (bucket *Bucket) close() error {
+	bucket.mutex.Lock()
+	defer bucket.mutex.Unlock()
+	defer func() { bucket.closed = true }()
+	return bucket._closeSqliteDB()
 }
 
 func (bucket *Bucket) IsSupported(feature sgbucket.BucketStoreFeature) bool {
