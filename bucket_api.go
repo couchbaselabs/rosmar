@@ -88,6 +88,7 @@ func (bucket *Bucket) CloseAndDelete(ctx context.Context) error {
 func (bucket *Bucket) close() error {
 	bucket.mutex.Lock()
 	defer bucket.mutex.Unlock()
+	defer func() { bucket.closed = true }()
 	return bucket._closeSqliteDB()
 }
 
