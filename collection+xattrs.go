@@ -148,10 +148,9 @@ func (c *Collection) DeleteSubDocPaths(
 			key: key,
 			cas: newCas,
 		}
-		var revSeqNo uint64
 		row := txn.QueryRow(`SELECT value, xattrs, revSeqNo FROM documents WHERE collection=?1 AND key=?2`, c.id, key)
 		var rawXattrs []byte
-		err := scan(row, &e.value, &rawXattrs, &revSeqNo)
+		err := scan(row, &e.value, &rawXattrs, &e.revSeqNo)
 		if err != nil {
 			return nil, remapKeyError(err, key)
 		}
@@ -159,7 +158,8 @@ func (c *Collection) DeleteSubDocPaths(
 			return nil, err
 		}
 		e.xattrs = rawXattrs
-		_, err = txn.Exec(`UPDATE documents SET xattrs=?1, cas=?2, revSeqNo=?3 WHERE collection=?4 AND key=?5`, rawXattrs, newCas, revSeqNo, c.id, key)
+		e.revSeqNo++
+		_, err = txn.Exec(`UPDATE documents SET xattrs=?1, cas=?2, revSeqNo=?3 WHERE collection=?4 AND key=?5`, rawXattrs, newCas, e.revSeqNo, c.id, key)
 		return e, err
 	})
 	traceExit("DeleteXattrs", err, "ok")
@@ -439,11 +439,25 @@ func (c *Collection) getRawWithXattrs(key string, xattrKeys []string) (sgbucket.
 			rawDoc.Xattrs[xattrKey] = []byte(fmt.Sprintf(`"0x%s"`, strconv.FormatUint(rawDoc.Cas, 16)))
 			continue
 		}
-		val, ok := xattrMap[xattrKey]
+
+		path := strings.Split(xattrKey, ".")
+		topLevel := path[0]
+		val, ok := xattrMap[topLevel]
 		if !ok {
 			continue
 		}
-		rawDoc.Xattrs[xattrKey] = val
+
+		if len(path) > 1 {
+			var topLevelVal any
+			_ = json.Unmarshal(val, &topLevelVal)
+			nested, err := evalSubdocPath(topLevelVal, path[1:])
+			if err == nil {
+				rawNested, _ := json.Marshal(nested)
+				rawDoc.Xattrs[xattrKey] = rawNested
+			}
+		} else {
+			rawDoc.Xattrs[xattrKey] = val
+		}
 	}
 	return rawDoc, nil
 }
@@ -506,10 +520,6 @@ func (c *Collection) writeWithXattrs(
 ) (casOut CAS, err error) {
 	parsedXattrs := make(map[string]any, len(xattrsPayload))
 	for xattrKey, xattrVal := range xattrsPayload {
-		// Validate xattr key/value before going into the transaction:
-		if err = validateXattrKey(xattrKey); err != nil {
-			return
-		}
 		if !xattrVal.isNil() {
 			parsedXattr, err := xattrVal.unmarshalJSON()
 			if err != nil {
@@ -602,6 +612,9 @@ func (c *Collection) writeWithXattrs(
 		}
 
 		for xattrKey, xattrVal := range xattrsPayload {
+			path := strings.Split(xattrKey, ".")
+			topLevel := path[0]
+
 			if !xattrVal.isNil() {
 				// Set xattr:
 				if opts.insertXattr && xattrs[xattrKey] != nil {
@@ -614,22 +627,52 @@ func (c *Collection) writeWithXattrs(
 				}
 				xattrVal.setParsed(parsedXattr)
 
-				var rawXattr []byte
-				if rawXattr, err = xattrVal.marshalJSON(); err != nil {
-					return nil, err
-				}
 				if xattrs == nil {
 					xattrs = semiParsedXattrs{}
 				}
-				xattrs[xattrKey] = json.RawMessage(rawXattr)
-				trace("\t\tSet doc %q xattr %q = %s", key, xattrKey, rawXattr)
+
+				if len(path) > 1 {
+					var topLevelVal map[string]any
+					if existing, ok := xattrs[topLevel]; ok {
+						_ = json.Unmarshal(existing, &topLevelVal)
+					}
+					if topLevelVal == nil {
+						topLevelVal = map[string]any{}
+					}
+					if err := setXattrValue(topLevelVal, path[1:], xattrVal.parsed); err != nil {
+						return nil, err
+					}
+					rawTopLevel, _ := json.Marshal(topLevelVal)
+					xattrs[topLevel] = json.RawMessage(rawTopLevel)
+				} else {
+					var rawXattr []byte
+					if rawXattr, err = xattrVal.marshalJSON(); err != nil {
+						return nil, err
+					}
+					xattrs[topLevel] = json.RawMessage(rawXattr)
+				}
+				trace("\t\tSet doc %q xattr %q = %v", key, xattrKey, xattrVal.parsed)
 			} else {
 				// Delete xattr:
-				if _, found := xattrs[xattrKey]; found {
-					delete(xattrs, xattrKey)
-					trace("\t\tDeleted doc %q xattr %s", key, xattrKey)
+				if len(path) > 1 {
+					if existing, ok := xattrs[topLevel]; ok {
+						var topLevelVal map[string]any
+						_ = json.Unmarshal(existing, &topLevelVal)
+						if err := setXattrValue(topLevelVal, path[1:], nil); err != nil {
+							return nil, err
+						}
+						rawTopLevel, _ := json.Marshal(topLevelVal)
+						xattrs[topLevel] = json.RawMessage(rawTopLevel)
+					} else {
+						return nil, fmt.Errorf("%s: %w", xattrKey, sgbucket.ErrPathNotFound)
+					}
 				} else {
-					return nil, fmt.Errorf("%s: %w", xattrKey, sgbucket.ErrPathNotFound)
+					if _, found := xattrs[topLevel]; found {
+						delete(xattrs, topLevel)
+						trace("\t\tDeleted doc %q xattr %s", key, topLevel)
+					} else {
+						return nil, fmt.Errorf("%s: %w", topLevel, sgbucket.ErrPathNotFound)
+					}
 				}
 			}
 		}
@@ -655,21 +698,6 @@ func (c *Collection) writeWithXattrs(
 
 //////// HELPERS:
 
-// Checks an xattr key: Rosmar doesn't support multi-component key paths for xattrs.
-func validateXattrKey(xattrKey string) error {
-	if strings.ContainsAny(xattrKey, `$.[]`) {
-		// TODO: Support hierarchical paths
-		return fmt.Errorf("rosmar does not support Xattr key `%s`", xattrKey)
-	} else {
-		return nil
-	}
-}
-
-// Converts an Xattr key to a SQLite JSON path.
-func xattrKeyToSQLitePath(xattrKey string) (path string, err error) {
-	return `$.` + xattrKey, validateXattrKey(xattrKey)
-}
-
 // Semi-parses the xattrs from JSON, passes that to the callback, then re-marshals and returns it.
 func processXattrs(rawXattrs []byte, fn func(xattrs semiParsedXattrs)) []byte {
 	if len(rawXattrs) > 0 {
@@ -689,10 +717,21 @@ func processXattrs(rawXattrs []byte, fn func(xattrs semiParsedXattrs)) []byte {
 func removeXattrs(rawXattrs []byte, xattrKeys ...string) (rawResult []byte, err error) {
 	rawResult = processXattrs(rawXattrs, func(xattrs semiParsedXattrs) {
 		for _, key := range xattrKeys {
-			if err = validateXattrKey(key); err != nil {
-				break
+			path := strings.Split(key, ".")
+			topLevel := path[0]
+			if len(path) > 1 {
+				if existing, ok := xattrs[topLevel]; ok {
+					var topLevelVal map[string]any
+					_ = json.Unmarshal(existing, &topLevelVal)
+					if err := setXattrValue(topLevelVal, path[1:], nil); err != nil {
+						break
+					}
+					rawTopLevel, _ := json.Marshal(topLevelVal)
+					xattrs[topLevel] = json.RawMessage(rawTopLevel)
+				}
+			} else {
+				delete(xattrs, topLevel)
 			}
-			delete(xattrs, key)
 		}
 	})
 	return
@@ -761,6 +800,29 @@ func (e *event) expandXattrMacros(xattrKey string, xattr any, mutateOpts *sgbuck
 		if err := upsertSubdocValue(xattrMap, path[1:], expandedValue); err != nil {
 			return fmt.Errorf("Unable to set macro expansion value at path: %v: %w", v.Path, err)
 		}
+	}
+	return nil
+}
+
+// setXattrValue sets a value at a hierarchical path within a map, creating intermediate maps if necessary.
+func setXattrValue(source map[string]any, path []string, value any) error {
+	for i := 0; i < len(path)-1; i++ {
+		prop := path[i]
+		next, ok := source[prop].(map[string]any)
+		if !ok {
+			if source[prop] != nil {
+				return sgbucket.ErrPathMismatch
+			}
+			next = map[string]any{}
+			source[prop] = next
+		}
+		source = next
+	}
+	lastProp := path[len(path)-1]
+	if value == nil {
+		delete(source, lastProp)
+	} else {
+		source[lastProp] = value
 	}
 	return nil
 }
