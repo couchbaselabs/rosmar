@@ -138,7 +138,7 @@ func (c *Collection) GetAndTouchRaw(key string, exp Exp) (val []byte, cas CAS, e
 
 func (c *Collection) AddRaw(key string, exp Exp, val []byte) (added bool, err error) {
 	traceEnter("AddRaw", "%q, %d, ...", key, exp)
-	added, err = c.add(key, exp, val, looksLikeJSON(val))
+	added, err = c.add(key, exp, val, json.Valid(val))
 	traceExit("AddRaw", err, "%v", added)
 	return
 }
@@ -181,7 +181,7 @@ func (c *Collection) add(key string, exp Exp, val []byte, isJSON bool) (added bo
 
 func (c *Collection) SetRaw(key string, exp Exp, opts *sgbucket.UpsertOptions, val []byte) (err error) {
 	traceEnter("SetRaw", "%q, %d, ...", key, exp)
-	err = c.set(key, exp, opts, val, false)
+	err = c.set(key, exp, opts, val, json.Valid(val))
 	traceExit("SetRaw", err, "ok")
 	return
 }
@@ -311,6 +311,8 @@ func (c *Collection) WriteCas(key string, exp Exp, cas CAS, val any, opt sgbucke
 	}
 	if raw == nil {
 		isJSON = false
+	} else if (opt & sgbucket.Raw) != 0 {
+		isJSON = json.Valid(raw)
 	}
 
 	err = c.withNewCas(func(txn *sql.Tx, newCas CAS) (*event, error) {
