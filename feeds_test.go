@@ -456,10 +456,11 @@ func TestCollectionMutations(t *testing.T) {
 }
 
 func TestSetRawAutodetectJSON(t *testing.T) {
+	ctx := t.Context()
 	ensureNoLeakedFeeds(t)
 	bucket := makeTestBucket(t)
-	defer bucket.Close(context.Background())
-	c := bucket.DefaultDataStore()
+	defer bucket.Close(ctx)
+	c := bucket.DefaultDataStore(ctx)
 
 	testCases := []struct {
 		name       string
@@ -508,14 +509,14 @@ func TestSetRawAutodetectJSON(t *testing.T) {
 	for _, tc := range testCases {
 		switch tc.method {
 		case "SetRaw":
-			err := c.SetRaw(tc.key, 0, nil, tc.data)
+			err := c.SetRaw(ctx, tc.key, 0, nil, tc.data)
 			require.NoError(t, err, "Failed for %s", tc.name)
 		case "AddRaw":
-			added, err := c.AddRaw(tc.key, 0, tc.data)
+			added, err := c.AddRaw(ctx, tc.key, 0, tc.data)
 			require.NoError(t, err, "Failed for %s", tc.name)
 			require.True(t, added, "Failed for %s", tc.name)
 		case "WriteCas":
-			_, err := c.WriteCas(tc.key, 0, 0, tc.data, sgbucket.Raw|sgbucket.AddOnly)
+			_, err := c.WriteCas(ctx, tc.key, 0, 0, tc.data, sgbucket.Raw|sgbucket.AddOnly)
 			require.NoError(t, err, "Failed for %s", tc.name)
 		}
 	}
