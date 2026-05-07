@@ -128,7 +128,7 @@ func TestCheckpoint(t *testing.T) {
 
 	// The first event will be the writing of the checkpoint itself:
 	e := <-events
-	assert.Equal(t, "Checkpoint:myID", string(e.Key))
+	assert.Equal(t, "Checkpoint", string(e.Key))
 
 	readExpectedEventsDEF(t, events)
 
@@ -137,6 +137,148 @@ func TestCheckpoint(t *testing.T) {
 
 	_, ok = <-doneChan
 	assert.False(t, ok)
+}
+
+func TestResumeFromCheckpoint(t *testing.T) {
+	ensureNoLeakedFeeds(t)
+	bucket := makeTestBucket(t)
+	c := bucket.DefaultDataStore()
+
+	addToCollection(t, c, "doc1", 0, "V1")
+	addToCollection(t, c, "doc2", 0, "V2")
+
+	prefix := "ResumeCheckpoint"
+
+	// Run feed to checkpoint
+	args := sgbucket.FeedArguments{
+		ID:               "myID",
+		Backfill:         sgbucket.FeedResume,
+		Dump:             true,
+		CheckpointPrefix: prefix,
+	}
+	events, doneChan := startFeedWithArgs(t, bucket, args)
+
+	event := <-events
+	assert.Equal(t, sgbucket.FeedOpBeginBackfill, event.Opcode)
+
+	e := <-events
+	assert.Equal(t, "doc1", string(e.Key))
+	e = <-events
+	assert.Equal(t, "doc2", string(e.Key))
+
+	event = <-events
+	assert.Equal(t, sgbucket.FeedOpEndBackfill, event.Opcode)
+
+	<-doneChan
+
+	// Add new docs while feed is off
+	addToCollection(t, c, "doc3", 0, "V3")
+	addToCollection(t, c, "doc4", 0, "V4")
+
+	// Resume feed
+	events, doneChan = startFeedWithArgs(t, bucket, args)
+
+	event = <-events
+	assert.Equal(t, sgbucket.FeedOpBeginBackfill, event.Opcode)
+
+	// First event might be the checkpoint doc itself depending on timing/CAS, but we definitely shouldn't see doc1/doc2 again
+	var seenDocs []string
+	for e := range events {
+		if e.Opcode == sgbucket.FeedOpEndBackfill {
+			break
+		}
+		seenDocs = append(seenDocs, string(e.Key))
+	}
+
+	assert.NotContains(t, seenDocs, "doc1")
+	assert.NotContains(t, seenDocs, "doc2")
+	assert.Contains(t, seenDocs, "doc3")
+	assert.Contains(t, seenDocs, "doc4")
+	assert.Contains(t, seenDocs, prefix) // The checkpoint doc update
+
+	<-doneChan
+}
+
+func TestSharedCheckpoint(t *testing.T) {
+	ensureNoLeakedFeeds(t)
+	bucket := makeTestBucket(t)
+	c1 := bucket.DefaultDataStore().(*Collection)
+	c2, err := bucket.getOrCreateCollection(sgbucket.DataStoreNameImpl{Scope: "S", Collection: "C"}, true)
+	require.NoError(t, err)
+
+	addToCollection(t, c1, "c1-doc", 0, "V1")
+	addToCollection(t, c2, "c2-doc", 0, "V2")
+
+	prefix := "SharedCheckpoint"
+
+	// Run feed for c1
+	args1 := sgbucket.FeedArguments{
+		ID:               "id1",
+		Backfill:         sgbucket.FeedResume,
+		Dump:             true,
+		CheckpointPrefix: prefix,
+	}
+	events1, done1 := startFeedWithArgs(t, bucket, args1)
+	for e := range events1 {
+		if e.Opcode == sgbucket.FeedOpEndBackfill {
+			break
+		}
+	}
+	<-done1
+
+	// Run feed for c2
+	args2 := sgbucket.FeedArguments{
+		ID:               "id2",
+		Backfill:         sgbucket.FeedResume,
+		Dump:             true,
+		CheckpointPrefix: prefix,
+		Scopes:           map[string][]string{"S": {"C"}},
+	}
+	events2, done2 := startFeedWithArgs(t, bucket, args2)
+	for e := range events2 {
+		if e.Opcode == sgbucket.FeedOpEndBackfill {
+			break
+		}
+	}
+	<-done2
+
+	// Verify checkpoint document in DefaultDataStore (c1)
+	var checkpt checkpoint
+	_, err = c1.Get(prefix, &checkpt)
+	require.NoError(t, err)
+	assert.Len(t, checkpt.LastCas, 2)
+	assert.Contains(t, checkpt.LastCas, c1.GetCollectionID())
+	assert.Contains(t, checkpt.LastCas, c2.GetCollectionID())
+
+	// Resume c1 and c2, verify they pick up from where they left off
+	addToCollection(t, c1, "c1-doc2", 0, "V1-2")
+	addToCollection(t, c2, "c2-doc2", 0, "V2-2")
+
+	events1, done1 = startFeedWithArgs(t, bucket, args1)
+	foundC1Doc2 := false
+	for e := range events1 {
+		if string(e.Key) == "c1-doc2" {
+			foundC1Doc2 = true
+		}
+		if e.Opcode == sgbucket.FeedOpEndBackfill {
+			break
+		}
+	}
+	assert.True(t, foundC1Doc2)
+	<-done1
+
+	events2, done2 = startFeedWithArgs(t, bucket, args2)
+	foundC2Doc2 := false
+	for e := range events2 {
+		if string(e.Key) == "c2-doc2" {
+			foundC2Doc2 = true
+		}
+		if e.Opcode == sgbucket.FeedOpEndBackfill {
+			break
+		}
+	}
+	assert.True(t, foundC2Doc2)
+	<-done2
 }
 
 func startFeed(t *testing.T, bucket *Bucket) (events chan sgbucket.FeedEvent, doneChan chan struct{}) {
