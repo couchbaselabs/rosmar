@@ -310,6 +310,111 @@ func TestCollectionMutations(t *testing.T) {
 	assert.Equal(t, len(c2Keys), numDocs)
 }
 
+func TestSetRawAutodetectJSON(t *testing.T) {
+	ensureNoLeakedFeeds(t)
+	bucket := makeTestBucket(t)
+	defer bucket.Close(context.Background())
+	c := bucket.DefaultDataStore()
+
+	testCases := []struct {
+		name       string
+		key        string
+		data       []byte
+		method     string
+		isJSONType bool
+	}{
+		// Object
+		{"SetRaw_Object", "set_obj", []byte(`{"foo":"bar"}`), "SetRaw", true},
+		{"AddRaw_Object", "add_obj", []byte(`{"foo":"bar"}`), "AddRaw", true},
+		{"WriteCas_Object", "cas_obj", []byte(`{"foo":"bar"}`), "WriteCas", true},
+
+		// Array
+		{"SetRaw_Array", "set_arr", []byte(`[1,2,3]`), "SetRaw", true},
+		{"AddRaw_Array", "add_arr", []byte(`[1,2,3]`), "AddRaw", true},
+		{"WriteCas_Array", "cas_arr", []byte(`[1,2,3]`), "WriteCas", true},
+
+		// String
+		{"SetRaw_String", "set_str", []byte(`"hello"`), "SetRaw", true},
+		{"AddRaw_String", "add_str", []byte(`"hello"`), "AddRaw", true},
+		{"WriteCas_String", "cas_str", []byte(`"hello"`), "WriteCas", true},
+
+		// Integer
+		{"SetRaw_Integer", "set_int", []byte(`12345`), "SetRaw", true},
+		{"AddRaw_Integer", "add_int", []byte(`12345`), "AddRaw", true},
+		{"WriteCas_Integer", "cas_int", []byte(`12345`), "WriteCas", true},
+
+		// Boolean
+		{"SetRaw_Boolean", "set_bool", []byte(`true`), "SetRaw", true},
+		{"AddRaw_Boolean", "add_bool", []byte(`true`), "AddRaw", true},
+		{"WriteCas_Boolean", "cas_bool", []byte(`true`), "WriteCas", true},
+
+		// Null
+		{"SetRaw_Null", "set_null", []byte(`null`), "SetRaw", true},
+		{"AddRaw_Null", "add_null", []byte(`null`), "AddRaw", true},
+		{"WriteCas_Null", "cas_null", []byte(`null`), "WriteCas", true},
+
+		// Binary
+		{"SetRaw_Binary", "set_bin", []byte{0, 1, 2, 3}, "SetRaw", false},
+		{"AddRaw_Binary", "add_bin", []byte{0, 1, 2, 3}, "AddRaw", false},
+		{"WriteCas_Binary", "cas_bin", []byte{0, 1, 2, 3}, "WriteCas", false},
+	}
+
+	// Write data using specified method
+	for _, tc := range testCases {
+		switch tc.method {
+		case "SetRaw":
+			err := c.SetRaw(tc.key, 0, nil, tc.data)
+			require.NoError(t, err, "Failed for %s", tc.name)
+		case "AddRaw":
+			added, err := c.AddRaw(tc.key, 0, tc.data)
+			require.NoError(t, err, "Failed for %s", tc.name)
+			require.True(t, added, "Failed for %s", tc.name)
+		case "WriteCas":
+			_, err := c.WriteCas(tc.key, 0, 0, tc.data, sgbucket.Raw|sgbucket.AddOnly)
+			require.NoError(t, err, "Failed for %s", tc.name)
+		}
+	}
+
+	// Start feed to check DataType
+	args := sgbucket.FeedArguments{
+		Backfill: 0,
+		Dump:     true,
+	}
+	events, doneChan := startFeedWithArgs(t, bucket, args)
+
+	event := <-events
+	assert.Equal(t, sgbucket.FeedOpBeginBackfill, event.Opcode)
+
+	// Collect all mutations
+	mutations := make(map[string]sgbucket.FeedEvent)
+	for event := range events {
+		if event.Opcode == sgbucket.FeedOpMutation {
+			mutations[string(event.Key)] = event
+		} else if event.Opcode == sgbucket.FeedOpEndBackfill {
+			break
+		}
+	}
+
+	// Verify each test case
+	for _, tc := range testCases {
+		event, ok := mutations[tc.key]
+		require.True(t, ok, "Missing mutation for %s", tc.key)
+		expectedDataType := sgbucket.FeedDataTypeRaw
+		if tc.isJSONType {
+			expectedDataType = sgbucket.FeedDataTypeJSON
+		}
+		assert.Equal(t, expectedDataType, event.DataType, "Wrong DataType for %s", tc.name)
+	}
+
+	// The feed should stop — DoneChan closes
+	select {
+	case _, ok := <-doneChan:
+		assert.False(t, ok, "DoneChan should be closed")
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for feed to stop")
+	}
+}
+
 // TestFeedEventIsolation verifies that multiple feeds on the same collection receive independent
 // copies of events, so mutating one feed's event does not affect another's.
 func TestFeedEventIsolation(t *testing.T) {
