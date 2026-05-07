@@ -453,13 +453,13 @@ func mustUnmarshal(t *testing.T, j string, obj any) {
 	require.NoError(t, json.Unmarshal([]byte(j), &obj))
 }
 
-func setJSON(coll sgbucket.DataStore, docid string, jsonDoc string) error {
+func setJSON(ctx context.Context, coll sgbucket.DataStore, docid string, jsonDoc string) error {
 	var obj interface{}
 	err := json.Unmarshal([]byte(jsonDoc), &obj)
 	if err != nil {
 		return err
 	}
-	return coll.Set(context.TODO(), docid, 0, nil, obj)
+	return coll.Set(ctx, docid, 0, nil, obj)
 }
 
 func addToCollection(t *testing.T, coll sgbucket.DataStore, key string, exp uint32, value interface{}) {

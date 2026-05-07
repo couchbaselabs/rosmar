@@ -22,16 +22,16 @@ func TestQuery(t *testing.T) {
 	ctx := t.Context()
 	ensureNoLeakedFeeds(t)
 	coll := makeTestBucket(t).DefaultDataStore(ctx).(*Collection)
-	require.NoError(t, setJSON(coll, "doc1", `{"key": "k1", "value": "v1"}`))
-	require.NoError(t, setJSON(coll, "doc2", `{"key": "k2", "value": "v2"}`))
-	require.NoError(t, setJSON(coll, "doc3", `{"key": 17, "value": ["v3"]}`))
-	require.NoError(t, setJSON(coll, "doc4", `{"key": [17, false], "value": null}`))
-	require.NoError(t, setJSON(coll, "doc5", `{"key": [17, true], "value": null}`))
+	require.NoError(t, setJSON(ctx, coll, "doc1", `{"key": "k1", "value": "v1"}`))
+	require.NoError(t, setJSON(ctx, coll, "doc2", `{"key": "k2", "value": "v2"}`))
+	require.NoError(t, setJSON(ctx, coll, "doc3", `{"key": 17, "value": ["v3"]}`))
+	require.NoError(t, setJSON(ctx, coll, "doc4", `{"key": [17, false], "value": null}`))
+	require.NoError(t, setJSON(ctx, coll, "doc5", `{"key": [17, true], "value": null}`))
 
 	// Add a matching doc to a different collection, to make sure the query won't return it:
 	coll2, err := coll.bucket.NamedDataStore(ctx, sgbucket.DataStoreNameImpl{Scope: "foo", Collection: "bar"})
 	require.NoError(t, err)
-	require.NoError(t, setJSON(coll2, "doc1", `{"key": "k1", "value": "v1"}`))
+	require.NoError(t, setJSON(ctx, coll2, "doc1", `{"key": "k1", "value": "v1"}`))
 
 	require.True(t, coll.CanQueryIn(ctx, sgbucket.SQLiteLanguage))
 	require.False(t, coll.CanQueryIn(ctx, sgbucket.SQLppLanguage))

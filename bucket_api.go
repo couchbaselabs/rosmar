@@ -343,8 +343,8 @@ func (bucket *Bucket) nextExpiration() (exp Exp, err error) {
 }
 
 // expireDocuments immediately deletes all expired documents in this bucket.
-func (bucket *Bucket) expireDocuments() (int64, error) {
-	names, err := bucket.ListDataStores(context.TODO())
+func (bucket *Bucket) expireDocuments(ctx context.Context) (int64, error) {
+	names, err := bucket.ListDataStores(ctx)
 	if err != nil {
 		return 0, err
 	}
@@ -352,7 +352,7 @@ func (bucket *Bucket) expireDocuments() (int64, error) {
 	for _, name := range names {
 		if coll, err := bucket.getCollection(name.(sgbucket.DataStoreNameImpl)); err != nil {
 			return 0, err
-		} else if n, err := coll.expireDocuments(); err != nil {
+		} else if n, err := coll.expireDocuments(ctx); err != nil {
 			return 0, err
 		} else {
 			count += n
@@ -368,11 +368,11 @@ func (bucket *Bucket) _scheduleExpiration() {
 	}
 }
 
-func (bucket *Bucket) doExpiration() {
+func (bucket *Bucket) doExpiration(ctx context.Context) {
 	bucket.expManager._clearNext()
 
 	debug("EXP: Running scheduled expiration...")
-	if n, err := bucket.expireDocuments(); err != nil {
+	if n, err := bucket.expireDocuments(ctx); err != nil {
 		// If there's an error expiring docs, it means there is a programming error of a leaked expiration goroutine.
 		panic("Error expiring docs: " + err.Error())
 	} else if n > 0 {

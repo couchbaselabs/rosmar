@@ -48,11 +48,11 @@ func TestView(t *testing.T) {
 	require.NoError(t, err, "GetDDoc failed")
 	assert.Equal(t, ddoc, echo)
 
-	require.NoError(t, setJSON(coll, "doc1", `{"key": "k1", "value": "v1"}`))
-	require.NoError(t, setJSON(coll, "doc2", `{"key": "k2", "value": "v2"}`))
-	require.NoError(t, setJSON(coll, "doc3", `{"key": 17, "value": ["v3"]}`))
-	require.NoError(t, setJSON(coll, "doc4", `{"key": [17, false], "value": null}`))
-	require.NoError(t, setJSON(coll, "doc5", `{"key": [17, true], "value": null}`))
+	require.NoError(t, setJSON(ctx, coll, "doc1", `{"key": "k1", "value": "v1"}`))
+	require.NoError(t, setJSON(ctx, coll, "doc2", `{"key": "k2", "value": "v2"}`))
+	require.NoError(t, setJSON(ctx, coll, "doc3", `{"key": 17, "value": ["v3"]}`))
+	require.NoError(t, setJSON(ctx, coll, "doc4", `{"key": [17, false], "value": null}`))
+	require.NoError(t, setJSON(ctx, coll, "doc5", `{"key": [17, true], "value": null}`))
 
 	// raw docs and counters should not be indexed by views
 	_, err = coll.AddRaw(ctx, "rawdoc", 0, []byte("this is raw data"))

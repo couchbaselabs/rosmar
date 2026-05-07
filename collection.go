@@ -538,7 +538,7 @@ func (c *Collection) IsSupported(feature sgbucket.BucketStoreFeature) bool {
 //////// EXPIRATION
 
 // _expireDocuments immediately deletes all expired documents in this collection.
-func (c *Collection) expireDocuments() (count int64, err error) {
+func (c *Collection) expireDocuments(ctx context.Context) (count int64, err error) {
 	traceEnter("_expireDocuments", "")
 	defer func() { traceExit("_expireDocuments", err, "%d", count) }()
 
@@ -565,7 +565,7 @@ func (c *Collection) expireDocuments() (count int64, err error) {
 	// will get its own db connection, and if the db only supports one connection (i.e. in-memory)
 	// having both queries active would deadlock.)
 	for _, key := range keys {
-		if c.Delete(context.TODO(), key) == nil {
+		if c.Delete(ctx, key) == nil {
 			count++
 		}
 	}

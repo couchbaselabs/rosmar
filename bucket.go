@@ -172,7 +172,7 @@ func OpenBucket(urlStr string, bucketName string, mode OpenMode) (b *Bucket, err
 		inMemory:        inMemory,
 		serial:          serial,
 	}
-	bucket.expManager = newExpirationManager(bucket.doExpiration)
+	bucket.expManager = newExpirationManager(context.Background(), bucket.doExpiration)
 	defer func() {
 		if err != nil {
 			_ = bucket.CloseAndDelete(ctx)
