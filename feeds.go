@@ -90,10 +90,11 @@ func (c *Collection) StartDCPFeed(
 ) error {
 	traceEnter("StartDCPFeed", "collection=%s, args=%+v", c, args)
 	feed := &dcpFeed{
-		ctx:        ctx,
-		collection: c,
-		args:       args,
-		callback:   callback,
+		ctx:           ctx,
+		collection:    c,
+		metadataStore: c.bucket.DefaultDataStore().(*Collection),
+		args:          args,
+		callback:      callback,
 	}
 	feed.events.init()
 
@@ -190,12 +191,13 @@ func (c *Collection) _stopFeeds() {
 type eventQueue = queue[*event]
 
 type checkpoint struct {
-	LastSeq uint64 `json:"last_seq"`
+	LastCas map[uint32]uint64 `json:"last_cas"`
 }
 
 type dcpFeed struct {
 	ctx            context.Context // TODO: Use this
 	collection     *Collection
+	metadataStore  *Collection
 	args           sgbucket.FeedArguments
 	callback       sgbucket.FeedEventCallbackFunc
 	events         eventQueue
@@ -208,7 +210,7 @@ func (feed *dcpFeed) String() string {
 }
 
 func (feed *dcpFeed) checkpointKey() string {
-	return feed.args.CheckpointPrefix + ":" + feed.args.ID
+	return feed.args.CheckpointPrefix
 }
 
 // Reads the feed's lastCas from the checkpoint document, if there is one.
@@ -218,7 +220,7 @@ func (feed *dcpFeed) readCheckpoint() (err error) {
 	}
 	key := feed.checkpointKey()
 	var checkpt checkpoint
-	if _, err = feed.collection.Get(key, &checkpt); err != nil {
+	if _, err = feed.metadataStore.Get(key, &checkpt); err != nil {
 		if _, ok := err.(sgbucket.MissingError); ok {
 			err = nil
 			debug("%s checkpoint %q missing", feed, key)
@@ -227,7 +229,10 @@ func (feed *dcpFeed) readCheckpoint() (err error) {
 		}
 		return
 	}
-	feed.lastCas = checkpt.LastSeq
+	if checkpt.LastCas != nil {
+		colID := feed.collection.GetCollectionID()
+		feed.lastCas = checkpt.LastCas[colID]
+	}
 	debug("%s read lastCas 0x%x from %q", feed, feed.lastCas, key)
 	return
 }
@@ -238,11 +243,31 @@ func (feed *dcpFeed) writeCheckpoint() (err error) {
 		return
 	}
 	key := feed.checkpointKey()
-	err = feed.collection.Set(key, 0, nil, checkpoint{LastSeq: feed.lastCas})
+	colID := feed.collection.GetCollectionID()
+
+	_, err = feed.metadataStore.Update(key, 0, func(current []byte) (updated []byte, expiry *uint32, delete bool, err error) {
+		var checkpt checkpoint
+		if current != nil {
+			if err := json.Unmarshal(current, &checkpt); err != nil {
+				return nil, nil, false, fmt.Errorf("failed to unmarshal checkpoint: %w", err)
+			}
+		}
+		if checkpt.LastCas == nil {
+			checkpt.LastCas = make(map[uint32]uint64)
+		}
+		checkpt.LastCas[colID] = feed.lastCas
+
+		updated, err = json.Marshal(checkpt)
+		if err != nil {
+			return nil, nil, false, fmt.Errorf("failed to marshal checkpoint: %w", err)
+		}
+		return updated, nil, false, nil
+	})
+
 	if err == nil {
 		debug("%s wrote lastCas 0x%x to %q", feed, feed.lastCas, key)
 	} else {
-		logError("%s failed to write lastCas to %q: %v", feed, key, err)
+		logError("%s failed to write checkpoint to %q: %v", feed, key, err)
 	}
 	return err
 }
