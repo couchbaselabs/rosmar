@@ -16,10 +16,10 @@ import (
 
 // expiryManager handles expiration for a given bucket. It stores a timer which will call expirationFunc to delete documents. The value of when the timer
 type expiryManager struct {
-	ctx            context.Context     // ctx passed to expirationFunc when the timer fires
-	mutex          *sync.Mutex         // mutex for synchronized access to expiryManager
-	timer          *time.Timer         // Schedules expiration of docs
-	nextExp        *uint32             // Timestamp when expTimer will run (0 if never)
+	ctx            context.Context       // ctx passed to expirationFunc when the timer fires
+	mutex          *sync.Mutex           // mutex for synchronized access to expiryManager
+	timer          *time.Timer           // Schedules expiration of docs
+	nextExp        *uint32               // Timestamp when expTimer will run (0 if never)
 	expirationFunc func(context.Context) // Function to call when timer expires
 }
 
