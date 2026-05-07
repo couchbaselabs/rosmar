@@ -622,6 +622,10 @@ func (c *Collection) withNewCas(fn func(txn *sql.Tx, newCas CAS) (*event, error)
 	return err
 }
 
+func (c *Collection) GetMaxVbno() (uint16, error) {
+	return c.bucket.GetMaxVbno()
+}
+
 var (
 	// Enforce interface conformance:
 	_ sgbucket.DataStore     = &Collection{}
