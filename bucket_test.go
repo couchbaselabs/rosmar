@@ -9,7 +9,6 @@
 package rosmar
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"log"
@@ -30,10 +29,6 @@ func init() {
 	}
 }
 
-func testCtx(t *testing.T) context.Context {
-	return context.Background() // match sync gateway interfaces for logging
-}
-
 const testBucketDirName = "RosmarTest"
 
 func testBucketPath(t *testing.T) string {
@@ -52,7 +47,7 @@ func makeTestBucketWithName(t *testing.T, name string) *Bucket {
 	bucket, err := OpenBucket(uriFromPath(testBucketPath(t)), name, CreateNew)
 	require.NoError(t, err)
 	t.Cleanup(func() {
-		assert.NoError(t, bucket.CloseAndDelete(testCtx(t)))
+		assert.NoError(t, bucket.CloseAndDelete(t.Context()))
 	})
 
 	return bucket
@@ -63,7 +58,7 @@ func dsName(scope string, coll string) sgbucket.DataStoreName {
 }
 
 func requireAddRaw(t *testing.T, c sgbucket.DataStore, key string, exp Exp, value []byte) {
-	added, err := c.AddRaw(key, exp, value)
+	added, err := c.AddRaw(t.Context(), key, exp, value)
 	require.NoError(t, err)
 	require.True(t, added, "Doc was not added")
 }
@@ -83,7 +78,7 @@ func TestNewBucket(t *testing.T) {
 
 	require.Equal(t, uint(1), bucketCount(bucketName))
 
-	require.NoError(t, bucket.CloseAndDelete(testCtx(t)))
+	require.NoError(t, bucket.CloseAndDelete(t.Context()))
 	require.Equal(t, uint(0), bucketCount(bucketName))
 }
 
@@ -101,16 +96,17 @@ func TestGetMissingBucket(t *testing.T) {
 }
 
 func TestCallClosedBucket(t *testing.T) {
+	ctx := t.Context()
 	ensureNoLeaks(t)
 	bucket := makeTestBucket(t)
-	c := bucket.DefaultDataStore()
-	bucket.Close(testCtx(t))
+	c := bucket.DefaultDataStore(ctx)
+	bucket.Close(ctx)
 	defer func() {
-		assert.NoError(t, bucket.CloseAndDelete(testCtx(t)))
+		assert.NoError(t, bucket.CloseAndDelete(ctx))
 	}()
-	_, err := bucket.ListDataStores()
+	_, err := bucket.ListDataStores(ctx)
 	assert.ErrorContains(t, err, "bucket has been closed")
-	_, _, err = c.GetRaw("foo")
+	_, _, err = c.GetRaw(ctx, "foo")
 	assert.ErrorContains(t, err, "bucket has been closed")
 }
 
@@ -133,13 +129,14 @@ func TestNewBucketInMemory(t *testing.T) {
 	}
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
+			ctx := t.Context()
 			bucket, err := OpenBucket(InMemoryURL, strings.ToLower(t.Name()), testCase.mode)
 			require.NoError(t, err)
 			require.NotNil(t, bucket)
 
 			require.Equal(t, uint(1), bucketCount(bucket.GetName()))
 
-			err = bucket.CloseAndDelete(testCtx(t))
+			err = bucket.CloseAndDelete(ctx)
 			assert.NoError(t, err)
 
 			assert.Empty(t, bucketCount(bucket.GetName()))
@@ -150,6 +147,7 @@ func TestNewBucketInMemory(t *testing.T) {
 var defaultCollection = dsName("_default", "_default")
 
 func TestTwoBucketsOneURL(t *testing.T) {
+	ctx := t.Context()
 	ensureNoLeaks(t)
 	bucket1 := makeTestBucket(t)
 	url := bucket1.url
@@ -162,18 +160,18 @@ func TestTwoBucketsOneURL(t *testing.T) {
 	bucket2, err = OpenBucket(url, bucketName, ReOpenExisting)
 	require.NoError(t, err)
 	t.Cleanup(func() {
-		assert.NoError(t, bucket2.CloseAndDelete(testCtx(t)))
+		assert.NoError(t, bucket2.CloseAndDelete(ctx))
 	})
 
 	require.Equal(t, uint(2), bucketCount(bucketName))
 
-	bucket1.Close(testCtx(t))
+	bucket1.Close(ctx)
 	require.Equal(t, uint(1), bucketCount(bucketName))
 
 	err = DeleteBucketAt(url)
 	require.Error(t, err)
 
-	require.NoError(t, bucket2.CloseAndDelete(testCtx(t)))
+	require.NoError(t, bucket2.CloseAndDelete(ctx))
 	assert.Empty(t, bucketCount(bucketName))
 
 	err = DeleteBucketAt(url)
@@ -181,33 +179,35 @@ func TestTwoBucketsOneURL(t *testing.T) {
 }
 
 func TestDefaultCollection(t *testing.T) {
+	ctx := t.Context()
 	ensureNoLeaks(t)
 	bucket := makeTestBucket(t)
 
 	// Initially one collection:
-	colls, err := bucket.ListDataStores()
+	colls, err := bucket.ListDataStores(ctx)
 	assert.NoError(t, err)
 	assert.Equal(t, []sgbucket.DataStoreName{defaultCollection.(sgbucket.DataStoreNameImpl)}, colls)
 
-	coll := bucket.DefaultDataStore()
+	coll := bucket.DefaultDataStore(ctx)
 	assert.NotNil(t, coll)
 	assert.Equal(t, strings.ToLower(t.Name())+"._default._default", coll.GetName())
 }
 
 func TestCreateCollection(t *testing.T) {
+	ctx := t.Context()
 	ensureNoLeaks(t)
 	bucket := makeTestBucket(t)
 
 	collName := dsName("_default", "foo")
-	err := bucket.CreateDataStore(testCtx(t), collName)
+	err := bucket.CreateDataStore(ctx, collName)
 	assert.NoError(t, err)
 
-	coll, err := bucket.NamedDataStore(collName)
+	coll, err := bucket.NamedDataStore(ctx, collName)
 	assert.NoError(t, err)
 	assert.NotNil(t, coll)
 	assert.Equal(t, strings.ToLower(t.Name())+"._default.foo", coll.GetName())
 
-	colls, err := bucket.ListDataStores()
+	colls, err := bucket.ListDataStores(ctx)
 	assert.NoError(t, err)
 	assert.Equal(t, colls, []sgbucket.DataStoreName{defaultCollection, collName})
 }
@@ -215,79 +215,81 @@ func TestCreateCollection(t *testing.T) {
 //////// MULTI-COLLECTION:
 
 func TestMultiCollectionBucket(t *testing.T) {
+	ctx := t.Context()
 	ensureNoLeaks(t)
 	ensureNoLeakedFeeds(t)
 
 	huddle := makeTestBucket(t)
-	c1, err := huddle.NamedDataStore(dsName("scope1", "collection1"))
+	c1, err := huddle.NamedDataStore(ctx, dsName("scope1", "collection1"))
 	require.NoError(t, err)
-	ok, err := c1.Add("doc1", 0, "c1_value")
+	ok, err := c1.Add(ctx, "doc1", 0, "c1_value")
 	require.NoError(t, err)
 	require.True(t, ok)
-	c2, err := huddle.NamedDataStore(dsName("scope1", "collection2"))
+	c2, err := huddle.NamedDataStore(ctx, dsName("scope1", "collection2"))
 	require.NoError(t, err)
-	ok, err = c2.Add("doc1", 0, "c2_value")
+	ok, err = c2.Add(ctx, "doc1", 0, "c2_value")
 	require.True(t, ok)
 	require.NoError(t, err)
 
 	var value interface{}
-	_, err = c1.Get("doc1", &value)
+	_, err = c1.Get(ctx, "doc1", &value)
 	require.NoError(t, err)
 	assert.Equal(t, "c1_value", value)
-	_, err = c2.Get("doc1", &value)
+	_, err = c2.Get(ctx, "doc1", &value)
 	require.NoError(t, err)
 	assert.Equal(t, "c2_value", value)
 
 	// reopen collection, verify retrieval
-	c1copy, err := huddle.NamedDataStore(dsName("scope1", "collection1"))
+	c1copy, err := huddle.NamedDataStore(ctx, dsName("scope1", "collection1"))
 	require.NoError(t, err)
-	_, err = c1copy.Get("doc1", &value)
+	_, err = c1copy.Get(ctx, "doc1", &value)
 	require.NoError(t, err)
 	assert.Equal(t, "c1_value", value)
 
 	// drop collection
-	err = huddle.DropDataStore(dsName("scope1", "collection1"))
+	err = huddle.DropDataStore(ctx, dsName("scope1", "collection1"))
 	require.NoError(t, err)
 
 	// reopen collection, verify that previous data is not present
-	newC1, err := huddle.NamedDataStore(dsName("scope1", "collection1"))
+	newC1, err := huddle.NamedDataStore(ctx, dsName("scope1", "collection1"))
 	require.NoError(t, err)
-	_, err = newC1.Get("doc1", &value)
+	_, err = newC1.Get(ctx, "doc1", &value)
 	require.Error(t, err)
 	require.True(t, errors.As(err, &sgbucket.MissingError{}))
 }
 
 func TestGetPersistentMultiCollectionBucket(t *testing.T) {
+	ctx := t.Context()
 	ensureNoLeakedFeeds(t)
 
 	huddle := makeTestBucket(t)
 	huddleURL := huddle.GetURL()
 
-	c1, _ := huddle.NamedDataStore(dsName("scope1", "collection1"))
-	ok, err := c1.Add("doc1", 0, "c1_value")
+	c1, _ := huddle.NamedDataStore(ctx, dsName("scope1", "collection1"))
+	ok, err := c1.Add(ctx, "doc1", 0, "c1_value")
 	require.True(t, ok)
 	require.NoError(t, err)
-	c2, _ := huddle.NamedDataStore(dsName("scope1", "collection2"))
-	ok, err = c2.Add("doc1", 0, "c2_value")
+	c2, _ := huddle.NamedDataStore(ctx, dsName("scope1", "collection2"))
+	ok, err = c2.Add(ctx, "doc1", 0, "c2_value")
 	require.True(t, ok)
 	require.NoError(t, err)
 
 	var value interface{}
-	_, err = c1.Get("doc1", &value)
+	_, err = c1.Get(ctx, "doc1", &value)
 	require.NoError(t, err)
 	assert.Equal(t, "c1_value", value)
-	_, err = c2.Get("doc1", &value)
+	_, err = c2.Get(ctx, "doc1", &value)
 	require.NoError(t, err)
 	assert.Equal(t, "c2_value", value)
 
 	// reopen collection, verify retrieval
-	c1copy, _ := huddle.NamedDataStore(dsName("scope1", "collection1"))
-	_, err = c1copy.Get("doc1", &value)
+	c1copy, _ := huddle.NamedDataStore(ctx, dsName("scope1", "collection1"))
+	_, err = c1copy.Get(ctx, "doc1", &value)
 	require.NoError(t, err)
 	assert.Equal(t, "c1_value", value)
 
 	// Close collection bucket
-	huddle.Close(testCtx(t))
+	huddle.Close(ctx)
 
 	// Reopen persisted collection bucket
 	loadedHuddle, loadedErr := OpenBucket(huddleURL, strings.ToLower(t.Name()), ReOpenExisting)
@@ -295,29 +297,29 @@ func TestGetPersistentMultiCollectionBucket(t *testing.T) {
 
 	// validate contents
 	var loadedValue interface{}
-	c1Loaded, _ := loadedHuddle.NamedDataStore(dsName("scope1", "collection1"))
-	_, err = c1Loaded.Get("doc1", &loadedValue)
+	c1Loaded, _ := loadedHuddle.NamedDataStore(ctx, dsName("scope1", "collection1"))
+	_, err = c1Loaded.Get(ctx, "doc1", &loadedValue)
 	require.NoError(t, err)
 	assert.Equal(t, "c1_value", loadedValue)
 
 	// drop collection, should remove persisted value
-	err = loadedHuddle.DropDataStore(dsName("scope1", "collection1"))
+	err = loadedHuddle.DropDataStore(ctx, dsName("scope1", "collection1"))
 	require.NoError(t, err)
 
 	// reopen collection, verify that previous data is not present
-	newC1, _ := loadedHuddle.NamedDataStore(dsName("scope1", "collection1"))
-	_, err = newC1.Get("doc1", &loadedValue)
+	newC1, _ := loadedHuddle.NamedDataStore(ctx, dsName("scope1", "collection1"))
+	_, err = newC1.Get(ctx, "doc1", &loadedValue)
 	require.Error(t, err)
 	require.True(t, errors.As(err, &sgbucket.MissingError{}))
 
 	// verify that non-dropped collection (collection2) values are still present
-	c2Loaded, _ := loadedHuddle.NamedDataStore(dsName("scope1", "collection2"))
-	_, err = c2Loaded.Get("doc1", &loadedValue)
+	c2Loaded, _ := loadedHuddle.NamedDataStore(ctx, dsName("scope1", "collection2"))
+	_, err = c2Loaded.Get(ctx, "doc1", &loadedValue)
 	require.NoError(t, err)
 	assert.Equal(t, "c2_value", loadedValue)
 
 	// Close collection bucket
-	loadedHuddle.Close(testCtx(t))
+	loadedHuddle.Close(ctx)
 
 	// Reopen persisted collection bucket again to ensure dropped collection is not present
 	reloadedHuddle, reloadedErr := OpenBucket(huddleURL, strings.ToLower(t.Name()), ReOpenExisting)
@@ -325,19 +327,19 @@ func TestGetPersistentMultiCollectionBucket(t *testing.T) {
 
 	// reopen dropped collection, verify that previous data is not present
 	var reloadedValue interface{}
-	reloadedC1, _ := reloadedHuddle.NamedDataStore(dsName("scope1", "collection1"))
-	_, err = reloadedC1.Get("doc1", &reloadedValue)
+	reloadedC1, _ := reloadedHuddle.NamedDataStore(ctx, dsName("scope1", "collection1"))
+	_, err = reloadedC1.Get(ctx, "doc1", &reloadedValue)
 	require.Error(t, err)
 	require.True(t, errors.As(err, &sgbucket.MissingError{}))
 
 	// reopen non-dropped collection, verify that previous data is present
-	reloadedC2, _ := reloadedHuddle.NamedDataStore(dsName("scope1", "collection2"))
-	_, err = reloadedC2.Get("doc1", &reloadedValue)
+	reloadedC2, _ := reloadedHuddle.NamedDataStore(ctx, dsName("scope1", "collection2"))
+	_, err = reloadedC2.Get(ctx, "doc1", &reloadedValue)
 	require.NoError(t, err)
 	assert.Equal(t, "c2_value", reloadedValue)
 
 	// Close and Delete the bucket, should delete underlying collections
-	require.NoError(t, reloadedHuddle.CloseAndDelete(testCtx(t)))
+	require.NoError(t, reloadedHuddle.CloseAndDelete(ctx))
 
 	// Attempt to reopen deleted bucket
 	_, err = OpenBucket(huddleURL, strings.ToLower(t.Name()), ReOpenExisting)
@@ -347,18 +349,19 @@ func TestGetPersistentMultiCollectionBucket(t *testing.T) {
 	postDeleteHuddle, err := OpenBucket(huddleURL, strings.ToLower(t.Name()), CreateNew)
 	require.NoError(t, err)
 	var postDeleteValue interface{}
-	postDeleteC2, err := postDeleteHuddle.NamedDataStore(dsName("scope1", "collection2"))
+	postDeleteC2, err := postDeleteHuddle.NamedDataStore(ctx, dsName("scope1", "collection2"))
 	require.NoError(t, err)
-	_, err = postDeleteC2.Get("doc1", &postDeleteValue)
+	_, err = postDeleteC2.Get(ctx, "doc1", &postDeleteValue)
 	require.Error(t, err)
 	require.True(t, errors.As(err, &sgbucket.MissingError{}))
-	require.NoError(t, postDeleteHuddle.CloseAndDelete(testCtx(t)))
+	require.NoError(t, postDeleteHuddle.CloseAndDelete(ctx))
 }
 
 func TestExpiration(t *testing.T) {
+	ctx := t.Context()
 	ensureNoLeaks(t)
 	bucket := makeTestBucket(t)
-	c := bucket.DefaultDataStore()
+	c := bucket.DefaultDataStore(ctx)
 
 	exp, err := bucket.nextExpiration()
 	require.NoError(t, err)
@@ -384,13 +387,13 @@ func TestExpiration(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, int(exp4), int(exp))
 
-	_, _, err = c.GetRaw("k1")
+	_, _, err = c.GetRaw(ctx, "k1")
 	assert.NoError(t, err)
-	_, _, err = c.GetRaw("k2")
+	_, _, err = c.GetRaw(ctx, "k2")
 	assert.Error(t, err) // k2 is gone
-	_, _, err = c.GetRaw("k3")
+	_, _, err = c.GetRaw(ctx, "k3")
 	assert.NoError(t, err)
-	_, _, err = c.GetRaw("k4")
+	_, _, err = c.GetRaw(ctx, "k4")
 	assert.NoError(t, err)
 
 	log.Printf("... waiting 2 secs ...")
@@ -400,7 +403,7 @@ func TestExpiration(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, uint32(0), exp)
 
-	_, _, err = c.GetRaw("k4")
+	_, _, err = c.GetRaw(ctx, "k4")
 	assert.Error(t, err)
 
 	n, err := bucket.PurgeTombstones()
@@ -409,14 +412,14 @@ func TestExpiration(t *testing.T) {
 }
 
 func TestExpirationAfterClose(t *testing.T) {
+	ctx := t.Context()
 	t.Skip("Slow test useful for debugging issues with expiration")
 	bucket, err := OpenBucket(InMemoryURL, strings.ToLower(t.Name()), CreateNew)
-	ctx := testCtx(t)
 	defer func() {
 		assert.NoError(t, bucket.CloseAndDelete(ctx))
 	}()
 	require.NoError(t, err)
-	c := bucket.DefaultDataStore()
+	c := bucket.DefaultDataStore(ctx)
 
 	// set expiry long enough that Close will happen first
 	exp := Exp(time.Now().Add(1 * time.Second).Unix())

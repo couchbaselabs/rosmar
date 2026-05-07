@@ -32,7 +32,7 @@ func (bucket *Bucket) StartDCPFeed(
 	traceEnter("StartDCPFeed", "bucket=%s, args=%+v", bucket.GetName(), args)
 	// If no scopes are specified, return feed for the default collection, if it exists
 	if len(args.Scopes) == 0 {
-		return bucket.DefaultDataStore().(*Collection).StartDCPFeed(ctx, args, callback, dbStats)
+		return bucket.DefaultDataStore(ctx).(*Collection).StartDCPFeed(ctx, args, callback, dbStats)
 	}
 
 	// Validate requested collections exist before starting feeds
@@ -53,9 +53,9 @@ func (bucket *Bucket) StartDCPFeed(
 		// Not bothering to remove scopes from args for the single collection feeds
 		// here because it's ignored by Collection.StartDCPFeed
 		collectionID := collection.GetCollectionID()
-		collectionAwareCallback := func(event sgbucket.FeedEvent) bool {
+		collectionAwareCallback := func(ctx context.Context, event sgbucket.FeedEvent) bool {
 			event.CollectionID = collectionID
-			return callback(event)
+			return callback(ctx, event)
 		}
 
 		// have each collection maintain its own doneChan
@@ -220,7 +220,7 @@ func (feed *dcpFeed) readCheckpoint() (err error) {
 	}
 	key := feed.checkpointKey()
 	var checkpt checkpoint
-	if _, err = feed.metadataStore.Get(key, &checkpt); err != nil {
+	if _, err = feed.metadataStore.Get(feed.ctx, key, &checkpt); err != nil {
 		if _, ok := err.(sgbucket.MissingError); ok {
 			err = nil
 			debug("%s checkpoint %q missing", feed, key)
@@ -245,7 +245,7 @@ func (feed *dcpFeed) writeCheckpoint() (err error) {
 	key := feed.checkpointKey()
 	colID := feed.collection.GetCollectionID()
 
-	_, err = feed.metadataStore.Update(key, 0, func(current []byte) (updated []byte, expiry *uint32, delete bool, err error) {
+	_, err = feed.metadataStore.Update(feed.ctx, key, 0, func(_ context.Context, current []byte) (updated []byte, expiry *uint32, delete bool, err error) {
 		var checkpt checkpoint
 		if current != nil {
 			if err := json.Unmarshal(current, &checkpt); err != nil {
@@ -297,7 +297,7 @@ func (feed *dcpFeed) run() {
 				logError("Fatal error converting %s event to feed event: %v", feed, err)
 				break
 			}
-			feed.callback(*feedEvent)
+			feed.callback(feed.ctx, *feedEvent)
 			if feedEvent.Cas > feed.lastCas {
 				feed.lastCas = feedEvent.Cas
 				feed.lastCasChanged = true

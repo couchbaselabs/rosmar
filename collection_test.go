@@ -12,6 +12,7 @@ package rosmar
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"strconv"
@@ -29,105 +30,110 @@ const syncXattrName = "_sync" // name of xattr used for sync gateway metadata
 const vvXattrName = "_vv"     // name of xattr used for HLV
 
 func TestDeleteThenAdd(t *testing.T) {
+	ctx := t.Context()
 	ensureNoLeaks(t)
-	coll := makeTestBucket(t).DefaultDataStore()
+	coll := makeTestBucket(t).DefaultDataStore(ctx)
 
 	var value interface{}
-	_, err := coll.Get("key", &value)
+	_, err := coll.Get(ctx, "key", &value)
 	assert.Equal(t, sgbucket.MissingError{Key: "key"}, err)
 	addToCollection(t, coll, "key", 0, "value")
-	_, err = coll.Get("key", &value)
+	_, err = coll.Get(ctx, "key", &value)
 	assert.NoError(t, err, "Get")
 	assert.Equal(t, "value", value)
-	assert.NoError(t, coll.Delete("key"), "Delete")
-	_, err = coll.Get("key", &value)
+	assert.NoError(t, coll.Delete(ctx, "key"), "Delete")
+	_, err = coll.Get(ctx, "key", &value)
 	assert.Equal(t, sgbucket.MissingError{Key: "key"}, err)
 	addToCollection(t, coll, "key", 0, "value")
 }
 
 func TestIncr(t *testing.T) {
+	ctx := t.Context()
 	ensureNoLeaks(t)
-	coll := makeTestBucket(t).DefaultDataStore()
-	count, err := coll.Incr("count1", 1, 100, 0)
+	coll := makeTestBucket(t).DefaultDataStore(ctx)
+	count, err := coll.Incr(ctx, "count1", 1, 100, 0)
 	assert.NoError(t, err, "Incr")
 	assert.Equal(t, uint64(100), count)
 
-	count, err = coll.Incr("count1", 0, 0, 0)
+	count, err = coll.Incr(ctx, "count1", 0, 0, 0)
 	assert.NoError(t, err, "Incr")
 	assert.Equal(t, uint64(100), count)
 
-	count, err = coll.Incr("count1", 10, 100, 0)
+	count, err = coll.Incr(ctx, "count1", 10, 100, 0)
 	assert.NoError(t, err, "Incr")
 	assert.Equal(t, uint64(110), count)
 
-	count, err = coll.Incr("count1", 0, 0, 0)
+	count, err = coll.Incr(ctx, "count1", 0, 0, 0)
 	assert.NoError(t, err, "Incr")
 	assert.Equal(t, uint64(110), count)
 }
 
 // Spawns 1000 goroutines that 'simultaneously' use Incr to increment the same counter by 1.
 func TestIncrAtomic(t *testing.T) {
+	ctx := t.Context()
 	ensureNoLeaks(t)
-	coll := makeTestBucket(t).DefaultDataStore()
+	coll := makeTestBucket(t).DefaultDataStore(ctx)
 	var waiters sync.WaitGroup
 	numIncrements := 5
 	waiters.Add(numIncrements)
 	for i := uint64(1); i <= uint64(numIncrements); i++ {
 		numToAdd := i // lock down the value for the goroutine
 		go func() {
-			_, err := coll.Incr("key", numToAdd, numToAdd, 0)
+			_, err := coll.Incr(ctx, "key", numToAdd, numToAdd, 0)
 			assert.NoError(t, err, "Incr")
 			waiters.Add(-1)
 		}()
 	}
 	waiters.Wait()
-	value, err := coll.Incr("key", 0, 0, 0)
+	value, err := coll.Incr(ctx, "key", 0, 0, 0)
 	assert.NoError(t, err, "Incr")
 	assert.Equal(t, numIncrements*(numIncrements+1)/2, int(value))
 }
 
 func TestAppend(t *testing.T) {
+	ctx := t.Context()
 	ensureNoLeaks(t)
-	coll := makeTestBucket(t).DefaultDataStore()
+	coll := makeTestBucket(t).DefaultDataStore(ctx)
 
-	exists, err := coll.Exists("key")
+	exists, err := coll.Exists(ctx, "key")
 	assert.NoError(t, err)
 	assert.False(t, exists)
 
-	_, err = coll.WriteCas("key", 0, 0, []byte(" World"), sgbucket.Append)
+	_, err = coll.WriteCas(ctx, "key", 0, 0, []byte(" World"), sgbucket.Append)
 	assert.Equal(t, sgbucket.MissingError{Key: "key"}, err)
 
-	err = coll.SetRaw("key", 0, nil, []byte("Hello"))
+	err = coll.SetRaw(ctx, "key", 0, nil, []byte("Hello"))
 	assert.NoError(t, err, "SetRaw")
-	_, cas, err := coll.GetRaw("key")
+	_, cas, err := coll.GetRaw(ctx, "key")
 	assert.NoError(t, err, "GetRaw")
 
-	_, err = coll.WriteCas("key", 0, cas, []byte(" World"), sgbucket.Append)
+	_, err = coll.WriteCas(ctx, "key", 0, cas, []byte(" World"), sgbucket.Append)
 	assert.NoError(t, err, "Append")
-	value, _, err := coll.GetRaw("key")
+	value, _, err := coll.GetRaw(ctx, "key")
 	assert.NoError(t, err, "GetRaw")
 	assert.Equal(t, []byte("Hello World"), value)
 }
 
 func TestGets(t *testing.T) {
+	ctx := t.Context()
 	ensureNoLeaks(t)
 
-	coll := makeTestBucket(t).DefaultDataStore()
+	coll := makeTestBucket(t).DefaultDataStore(ctx)
 
 	// Gets (JSON)
 	addToCollection(t, coll, "key", 0, "value")
 
 	var value interface{}
-	cas, err := coll.Get("key", &value)
+	cas, err := coll.Get(ctx, "key", &value)
 	assert.NoError(t, err, "Gets")
 	assert.True(t, cas > 0)
 	assert.Equal(t, "value", value)
 
 	// GetsRaw
-	err = coll.SetRaw("keyraw", 0, nil, []byte("Hello"))
+	err = coll.SetRaw(ctx, "keyraw", 0, nil, []byte("Hello"))
 	assert.NoError(t, err, "SetRaw")
 
-	value, cas, err = coll.GetRaw("keyraw")
+	value, cas, err = coll.GetRaw(ctx, "keyraw")
 	assert.NoError(t, err, "GetsRaw")
 	assert.True(t, cas > 0)
 	assert.Equal(t, []byte("Hello"), value)
@@ -188,7 +194,7 @@ func TestEvalSubdocPaths(t *testing.T) {
 func initSubDocTest(t *testing.T) (CAS, sgbucket.DataStore) {
 	ensureNoLeaks(t)
 
-	coll := makeTestBucket(t).DefaultDataStore()
+	coll := makeTestBucket(t).DefaultDataStore(t.Context())
 	require.True(t, coll.IsSupported(sgbucket.BucketStoreFeatureSubdocOperations))
 
 	rawJson := []byte(`{
@@ -200,7 +206,7 @@ func initSubDocTest(t *testing.T) (CAS, sgbucket.DataStore) {
 	addToCollection(t, coll, "key", 0, rawJson)
 
 	var fullDoc map[string]any
-	cas, err := coll.Get("key", &fullDoc)
+	cas, err := coll.Get(t.Context(), "key", &fullDoc)
 	assert.NoError(t, err)
 	assert.Greater(t, cas, CAS(0))
 
@@ -208,7 +214,7 @@ func initSubDocTest(t *testing.T) (CAS, sgbucket.DataStore) {
 }
 
 func TestWriteSubDoc(t *testing.T) {
-	ctx := testCtx(t)
+	ctx := t.Context()
 	initialCas, coll := initSubDocTest(t)
 
 	// update json
@@ -224,7 +230,7 @@ func TestWriteSubDoc(t *testing.T) {
 	assert.Greater(t, cas2, initialCas)
 
 	var fullDoc map[string]any
-	cas2Get, err := coll.Get("key", &fullDoc)
+	cas2Get, err := coll.Get(ctx, "key", &fullDoc)
 	assert.NoError(t, err)
 	assert.Equal(t, cas2, cas2Get)
 	assert.EqualValues(t, map[string]any{"rosmar": "was here"}, fullDoc)
@@ -236,7 +242,7 @@ func TestWriteSubDoc(t *testing.T) {
 }
 
 func TestInsertSubDoc(t *testing.T) {
-	ctx := testCtx(t)
+	ctx := t.Context()
 	initialCas, coll := initSubDocTest(t)
 
 	rosmarMap := map[string]any{"foo": "lol", "bar": "baz"}
@@ -251,7 +257,7 @@ func TestInsertSubDoc(t *testing.T) {
 	assert.NoError(t, err)
 
 	var fullDoc map[string]any
-	cas, err := coll.Get("key", &fullDoc)
+	cas, err := coll.Get(ctx, "key", &fullDoc)
 	assert.NoError(t, err)
 	assert.Greater(t, cas, initialCas)
 
@@ -266,75 +272,76 @@ func TestInsertSubDoc(t *testing.T) {
 }
 
 func TestWriteCas(t *testing.T) {
+	ctx := t.Context()
 	ensureNoLeaks(t)
 
-	coll := makeTestBucket(t).DefaultDataStore()
+	coll := makeTestBucket(t).DefaultDataStore(ctx)
 
 	// Add with WriteCas - JSON docs
 	// Insert
 	var obj interface{}
 	mustUnmarshal(t, `{"value":"value1"}`, &obj)
-	cas, err := coll.WriteCas("key1", 0, 0, obj, 0)
+	cas, err := coll.WriteCas(ctx, "key1", 0, 0, obj, 0)
 	assert.NoError(t, err, "WriteCas")
 	assert.True(t, cas > 0, "Cas value should be greater than zero")
 
 	// Update document with wrong (zero) cas value
 	mustUnmarshal(t, `{"value":"value2"}`, &obj)
-	newCas, err := coll.WriteCas("key1", 0, 0, obj, 0)
+	newCas, err := coll.WriteCas(ctx, "key1", 0, 0, obj, 0)
 	assert.Error(t, err, "Invalid cas should have returned error.")
 	assert.Equal(t, uint64(0), newCas)
 
 	// Update document with correct cas value
 	mustUnmarshal(t, `{"value":"value2"}`, &obj)
-	newCas, err = coll.WriteCas("key1", 0, cas, obj, 0)
+	newCas, err = coll.WriteCas(ctx, "key1", 0, cas, obj, 0)
 	assert.True(t, err == nil, "Valid cas should not have returned error.")
 	assert.True(t, cas > 0, "Cas value should be greater than zero")
 	assert.True(t, cas != newCas, "Cas value should change on successful update")
 	var result interface{}
-	getCas, err := coll.Get("key1", &result)
+	getCas, err := coll.Get(ctx, "key1", &result)
 	assert.NoError(t, err, "Get")
 	assert.Equal(t, obj, result)
 	assert.Equal(t, newCas, getCas)
 
 	// Update document with obsolete case value
 	mustUnmarshal(t, `{"value":"value3"}`, &obj)
-	newCas, err = coll.WriteCas("key1", 0, cas, obj, 0)
+	newCas, err = coll.WriteCas(ctx, "key1", 0, cas, obj, 0)
 	assert.Error(t, err, "Invalid cas should have returned error.")
 	assert.Equal(t, uint64(0), newCas)
 
 	// Add with WriteCas - raw docs
 	// Insert
-	cas, err = coll.WriteCas("keyraw1", 0, 0, []byte("value1"), sgbucket.Raw)
+	cas, err = coll.WriteCas(ctx, "keyraw1", 0, 0, []byte("value1"), sgbucket.Raw)
 	assert.NoError(t, err, "WriteCas")
 	assert.True(t, cas > 0, "Cas value should be greater than zero")
 
 	// Update document with wrong (zero) cas value
-	newCas, err = coll.WriteCas("keyraw1", 0, 0, []byte("value2"), sgbucket.Raw)
+	newCas, err = coll.WriteCas(ctx, "keyraw1", 0, 0, []byte("value2"), sgbucket.Raw)
 	assert.Error(t, err, "Invalid cas should have returned error.")
 	assert.Equal(t, uint64(0), newCas)
 
 	// Update document with correct cas value
-	newCas, err = coll.WriteCas("keyraw1", 0, cas, []byte("value2"), sgbucket.Raw)
+	newCas, err = coll.WriteCas(ctx, "keyraw1", 0, cas, []byte("value2"), sgbucket.Raw)
 	assert.True(t, err == nil, "Valid cas should not have returned error.")
 	assert.True(t, cas > 0, "Cas value should be greater than zero")
 	assert.True(t, cas != newCas, "Cas value should change on successful update")
-	value, getCas, err := coll.GetRaw("keyraw1")
+	value, getCas, err := coll.GetRaw(ctx, "keyraw1")
 	assert.NoError(t, err, "GetRaw")
 	assert.Equal(t, []byte("value2"), value)
 	assert.Equal(t, newCas, getCas)
 
 	// Update document with obsolete cas value
-	newCas, err = coll.WriteCas("keyraw1", 0, cas, []byte("value3"), sgbucket.Raw)
+	newCas, err = coll.WriteCas(ctx, "keyraw1", 0, cas, []byte("value3"), sgbucket.Raw)
 	assert.Error(t, err, "Invalid cas should have returned error.")
 	assert.Equal(t, uint64(0), newCas)
 
 	// Delete document, attempt to recreate w/ cas set to 0
-	err = coll.Delete("keyraw1")
+	err = coll.Delete(ctx, "keyraw1")
 	assert.True(t, err == nil, "Delete failed")
-	newCas, err = coll.WriteCas("keyraw1", 0, 0, []byte("resurrectValue"), sgbucket.Raw)
+	newCas, err = coll.WriteCas(ctx, "keyraw1", 0, 0, []byte("resurrectValue"), sgbucket.Raw)
 	require.NoError(t, err, "Recreate with cas=0 should succeed.")
 	assert.True(t, cas > 0, "Cas value should be greater than zero")
-	value, getCas, err = coll.GetRaw("keyraw1")
+	value, getCas, err = coll.GetRaw(ctx, "keyraw1")
 	assert.NoError(t, err, "GetRaw")
 	assert.Equal(t, []byte("resurrectValue"), value)
 	assert.Equal(t, newCas, getCas)
@@ -342,54 +349,55 @@ func TestWriteCas(t *testing.T) {
 }
 
 func TestRemove(t *testing.T) {
+	ctx := t.Context()
 	ensureNoLeaks(t)
 
-	coll := makeTestBucket(t).DefaultDataStore()
+	coll := makeTestBucket(t).DefaultDataStore(ctx)
 
 	// Add with WriteCas - JSON docs
 	// Insert
 	var obj interface{}
 	mustUnmarshal(t, `{"value":"value1"}`, &obj)
-	cas, err := coll.WriteCas("key1", 0, 0, obj, 0)
+	cas, err := coll.WriteCas(ctx, "key1", 0, 0, obj, 0)
 	assert.NoError(t, err, "WriteCas")
 	assert.True(t, cas > 0, "Cas value should be greater than zero")
 
 	// Update document with correct cas value
 	mustUnmarshal(t, `{"value":"value2"}`, &obj)
-	newCas, err := coll.WriteCas("key1", 0, cas, obj, 0)
+	newCas, err := coll.WriteCas(ctx, "key1", 0, cas, obj, 0)
 	assert.True(t, err == nil, "Valid cas should not have returned error.")
 	assert.True(t, cas > 0, "Cas value should be greater than zero")
 	assert.True(t, cas != newCas, "Cas value should change on successful update")
 	var result interface{}
-	getCas, err := coll.Get("key1", &result)
+	getCas, err := coll.Get(ctx, "key1", &result)
 	assert.NoError(t, err, "Get")
 	assert.Equal(t, obj, result)
 	assert.Equal(t, newCas, getCas)
 
 	// Remove document with incorrect cas value
-	newCas, err = coll.Remove("key1", cas)
+	newCas, err = coll.Remove(ctx, "key1", cas)
 	assert.Error(t, err, "Invalid cas should have returned error.")
 	assert.Equal(t, uint64(0), newCas)
 
 	// Remove document with correct cas value
-	newCas, err = coll.Remove("key1", getCas)
+	newCas, err = coll.Remove(ctx, "key1", getCas)
 	assert.True(t, err == nil, "Valid cas should not have returned error on remove.")
 	assert.True(t, newCas != uint64(0), "Remove should return non-zero cas")
 }
 
 // Test read and write of json as []byte
 func TestNonRawBytes(t *testing.T) {
-	ctx := testCtx(t)
+	ctx := t.Context()
 	ensureNoLeakedFeeds(t)
 
-	coll := makeTestBucket(t).DefaultDataStore()
+	coll := makeTestBucket(t).DefaultDataStore(ctx)
 
 	byteBody := []byte(`{"value":"value1"}`)
 
 	// Add with WriteCas - JSON doc as []byte and *[]byte
-	_, err := coll.WriteCas("writeCas1", 0, 0, byteBody, 0)
+	_, err := coll.WriteCas(ctx, "writeCas1", 0, 0, byteBody, 0)
 	assert.NoError(t, err, "WriteCas []byte")
-	_, err = coll.WriteCas("writeCas2", 0, 0, &byteBody, 0)
+	_, err = coll.WriteCas(ctx, "writeCas2", 0, 0, &byteBody, 0)
 	assert.NoError(t, err, "WriteCas *[]byte")
 
 	// Add with Add - JSON doc as []byte and *[]byte
@@ -399,16 +407,16 @@ func TestNonRawBytes(t *testing.T) {
 	// Set - JSON doc as []byte
 	// Set - JSON doc as *[]byte
 	// Add with Add - JSON doc as []byte and *[]byte
-	err = coll.Set("set1", 0, nil, byteBody)
+	err = coll.Set(ctx, "set1", 0, nil, byteBody)
 	assert.NoError(t, err, "Set []byte")
-	err = coll.Set("set2", 0, nil, &byteBody)
+	err = coll.Set(ctx, "set2", 0, nil, &byteBody)
 	assert.NoError(t, err, "Set *[]byte")
 
 	keySet := []string{"writeCas1", "writeCas2", "add1", "add2", "set1", "set2"}
 	for _, key := range keySet {
 		// Verify retrieval as map[string]interface{}
 		var result map[string]interface{}
-		cas, err := coll.Get(key, &result)
+		cas, err := coll.Get(ctx, key, &result)
 		assert.NoError(t, err, fmt.Sprintf("Error for Get %s", key))
 		assert.True(t, cas > 0, fmt.Sprintf("CAS is zero for key: %s", key))
 		assert.True(t, result != nil, fmt.Sprintf("result is nil for key: %s", key))
@@ -418,7 +426,7 @@ func TestNonRawBytes(t *testing.T) {
 
 		// Verify retrieval as *[]byte
 		var rawResult []byte
-		cas, err = coll.Get(key, &rawResult)
+		cas, err = coll.Get(ctx, key, &rawResult)
 		assert.NoError(t, err, fmt.Sprintf("Error for Get %s", key))
 		assert.True(t, cas > 0, fmt.Sprintf("CAS is zero for key: %s", key))
 		assert.True(t, result != nil, fmt.Sprintf("result is nil for key: %s", key))
@@ -451,11 +459,11 @@ func setJSON(coll sgbucket.DataStore, docid string, jsonDoc string) error {
 	if err != nil {
 		return err
 	}
-	return coll.Set(docid, 0, nil, obj)
+	return coll.Set(context.TODO(), docid, 0, nil, obj)
 }
 
 func addToCollection(t *testing.T, coll sgbucket.DataStore, key string, exp uint32, value interface{}) {
-	added, err := coll.Add(key, exp, value)
+	added, err := coll.Add(t.Context(), key, exp, value)
 	require.NoError(t, err)
 	require.True(t, added, "Expected doc to be added")
 }
@@ -485,21 +493,23 @@ func ensureNoLeakedFeeds(t *testing.T) {
 }
 
 func TestNoCasOnResurrection(t *testing.T) {
-	col := makeTestBucket(t).DefaultDataStore()
+	ctx := t.Context()
+	col := makeTestBucket(t).DefaultDataStore(ctx)
 	const docID = "doc1"
 	const exp = 0
-	casOut, err := col.WriteCas(docID, exp, 0, []byte("{}"), sgbucket.Raw)
+	casOut, err := col.WriteCas(ctx, docID, exp, 0, []byte("{}"), sgbucket.Raw)
 	require.NoError(t, err)
 	require.NotEqual(t, 0, casOut)
-	require.NoError(t, col.Delete(docID))
+	require.NoError(t, col.Delete(ctx, docID))
 
-	ressurectedCasOut, err := col.WriteCas(docID, exp, casOut, []byte("{}"), sgbucket.AddOnly)
+	ressurectedCasOut, err := col.WriteCas(ctx, docID, exp, casOut, []byte("{}"), sgbucket.AddOnly)
 	require.NoError(t, err)
 	require.NotEqual(t, 0, ressurectedCasOut)
 }
 
 func TestWriteCasWithXattrExistingXattr(t *testing.T) {
-	col := makeTestBucket(t).DefaultDataStore()
+	ctx := t.Context()
+	col := makeTestBucket(t).DefaultDataStore(ctx)
 
 	const docID = "DocExistsXattrExists"
 
@@ -512,7 +522,6 @@ func TestWriteCasWithXattrExistingXattr(t *testing.T) {
 
 	var exp uint32
 	xattrs := map[string][]byte{syncXattrName: mustMarshalJSON(t, xattrVal)}
-	ctx := testCtx(t)
 	cas := uint64(0)
 	cas, err := col.WriteWithXattrs(ctx, docID, exp, cas, mustMarshalJSON(t, val), xattrs, nil, nil)
 	require.NoError(t, err)
@@ -537,7 +546,8 @@ func TestWriteCasWithXattrExistingXattr(t *testing.T) {
 
 // Test WriteWithXattr that only updates the xattr.
 func TestWriteWithXattrNoBody(t *testing.T) {
-	col := makeTestBucket(t).DefaultDataStore()
+	ctx := t.Context()
+	col := makeTestBucket(t).DefaultDataStore(ctx)
 
 	const docID = "WriteWithXattrNoBody"
 
@@ -550,7 +560,6 @@ func TestWriteWithXattrNoBody(t *testing.T) {
 
 	var exp uint32
 	xattrs := map[string][]byte{syncXattrName: mustMarshalJSON(t, xattrVal)}
-	ctx := testCtx(t)
 	cas := uint64(0)
 	cas, err := col.WriteWithXattrs(ctx, docID, exp, cas, mustMarshalJSON(t, val), xattrs, nil, nil)
 	require.NoError(t, err)
@@ -564,7 +573,7 @@ func TestWriteWithXattrNoBody(t *testing.T) {
 	require.NoError(t, err)
 
 	// Fetch, validate body and xattrs are correct
-	getVal, getXattrs, _, err := col.GetWithXattrs(testCtx(t), docID, []string{syncXattrName})
+	getVal, getXattrs, _, err := col.GetWithXattrs(ctx, docID, []string{syncXattrName})
 	var fetchedVal, fetchedXattr map[string]interface{}
 	require.NoError(t, json.Unmarshal(getVal, &fetchedVal))
 	require.Equal(t, val, fetchedVal)
@@ -575,11 +584,12 @@ func TestWriteWithXattrNoBody(t *testing.T) {
 }
 
 func TestWriteCasWithXattrNoXattr(t *testing.T) {
-	col := makeTestBucket(t).DefaultDataStore().(*Collection)
+	ctx := t.Context()
+	col := makeTestBucket(t).DefaultDataStore(ctx).(*Collection)
 	const docID = "DocExistsNoXattr"
 	val := make(map[string]interface{})
 	val["type"] = docID
-	cas, err := col.WriteCas(docID, 0, 0, val, 0)
+	cas, err := col.WriteCas(ctx, docID, 0, 0, val, 0)
 	require.NoError(t, err)
 
 	updatedXattrVal := make(map[string]interface{})
@@ -587,7 +597,6 @@ func TestWriteCasWithXattrNoXattr(t *testing.T) {
 	updatedXattrVal["rev"] = "2-1234"
 	xattrs := map[string][]byte{syncXattrName: mustMarshalJSON(t, updatedXattrVal)}
 	const deleteBody = true
-	ctx := testCtx(t)
 	_, err = col.WriteTombstoneWithXattrs(ctx, docID, 0, uint64(1234), xattrs, nil, deleteBody, nil)
 
 	require.ErrorAs(t, err, &sgbucket.CasMismatchErr{})
@@ -598,7 +607,8 @@ func TestWriteCasWithXattrNoXattr(t *testing.T) {
 }
 
 func TestWriteCasWithXattrXattrExistsNoDoc(t *testing.T) {
-	col := makeTestBucket(t).DefaultDataStore().(*Collection)
+	ctx := t.Context()
+	col := makeTestBucket(t).DefaultDataStore(ctx).(*Collection)
 	const docID = "XattrExistsNoDoc"
 
 	val := make(map[string]interface{})
@@ -609,14 +619,13 @@ func TestWriteCasWithXattrXattrExistsNoDoc(t *testing.T) {
 	xattrVal["rev"] = "1-1234"
 
 	xattrs := map[string][]byte{syncXattrName: mustMarshalJSON(t, xattrVal)}
-	ctx := testCtx(t)
 	// Create w/ XATTR
 	cas := uint64(0)
 	cas, err := col.WriteWithXattrs(ctx, docID, 0, cas, mustMarshalJSON(t, val), xattrs, nil, nil)
 	require.NoError(t, err)
 
 	// Delete the doc body
-	cas, err = col.Remove(docID, cas)
+	cas, err = col.Remove(ctx, docID, cas)
 	require.NoError(t, err)
 
 	updatedXattrVal := make(map[string]interface{})
@@ -637,7 +646,8 @@ func TestWriteCasWithXattrXattrExistsNoDoc(t *testing.T) {
 }
 
 func TestWriteCasWithXattrOnTombstone(t *testing.T) {
-	col := makeTestBucket(t).DefaultDataStore().(*Collection)
+	ctx := t.Context()
+	col := makeTestBucket(t).DefaultDataStore(ctx).(*Collection)
 	const docID = "XattrExistsNoDoc"
 
 	val := make(map[string]interface{})
@@ -648,11 +658,10 @@ func TestWriteCasWithXattrOnTombstone(t *testing.T) {
 	xattrVal["rev"] = "1-1234"
 
 	xattrs := map[string][]byte{syncXattrName: mustMarshalJSON(t, xattrVal)}
-	ctx := testCtx(t)
 	cas, err := col.WriteWithXattrs(ctx, docID, 0, 0, mustMarshalJSON(t, val), xattrs, nil, nil)
 	require.NoError(t, err)
 
-	deleteCas, err := col.Remove(docID, cas)
+	deleteCas, err := col.Remove(ctx, docID, cas)
 	require.NoError(t, err)
 	require.NotEqual(t, cas, deleteCas)
 
@@ -669,7 +678,7 @@ func TestWriteCasWithXattrOnTombstone(t *testing.T) {
 
 func verifyEmptyBodyAndSyncXattr(t *testing.T, store sgbucket.DataStore, key string) {
 	xattrKeys := []string{syncXattrName}
-	retrievedVal, retrievedXattrs, _, err := store.GetWithXattrs(testCtx(t), key, xattrKeys)
+	retrievedVal, retrievedXattrs, _, err := store.GetWithXattrs(t.Context(), key, xattrKeys)
 
 	require.NoError(t, err)
 	require.Nil(t, retrievedVal) // require that the doc body is empty
@@ -679,46 +688,47 @@ func verifyEmptyBodyAndSyncXattr(t *testing.T, store sgbucket.DataStore, key str
 }
 
 func TestSetWithMetaNoDocument(t *testing.T) {
-	col := makeTestBucket(t).DefaultDataStore()
+	ctx := t.Context()
+	col := makeTestBucket(t).DefaultDataStore(ctx)
 	const docID = "TestSetWithMeta"
-	ctx := testCtx(t)
 	cas2 := CAS(1)
 	body := []byte(`{"foo":"bar"}`)
 	err := col.(*Collection).SetWithMeta(ctx, docID, 0, cas2, 0, nil, body, sgbucket.FeedDataTypeJSON)
 	require.NoError(t, err)
 
-	val, cas, err := col.GetRaw(docID)
+	val, cas, err := col.GetRaw(ctx, docID)
 	require.NoError(t, err)
 	require.Equal(t, cas2, cas)
 	require.JSONEq(t, string(body), string(val))
 }
 
 func TestSetWithMetaOverwriteJSON(t *testing.T) {
-	col := makeTestBucket(t).DefaultDataStore()
+	ctx := t.Context()
+	col := makeTestBucket(t).DefaultDataStore(ctx)
 	docID := t.Name()
-	cas1, err := col.WriteCas(docID, 0, 0, []byte("{}"), sgbucket.Raw)
+	cas1, err := col.WriteCas(ctx, docID, 0, 0, []byte("{}"), sgbucket.Raw)
 	require.NoError(t, err)
 	require.Greater(t, cas1, CAS(0))
 
-	ctx := testCtx(t)
 	cas2 := CAS(1)
 	body := []byte(`{"foo":"bar"}`)
 	err = col.(*Collection).SetWithMeta(ctx, docID, cas1, cas2, 0, nil, body, sgbucket.FeedDataTypeJSON)
 	require.NoError(t, err)
 
-	val, cas, err := col.GetRaw(docID)
+	val, cas, err := col.GetRaw(ctx, docID)
 	require.NoError(t, err)
 	require.Equal(t, cas2, cas)
 	require.JSONEq(t, string(body), string(val))
 }
 
 func TestSetWithMetaOverwriteNotJSON(t *testing.T) {
+	ctx := t.Context()
 	bucket := makeTestBucket(t)
-	col := bucket.DefaultDataStore()
+	col := bucket.DefaultDataStore(ctx)
 	docID := t.Name()
 
 	events, _ := startFeed(t, bucket)
-	cas1, err := col.WriteCas(docID, 0, 0, []byte("{}"), 0)
+	cas1, err := col.WriteCas(ctx, docID, 0, 0, []byte("{}"), 0)
 	require.NoError(t, err)
 	require.Greater(t, cas1, CAS(0))
 
@@ -727,13 +737,12 @@ func TestSetWithMetaOverwriteNotJSON(t *testing.T) {
 	require.Equal(t, sgbucket.FeedOpMutation, event1.Opcode)
 	require.Equal(t, sgbucket.FeedDataTypeJSON, event1.DataType)
 
-	ctx := testCtx(t)
 	cas2 := CAS(1)
 	body := []byte(`ABC`)
 	err = col.(*Collection).SetWithMeta(ctx, docID, cas1, cas2, 0, nil, body, sgbucket.FeedDataTypeRaw)
 	require.NoError(t, err)
 
-	val, cas, err := col.GetRaw(docID)
+	val, cas, err := col.GetRaw(ctx, docID)
 	require.NoError(t, err)
 	require.Equal(t, cas2, cas)
 	require.Equal(t, body, val)
@@ -745,16 +754,16 @@ func TestSetWithMetaOverwriteNotJSON(t *testing.T) {
 }
 
 func TestSetWithMetaOverwriteTombstone(t *testing.T) {
+	ctx := t.Context()
 	bucket := makeTestBucket(t)
-	col := bucket.DefaultDataStore()
+	col := bucket.DefaultDataStore(ctx)
 	docID := t.Name()
-	cas1, err := col.WriteCas(docID, 0, 0, []byte("{}"), sgbucket.Raw)
+	cas1, err := col.WriteCas(ctx, docID, 0, 0, []byte("{}"), sgbucket.Raw)
 	require.NoError(t, err)
 	require.Greater(t, cas1, CAS(0))
-	deletedCas, err := col.Remove(docID, cas1)
+	deletedCas, err := col.Remove(ctx, docID, cas1)
 	require.NoError(t, err)
 
-	ctx := testCtx(t)
 	cas2 := CAS(1)
 	body := []byte(`ABC`)
 
@@ -772,18 +781,18 @@ func TestSetWithMetaOverwriteTombstone(t *testing.T) {
 	require.Equal(t, docID, string(event.Key))
 	require.Equal(t, sgbucket.FeedOpMutation, event.Opcode)
 
-	val, cas, err := col.GetRaw(docID)
+	val, cas, err := col.GetRaw(ctx, docID)
 	require.NoError(t, err)
 	require.Equal(t, cas2, cas)
 	require.Equal(t, body, val)
 }
 
 func TestSetWithMetaCas(t *testing.T) {
-	col := makeTestBucket(t).DefaultDataStore()
+	ctx := t.Context()
+	col := makeTestBucket(t).DefaultDataStore(ctx)
 	docID := t.Name()
 
 	body := []byte(`{"foo":"bar"}`)
-	ctx := testCtx(t)
 
 	badStartingCas := CAS(1234)
 	specifiedCas := CAS(1)
@@ -796,7 +805,7 @@ func TestSetWithMetaCas(t *testing.T) {
 	err = col.(*Collection).SetWithMeta(ctx, docID, CAS(0), specifiedCas, 0, nil, body, sgbucket.FeedDataTypeJSON)
 	require.NoError(t, err)
 
-	val, cas, err := col.GetRaw(docID)
+	val, cas, err := col.GetRaw(ctx, docID)
 	require.NoError(t, err)
 	require.Equal(t, specifiedCas, cas)
 	require.JSONEq(t, string(body), string(val))
@@ -818,16 +827,16 @@ func TestDeleteWithMeta(t *testing.T) {
 	}
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
+			ctx := t.Context()
 			bucket := makeTestBucket(t)
-			col := bucket.DefaultDataStore()
+			col := bucket.DefaultDataStore(ctx)
 			docID := t.Name()
 
-			startingCas, err := col.WriteCas(docID, 0, 0, []byte(`{"foo": "bar"}`), testCase.dataType)
+			startingCas, err := col.WriteCas(ctx, docID, 0, 0, []byte(`{"foo": "bar"}`), testCase.dataType)
 			require.NoError(t, err)
 			specifiedCas := CAS(1)
 
 			events, _ := startFeed(t, bucket)
-			ctx := testCtx(t)
 
 			// pass a bad CAS and document will not delete
 			badStartingCas := CAS(1234)
@@ -844,14 +853,15 @@ func TestDeleteWithMeta(t *testing.T) {
 			require.Equal(t, sgbucket.FeedOpDeletion, event.Opcode)
 			require.Equal(t, sgbucket.FeedDataTypeRaw, event.DataType)
 
-			_, err = col.Get(docID, nil)
+			_, err = col.Get(ctx, docID, nil)
 			require.ErrorAs(t, err, &sgbucket.MissingError{})
 		})
 	}
 }
 
 func TestDeleteWithMetaXattr(t *testing.T) {
-	col := makeTestBucket(t).DefaultDataStore().(*Collection)
+	ctx := t.Context()
+	col := makeTestBucket(t).DefaultDataStore(ctx).(*Collection)
 	docID := t.Name()
 
 	val := make(map[string]interface{})
@@ -866,7 +876,6 @@ func TestDeleteWithMetaXattr(t *testing.T) {
 	xattrVal[userXattr] = mustMarshalJSON(t, "foo")
 	xattrVal[systemXattr] = mustMarshalJSON(t, systemXattrVal)
 
-	ctx := testCtx(t)
 	startingCas, err := col.WriteWithXattrs(ctx, docID, 0, 0, mustMarshalJSON(t, val), xattrVal, nil, nil)
 	require.NoError(t, err)
 
@@ -881,7 +890,7 @@ func TestDeleteWithMetaXattr(t *testing.T) {
 	err = col.DeleteWithMeta(ctx, docID, startingCas, specifiedCas, 0, []byte(fmt.Sprintf(`{"%s": "%s"}`, systemXattr, systemXattrVal)))
 	require.NoError(t, err)
 
-	_, err = col.Get(docID, nil)
+	_, err = col.Get(ctx, docID, nil)
 	require.ErrorAs(t, err, &sgbucket.MissingError{})
 
 	xattrKeys := []string{syncXattrName, userXattr, systemXattr}
@@ -895,56 +904,57 @@ func TestDeleteWithMetaXattr(t *testing.T) {
 }
 
 func TestRevSeqNo(t *testing.T) {
-	col := makeTestBucket(t).DefaultDataStore().(*Collection)
+	ctx := t.Context()
+	col := makeTestBucket(t).DefaultDataStore(ctx).(*Collection)
 	docID := t.Name()
 
-	require.NoError(t, col.Set(docID, 0, nil, []byte(`{"foo": 1}`)))
+	require.NoError(t, col.Set(ctx, docID, 0, nil, []byte(`{"foo": 1}`)))
 	assertRevSeqNo(t, col, docID, `"1"`)
 
-	require.NoError(t, col.Set(docID, 0, nil, []byte(`{"foo": 2}`)))
+	require.NoError(t, col.Set(ctx, docID, 0, nil, []byte(`{"foo": 2}`)))
 	assertRevSeqNo(t, col, docID, `"2"`)
 
-	require.NoError(t, col.Delete(docID))
+	require.NoError(t, col.Delete(ctx, docID))
 	assertRevSeqNo(t, col, docID, `"3"`)
 
 	// ressurected doc
-	require.NoError(t, col.Set(docID, 0, nil, []byte(`{"foo": 4`)))
+	require.NoError(t, col.Set(ctx, docID, 0, nil, []byte(`{"foo": 4`)))
 	assertRevSeqNo(t, col, docID, `"4"`)
 
-	_, _, err := col.GetAndTouchRaw(docID, 0)
+	_, _, err := col.GetAndTouchRaw(ctx, docID, 0)
 	require.NoError(t, err)
 	assertRevSeqNo(t, col, docID, `"5"`)
 
-	_, err = col.Touch(docID, 0)
+	_, err = col.Touch(ctx, docID, 0)
 	require.NoError(t, err)
 	assertRevSeqNo(t, col, docID, `"6"`)
 
-	ctx := testCtx(t)
 	writeWithXattrsDocID := "writeWithXattrs"
 	_, err = col.WriteWithXattrs(ctx, writeWithXattrsDocID, 0, 0, []byte(`{"foo": 1}`), nil, nil, nil)
 	require.NoError(t, err)
 	assertRevSeqNo(t, col, writeWithXattrsDocID, `"1"`)
 
 	addRawDocID := "addRaw"
-	_, err = col.AddRaw(addRawDocID, 0, []byte(`{"foo": 1}`))
+	_, err = col.AddRaw(ctx, addRawDocID, 0, []byte(`{"foo": 1}`))
 	require.NoError(t, err)
 	assertRevSeqNo(t, col, addRawDocID, `"1"`)
 
 	setRawDocID := "setRaw"
-	require.NoError(t, col.SetRaw(setRawDocID, 0, nil, []byte(`{"foo": 1}`)))
+	require.NoError(t, col.SetRaw(ctx, setRawDocID, 0, nil, []byte(`{"foo": 1}`)))
 	assertRevSeqNo(t, col, setRawDocID, `"1"`)
 
 	writeCasDocID := "writeCas"
-	_, err = col.WriteCas(writeCasDocID, 0, 0, []byte(`{"foo": 1}`), 0)
+	_, err = col.WriteCas(ctx, writeCasDocID, 0, 0, []byte(`{"foo": 1}`), 0)
 	require.NoError(t, err)
 	assertRevSeqNo(t, col, writeCasDocID, `"1"`)
 }
 
 func TestVirtualXattr(t *testing.T) {
-	col := makeTestBucket(t).DefaultDataStore().(*Collection)
+	ctx := t.Context()
+	col := makeTestBucket(t).DefaultDataStore(ctx).(*Collection)
 	docID := t.Name()
 
-	require.NoError(t, col.Set(docID, 0, nil, []byte(`{"foo": 1}`)))
+	require.NoError(t, col.Set(ctx, docID, 0, nil, []byte(`{"foo": 1}`)))
 	assertRevSeqNo(t, col, docID, `"1"`)
 
 	// $document returns an object — unmarshal into a struct.
@@ -954,7 +964,7 @@ func TestVirtualXattr(t *testing.T) {
 			Crc32 string `json:"value_crc32c,omitempty"`
 			CAS   string `json:"cas,omitempty"`
 		}
-		xattrs, cas, err := col.GetXattrs(testCtx(t), docID, []string{virtualXattrName})
+		xattrs, cas, err := col.GetXattrs(ctx, docID, []string{virtualXattrName})
 		require.NoError(t, err)
 		require.Contains(t, xattrs, virtualXattrName)
 		var vx virtualXattrDoc
@@ -966,7 +976,7 @@ func TestVirtualXattr(t *testing.T) {
 	// $document.revid returns a raw JSON string.
 	t.Run("rev seq no", func(t *testing.T) {
 		xattrKey := fmt.Sprintf("%s.%s", virtualXattrName, virtualXattrRevSeqNo)
-		xattrs, _, err := col.GetXattrs(testCtx(t), docID, []string{xattrKey})
+		xattrs, _, err := col.GetXattrs(ctx, docID, []string{xattrKey})
 		require.NoError(t, err)
 		require.Contains(t, xattrs, xattrKey)
 		var revNo string
@@ -977,7 +987,7 @@ func TestVirtualXattr(t *testing.T) {
 	// $document.CAS returns a raw JSON number equal to the document's CAS.
 	t.Run("cas", func(t *testing.T) {
 		xattrKey := fmt.Sprintf("%s.%s", virtualXattrName, virtualXattrCAS)
-		xattrs, cas, err := col.GetXattrs(testCtx(t), docID, []string{xattrKey})
+		xattrs, cas, err := col.GetXattrs(ctx, docID, []string{xattrKey})
 		require.NoError(t, err)
 		require.Contains(t, xattrs, xattrKey)
 		var fetchedCAS string
@@ -989,7 +999,7 @@ func TestVirtualXattr(t *testing.T) {
 
 func assertRevSeqNo(t *testing.T, col *Collection, docID string, expectedRevSeqNo string) {
 	xattrName := "$document.revid"
-	ctx := testCtx(t)
+	ctx := t.Context()
 	xattrs, _, err := col.GetXattrs(ctx, docID, []string{xattrName})
 	require.NoError(t, err)
 
@@ -997,14 +1007,15 @@ func assertRevSeqNo(t *testing.T, col *Collection, docID string, expectedRevSeqN
 }
 
 func TestDeleteWithXattrs(t *testing.T) {
+	ctx := t.Context()
 	bucket := makeTestBucket(t)
-	col := bucket.DefaultDataStore()
+	col := bucket.DefaultDataStore(ctx)
 	docID := t.Name()
 
-	_, err := col.Add(docID, 0, []byte(`{"foo": "bar"}`))
+	_, err := col.Add(ctx, docID, 0, []byte(`{"foo": "bar"}`))
 	require.NoError(t, err)
 
-	require.NoError(t, col.DeleteWithXattrs(testCtx(t), docID, []string{"_systemXattr"}))
+	require.NoError(t, col.DeleteWithXattrs(ctx, docID, []string{"_systemXattr"}))
 }
 func mustMarshalJSON(t *testing.T, obj any) []byte {
 	bytes, err := json.Marshal(obj)

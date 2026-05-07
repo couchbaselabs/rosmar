@@ -109,7 +109,7 @@ func (c *Collection) view(
 		return
 	}
 	// Filter and reduce:
-	err = result.ProcessParsed(params, c, view.reduceFnSource)
+	err = result.ProcessParsed(ctx, params, c, view.reduceFnSource)
 	debug("\tView --> %d rows", result.TotalRows)
 	return
 }
