@@ -143,7 +143,8 @@ func TestCheckpoint(t *testing.T) {
 func TestResumeFromCheckpoint(t *testing.T) {
 	ensureNoLeakedFeeds(t)
 	bucket := makeTestBucket(t)
-	c := bucket.DefaultDataStore()
+	ctx := t.Context()
+	c := bucket.DefaultDataStore(ctx)
 
 	addToCollection(t, c, "doc1", 0, "V1")
 	addToCollection(t, c, "doc2", 0, "V2")
@@ -203,7 +204,8 @@ func TestResumeFromCheckpoint(t *testing.T) {
 func TestSharedCheckpoint(t *testing.T) {
 	ensureNoLeakedFeeds(t)
 	bucket := makeTestBucket(t)
-	c1 := bucket.DefaultDataStore().(*Collection)
+	ctx := t.Context()
+	c1 := bucket.DefaultDataStore(ctx).(*Collection)
 	c2, err := bucket.getOrCreateCollection(sgbucket.DataStoreNameImpl{Scope: "S", Collection: "C"}, true)
 	require.NoError(t, err)
 
@@ -245,7 +247,7 @@ func TestSharedCheckpoint(t *testing.T) {
 
 	// Verify checkpoint document in DefaultDataStore (c1)
 	var checkpt checkpoint
-	_, err = c1.Get(prefix, &checkpt)
+	_, err = c1.Get(ctx, prefix, &checkpt)
 	require.NoError(t, err)
 	assert.Len(t, checkpt.LastCas, 2)
 	assert.Contains(t, checkpt.LastCas, c1.GetCollectionID())
@@ -288,7 +290,7 @@ func startFeed(t *testing.T, bucket *Bucket) (events chan sgbucket.FeedEvent, do
 
 func startFeedWithArgs(t *testing.T, bucket *Bucket, args sgbucket.FeedArguments) (events chan sgbucket.FeedEvent, doneChan chan struct{}) {
 	events = make(chan sgbucket.FeedEvent, 10)
-	callback := func(_ context.Context, event sgbucket.FeedEvent) bool {
+	callback := func(event sgbucket.FeedEvent) bool {
 		events <- event
 		return true
 	}
@@ -406,7 +408,7 @@ func TestCollectionMutations(t *testing.T) {
 	c1Keys := make(map[string]struct{})
 	c2Keys := make(map[string]struct{})
 
-	callback := func(_ context.Context, event sgbucket.FeedEvent) bool {
+	callback := func(event sgbucket.FeedEvent) bool {
 		if event.Opcode != sgbucket.FeedOpMutation {
 			return false
 		}

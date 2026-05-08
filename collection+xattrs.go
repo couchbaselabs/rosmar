@@ -261,7 +261,7 @@ func (c *Collection) WriteUpdateWithXattrs(
 		}
 
 		// Invoke the callback:
-		updatedDoc, err := callback(ctx, previous.Body, previous.Xattrs, previous.Cas)
+		updatedDoc, err := callback(previous.Body, previous.Xattrs, previous.Cas)
 		if err != nil {
 			if err == sgbucket.ErrCasFailureShouldRetry {
 				// Callback wants us to retry:

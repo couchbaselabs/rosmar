@@ -53,9 +53,9 @@ func (bucket *Bucket) StartDCPFeed(
 		// Not bothering to remove scopes from args for the single collection feeds
 		// here because it's ignored by Collection.StartDCPFeed
 		collectionID := collection.GetCollectionID()
-		collectionAwareCallback := func(ctx context.Context, event sgbucket.FeedEvent) bool {
+		collectionAwareCallback := func(event sgbucket.FeedEvent) bool {
 			event.CollectionID = collectionID
-			return callback(ctx, event)
+			return callback(event)
 		}
 
 		// have each collection maintain its own doneChan
@@ -92,7 +92,7 @@ func (c *Collection) StartDCPFeed(
 	feed := &dcpFeed{
 		ctx:           ctx,
 		collection:    c,
-		metadataStore: c.bucket.DefaultDataStore().(*Collection),
+		metadataStore: c.bucket.DefaultDataStore(ctx).(*Collection),
 		args:          args,
 		callback:      callback,
 	}
@@ -245,7 +245,7 @@ func (feed *dcpFeed) writeCheckpoint() (err error) {
 	key := feed.checkpointKey()
 	colID := feed.collection.GetCollectionID()
 
-	_, err = feed.metadataStore.Update(feed.ctx, key, 0, func(_ context.Context, current []byte) (updated []byte, expiry *uint32, delete bool, err error) {
+	_, err = feed.metadataStore.Update(feed.ctx, key, 0, func(current []byte) (updated []byte, expiry *uint32, delete bool, err error) {
 		var checkpt checkpoint
 		if current != nil {
 			if err := json.Unmarshal(current, &checkpt); err != nil {
@@ -297,7 +297,7 @@ func (feed *dcpFeed) run() {
 				logError("Fatal error converting %s event to feed event: %v", feed, err)
 				break
 			}
-			feed.callback(feed.ctx, *feedEvent)
+			feed.callback(*feedEvent)
 			if feedEvent.Cas > feed.lastCas {
 				feed.lastCas = feedEvent.Cas
 				feed.lastCasChanged = true

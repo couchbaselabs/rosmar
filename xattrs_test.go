@@ -9,7 +9,6 @@
 package rosmar
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"testing"
@@ -158,7 +157,7 @@ func TestWriteUpdateDeleteXattrTombstone(t *testing.T) {
 	require.NoError(t, err)
 	require.JSONEq(t, string(xattrBody), string(xattrs[xattrKey]))
 
-	writeUpdateFunc := func(_ context.Context, doc []byte, xattrs map[string][]byte, cas uint64) (sgbucket.UpdatedDoc, error) {
+	writeUpdateFunc := func(doc []byte, xattrs map[string][]byte, cas uint64) (sgbucket.UpdatedDoc, error) {
 		return sgbucket.UpdatedDoc{
 			XattrsToDelete: []string{xattrKey},
 			Doc:            []byte(`{"foo":"bar"}`),
@@ -1222,7 +1221,7 @@ func TestWriteUpdateWithXattrs(t *testing.T) {
 					require.NoError(t, err)
 				}
 			}
-			writeUpdateFunc := func(_ context.Context, _ []byte, _ map[string][]byte, _ uint64) (sgbucket.UpdatedDoc, error) {
+			writeUpdateFunc := func(_ []byte, _ map[string][]byte, _ uint64) (sgbucket.UpdatedDoc, error) {
 				return test.updatedDoc, nil
 			}
 
