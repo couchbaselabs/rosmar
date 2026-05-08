@@ -466,7 +466,7 @@ func (c *Collection) Update(ctx context.Context, key string, exp Exp, callback s
 		var newRaw []byte
 		var newExp *uint32
 		var delete bool
-		newRaw, newExp, delete, err = callback(ctx, raw)
+		newRaw, newExp, delete, err = callback(raw)
 		trace("\t callback(%q) -> %q, exp=%v, delete=%v, err=%v", raw, newRaw, exp, delete, err)
 		if err != nil {
 			if err == sgbucket.ErrCasFailureShouldRetry {
