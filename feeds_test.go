@@ -24,7 +24,7 @@ import (
 func TestBackfill(t *testing.T) {
 	ensureNoLeakedFeeds(t)
 	bucket := makeTestBucket(t)
-	c := bucket.DefaultDataStore()
+	c := bucket.DefaultDataStore(t.Context())
 
 	addToCollection(t, c, "able", 0, "A")
 	addToCollection(t, c, "baker", 0, "B")
@@ -49,9 +49,10 @@ func TestBackfill(t *testing.T) {
 }
 
 func TestMutations(t *testing.T) {
+	ctx := t.Context()
 	ensureNoLeakedFeeds(t)
 	bucket := makeTestBucket(t)
-	c := bucket.DefaultDataStore()
+	c := bucket.DefaultDataStore(ctx)
 
 	addToCollection(t, c, "able", 0, "A")
 	addToCollection(t, c, "baker", 0, "B")
@@ -64,7 +65,7 @@ func TestMutations(t *testing.T) {
 
 	go func() {
 		addToCollection(t, c, "fahrvergnügen", 0, "F")
-		err := c.Delete("eskimo")
+		err := c.Delete(ctx, "eskimo")
 		require.NoError(t, err)
 	}()
 
@@ -75,7 +76,7 @@ func TestMutations(t *testing.T) {
 	e.TimeReceived = time.Time{}
 	assertEventEquals(t, sgbucket.FeedEvent{Opcode: sgbucket.FeedOpDeletion, Key: []byte("eskimo"), DataType: sgbucket.FeedDataTypeRaw, RevNo: 2}, e)
 
-	require.NoError(t, bucket.CloseAndDelete(testCtx(t)))
+	require.NoError(t, bucket.CloseAndDelete(ctx))
 
 	_, ok := <-doneChan
 	assert.False(t, ok)
@@ -84,7 +85,7 @@ func TestMutations(t *testing.T) {
 func TestCheckpoint(t *testing.T) {
 	ensureNoLeakedFeeds(t)
 	bucket := makeTestBucket(t)
-	c := bucket.DefaultDataStore()
+	c := bucket.DefaultDataStore(t.Context())
 
 	addToCollection(t, c, "able", 0, "A")
 	addToCollection(t, c, "baker", 0, "B")
@@ -142,7 +143,8 @@ func TestCheckpoint(t *testing.T) {
 func TestResumeFromCheckpoint(t *testing.T) {
 	ensureNoLeakedFeeds(t)
 	bucket := makeTestBucket(t)
-	c := bucket.DefaultDataStore()
+	ctx := t.Context()
+	c := bucket.DefaultDataStore(ctx)
 
 	addToCollection(t, c, "doc1", 0, "V1")
 	addToCollection(t, c, "doc2", 0, "V2")
@@ -202,7 +204,8 @@ func TestResumeFromCheckpoint(t *testing.T) {
 func TestSharedCheckpoint(t *testing.T) {
 	ensureNoLeakedFeeds(t)
 	bucket := makeTestBucket(t)
-	c1 := bucket.DefaultDataStore().(*Collection)
+	ctx := t.Context()
+	c1 := bucket.DefaultDataStore(ctx).(*Collection)
 	c2, err := bucket.getOrCreateCollection(sgbucket.DataStoreNameImpl{Scope: "S", Collection: "C"}, true)
 	require.NoError(t, err)
 
@@ -244,7 +247,7 @@ func TestSharedCheckpoint(t *testing.T) {
 
 	// Verify checkpoint document in DefaultDataStore (c1)
 	var checkpt checkpoint
-	_, err = c1.Get(prefix, &checkpt)
+	_, err = c1.Get(ctx, prefix, &checkpt)
 	require.NoError(t, err)
 	assert.Len(t, checkpt.LastCas, 2)
 	assert.Contains(t, checkpt.LastCas, c1.GetCollectionID())
@@ -333,9 +336,10 @@ func readExpectedEventsDEF(t *testing.T, events chan sgbucket.FeedEvent) {
 }
 
 func TestCrossBucketEvents(t *testing.T) {
+	ctx := t.Context()
 	ensureNoLeakedFeeds(t)
 	bucket := makeTestBucket(t)
-	c := bucket.DefaultDataStore()
+	c := bucket.DefaultDataStore(ctx)
 
 	addToCollection(t, c, "able", 0, "A")
 	addToCollection(t, c, "baker", 0, "B")
@@ -345,7 +349,7 @@ func TestCrossBucketEvents(t *testing.T) {
 	bucket2, err := OpenBucket(bucket.url, strings.ToLower(t.Name()), ReOpenExisting)
 	require.NoError(t, err)
 	t.Cleanup(func() {
-		bucket2.Close(testCtx(t))
+		bucket2.Close(ctx)
 	})
 
 	events, doneChan := startFeed(t, bucket)
@@ -356,15 +360,15 @@ func TestCrossBucketEvents(t *testing.T) {
 
 	go func() {
 		addToCollection(t, c, "fahrvergnügen", 0, "F")
-		err = c.Delete("eskimo")
+		err = c.Delete(ctx, "eskimo")
 		require.NoError(t, err)
 	}()
 
 	readExpectedEventsDEF(t, events)
 	readExpectedEventsDEF(t, events2)
 
-	bucket.Close(testCtx(t))
-	require.NoError(t, bucket2.CloseAndDelete(testCtx(t)))
+	bucket.Close(ctx)
+	require.NoError(t, bucket2.CloseAndDelete(ctx))
 
 	_, ok := <-doneChan
 	assert.False(t, ok)
@@ -374,14 +378,15 @@ func TestCrossBucketEvents(t *testing.T) {
 }
 
 func TestCollectionMutations(t *testing.T) {
+	ctx := t.Context()
 	ensureNoLeakedFeeds(t)
 
 	huddle := makeTestBucket(t)
-	defer huddle.Close(testCtx(t))
+	defer huddle.Close(ctx)
 
-	collection1, err := huddle.NamedDataStore(dsName("scope1", "collection1"))
+	collection1, err := huddle.NamedDataStore(ctx, dsName("scope1", "collection1"))
 	require.NoError(t, err)
-	collection2, err := huddle.NamedDataStore(dsName("scope1", "collection2"))
+	collection2, err := huddle.NamedDataStore(ctx, dsName("scope1", "collection2"))
 	require.NoError(t, err)
 	numDocs := 50
 
@@ -390,10 +395,10 @@ func TestCollectionMutations(t *testing.T) {
 
 	// Add n docs to two collections
 	for i := 1; i <= numDocs; i++ {
-		ok, err := collection1.Add(fmt.Sprintf("doc%d", i), 0, fmt.Sprintf("value%d", i))
+		ok, err := collection1.Add(ctx, fmt.Sprintf("doc%d", i), 0, fmt.Sprintf("value%d", i))
 		require.NoError(t, err)
 		require.True(t, ok)
-		ok, err = collection2.Add(fmt.Sprintf("doc%d", i), 0, fmt.Sprintf("value%d", i))
+		ok, err = collection2.Add(ctx, fmt.Sprintf("doc%d", i), 0, fmt.Sprintf("value%d", i))
 		require.NoError(t, err)
 		require.True(t, ok)
 	}
@@ -453,10 +458,11 @@ func TestCollectionMutations(t *testing.T) {
 }
 
 func TestSetRawAutodetectJSON(t *testing.T) {
+	ctx := t.Context()
 	ensureNoLeakedFeeds(t)
 	bucket := makeTestBucket(t)
-	defer bucket.Close(context.Background())
-	c := bucket.DefaultDataStore()
+	defer bucket.Close(ctx)
+	c := bucket.DefaultDataStore(ctx)
 
 	testCases := []struct {
 		name       string
@@ -505,14 +511,14 @@ func TestSetRawAutodetectJSON(t *testing.T) {
 	for _, tc := range testCases {
 		switch tc.method {
 		case "SetRaw":
-			err := c.SetRaw(tc.key, 0, nil, tc.data)
+			err := c.SetRaw(ctx, tc.key, 0, nil, tc.data)
 			require.NoError(t, err, "Failed for %s", tc.name)
 		case "AddRaw":
-			added, err := c.AddRaw(tc.key, 0, tc.data)
+			added, err := c.AddRaw(ctx, tc.key, 0, tc.data)
 			require.NoError(t, err, "Failed for %s", tc.name)
 			require.True(t, added, "Failed for %s", tc.name)
 		case "WriteCas":
-			_, err := c.WriteCas(tc.key, 0, 0, tc.data, sgbucket.Raw|sgbucket.AddOnly)
+			_, err := c.WriteCas(ctx, tc.key, 0, 0, tc.data, sgbucket.Raw|sgbucket.AddOnly)
 			require.NoError(t, err, "Failed for %s", tc.name)
 		}
 	}
@@ -560,9 +566,10 @@ func TestSetRawAutodetectJSON(t *testing.T) {
 // TestFeedEventIsolation verifies that multiple feeds on the same collection receive independent
 // copies of events, so mutating one feed's event does not affect another's.
 func TestFeedEventIsolation(t *testing.T) {
+	ctx := t.Context()
 	ensureNoLeakedFeeds(t)
 	bucket := makeTestBucket(t)
-	c := bucket.DefaultDataStore()
+	c := bucket.DefaultDataStore(ctx)
 
 	// Start two feeds on the same collection with different FeedContent modes.
 	// Feed 1 wants full content (default), feed 2 wants keys only.
@@ -583,7 +590,7 @@ func TestFeedEventIsolation(t *testing.T) {
 	events2, _ := startFeedWithArgs(t, bucket, args2)
 
 	// Write a doc with body and xattrs
-	_, err := c.WriteWithXattrs(testCtx(t), "doc1", 0, 0,
+	_, err := c.WriteWithXattrs(ctx, "doc1", 0, 0,
 		[]byte(`{"body":true}`),
 		map[string][]byte{"_xattr": []byte(`{"x":1}`)},
 		nil, nil)
@@ -654,7 +661,7 @@ func TestAsFeedEventErrorOnCorruptXattrs(t *testing.T) {
 func TestFeedStopsOnCorruptEvent(t *testing.T) {
 	ensureNoLeakedFeeds(t)
 	bucket := makeTestBucket(t)
-	c := bucket.DefaultDataStore()
+	c := bucket.DefaultDataStore(t.Context())
 
 	// Write a doc then corrupt its xattrs directly in SQLite
 	addToCollection(t, c, "doc1", 0, "value1")
@@ -726,12 +733,13 @@ func TestFeedContent(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name+"/Backfill", func(t *testing.T) {
+			ctx := t.Context()
 			ensureNoLeakedFeeds(t)
 			bucket := makeTestBucket(t)
-			c := bucket.DefaultDataStore()
+			c := bucket.DefaultDataStore(ctx)
 
 			// write a doc with a body and xattrs before starting the feed
-			_, err := c.WriteWithXattrs(testCtx(t), "able", 0, 0,
+			_, err := c.WriteWithXattrs(ctx, "able", 0, 0,
 				[]byte(`{"doc_body_value":true}`),
 				map[string][]byte{"xattr_name": []byte(`{"xattr_value":12345}`)},
 				nil, nil)
@@ -757,9 +765,10 @@ func TestFeedContent(t *testing.T) {
 		})
 
 		t.Run(test.name+"/Live", func(t *testing.T) {
+			ctx := t.Context()
 			ensureNoLeakedFeeds(t)
 			bucket := makeTestBucket(t)
-			c := bucket.DefaultDataStore()
+			c := bucket.DefaultDataStore(ctx)
 
 			// start feed before writing the doc (no backfill)
 			terminator := make(chan bool)
@@ -771,7 +780,7 @@ func TestFeedContent(t *testing.T) {
 			events, _ := startFeedWithArgs(t, bucket, args)
 
 			// write a doc with a body and xattrs after feed is started
-			_, err := c.WriteWithXattrs(testCtx(t), "able", 0, 0,
+			_, err := c.WriteWithXattrs(ctx, "able", 0, 0,
 				[]byte(`{"doc_body_value":true}`),
 				map[string][]byte{"xattr_name": []byte(`{"xattr_value":12345}`)},
 				nil, nil)
@@ -783,12 +792,13 @@ func TestFeedContent(t *testing.T) {
 		})
 
 		t.Run(test.name+"/Backfill/NoXattrs", func(t *testing.T) {
+			ctx := t.Context()
 			ensureNoLeakedFeeds(t)
 			bucket := makeTestBucket(t)
-			c := bucket.DefaultDataStore()
+			c := bucket.DefaultDataStore(ctx)
 
 			// write a doc with body only (no xattrs)
-			ok, err := c.Add("able", 0, []byte(`{"doc_body_value":true}`))
+			ok, err := c.Add(ctx, "able", 0, []byte(`{"doc_body_value":true}`))
 			require.NoError(t, err)
 			require.True(t, ok)
 
@@ -812,9 +822,10 @@ func TestFeedContent(t *testing.T) {
 		})
 
 		t.Run(test.name+"/Live/NoXattrs", func(t *testing.T) {
+			ctx := t.Context()
 			ensureNoLeakedFeeds(t)
 			bucket := makeTestBucket(t)
-			c := bucket.DefaultDataStore()
+			c := bucket.DefaultDataStore(ctx)
 
 			// start feed before writing the doc (no backfill)
 			terminator := make(chan bool)
@@ -826,7 +837,7 @@ func TestFeedContent(t *testing.T) {
 			events, _ := startFeedWithArgs(t, bucket, args)
 
 			// write a doc with body only (no xattrs) after feed is started
-			ok, err := c.Add("able", 0, []byte(`{"doc_body_value":true}`))
+			ok, err := c.Add(ctx, "able", 0, []byte(`{"doc_body_value":true}`))
 			require.NoError(t, err)
 			require.True(t, ok)
 

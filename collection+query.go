@@ -22,7 +22,7 @@ import (
 
 //////// Interface QueryableStore
 
-func (c *Collection) CanQueryIn(language sgbucket.QueryLanguage) bool {
+func (c *Collection) CanQueryIn(_ context.Context, language sgbucket.QueryLanguage) bool {
 	return language == sgbucket.SQLiteLanguage
 }
 
@@ -32,6 +32,7 @@ func (c *Collection) CanQueryIn(language sgbucket.QueryLanguage) bool {
 // You can use SQLite's `->` and `->>` syntax to refer to JSON properties in body and xattrs.
 // The `consistency` and `adhoc` parameters are currently ignored.
 func (c *Collection) Query(
+	ctx context.Context,
 	language sgbucket.QueryLanguage,
 	statement string,
 	args map[string]any,
@@ -62,7 +63,7 @@ func (c *Collection) Query(
 		// sql.Rows object open -- any other database call will block until it's closed. This
 		// can easily lead to deadlock. As a workaround, read all the rows now, close the
 		// Rows object, and return an iterator over the in-memory rows.
-		iter = preRecord(it)
+		iter = preRecord(ctx, it)
 	} else {
 		iter = it
 	}
@@ -72,7 +73,7 @@ func (c *Collection) Query(
 // Implementation of CreateIndex.
 // The table columns are `id` (document ID or key), `body`, `xattrs`.
 // You can use SQLite's `->` and `->>` syntax to refer to JSON properties in body and xattrs.
-func (c *Collection) CreateIndex(indexName string, expression string, filterExpression string) (err error) {
+func (c *Collection) CreateIndex(_ context.Context, indexName string, expression string, filterExpression string) (err error) {
 	traceEnter("CreateIndex", "%q, %q, %q)", indexName, expression, filterExpression)
 	defer func() { traceExit("CreateIndex", err, "ok") }()
 
@@ -103,7 +104,7 @@ func (c *Collection) CreateIndex(indexName string, expression string, filterExpr
 // Each step is an array with two integers (node id and parent id) and a string description.
 // Example: `{"plan":[[3,0,"SEARCH documents USING INDEX docs_cas (collection=?)"]]}`
 // For details, see https://sqlite.org/eqp.html
-func (c *Collection) ExplainQuery(statement string, args map[string]any) (plan map[string]any, err error) {
+func (c *Collection) ExplainQuery(_ context.Context, statement string, args map[string]any) (plan map[string]any, err error) {
 	statement, sqlArgs := c.prepareQuery(statement, args)
 	rows, err := c.db().Query(`EXPLAIN QUERY PLAN `+statement, sqlArgs...)
 	if err != nil {
@@ -149,7 +150,7 @@ type queryIterator struct {
 }
 
 // returns the next row as a JSON string.
-func (iter *queryIterator) NextBytes() []byte {
+func (iter *queryIterator) NextBytes(_ context.Context) []byte {
 	if iter.err != nil {
 		return nil
 	}
@@ -204,8 +205,8 @@ func (iter *queryIterator) NextBytes() []byte {
 }
 
 // unmarshals the query row into the pointed-to struct.
-func (iter *queryIterator) Next(_ context.Context, valuePtr any) bool {
-	bytes := iter.NextBytes()
+func (iter *queryIterator) Next(ctx context.Context, valuePtr any) bool {
+	bytes := iter.NextBytes(ctx)
 	if bytes == nil {
 		return false
 	}
@@ -220,10 +221,10 @@ func (iter *queryIterator) One(ctx context.Context, valuePtr any) error {
 	if !iter.Next(ctx, valuePtr) {
 		iter.err = sgbucket.ErrNoRows
 	}
-	return iter.Close()
+	return iter.Close(ctx)
 }
 
-func (iter *queryIterator) Close() error {
+func (iter *queryIterator) Close(_ context.Context) error {
 	if iter.rows != nil {
 		if closeErr := iter.rows.Close(); closeErr != nil && iter.err == nil {
 			iter.err = closeErr
@@ -240,10 +241,10 @@ type preRecordedQueryIterator struct {
 	err  error
 }
 
-func preRecord(iter *queryIterator) *preRecordedQueryIterator {
+func preRecord(ctx context.Context, iter *queryIterator) *preRecordedQueryIterator {
 	var rows [][]byte
 	for {
-		if row := iter.NextBytes(); row != nil {
+		if row := iter.NextBytes(ctx); row != nil {
 			rows = append(rows, row)
 		} else {
 			break
@@ -251,11 +252,11 @@ func preRecord(iter *queryIterator) *preRecordedQueryIterator {
 	}
 	return &preRecordedQueryIterator{
 		rows: rows,
-		err:  iter.Close(),
+		err:  iter.Close(ctx),
 	}
 }
 
-func (iter *preRecordedQueryIterator) NextBytes() []byte {
+func (iter *preRecordedQueryIterator) NextBytes(_ context.Context) []byte {
 	if len(iter.rows) == 0 || iter.err != nil {
 		return nil
 	}
@@ -264,8 +265,8 @@ func (iter *preRecordedQueryIterator) NextBytes() []byte {
 	return result
 }
 
-func (iter *preRecordedQueryIterator) Next(_ context.Context, valuePtr any) bool {
-	bytes := iter.NextBytes()
+func (iter *preRecordedQueryIterator) Next(ctx context.Context, valuePtr any) bool {
+	bytes := iter.NextBytes(ctx)
 	if bytes == nil {
 		return false
 	}
@@ -280,10 +281,10 @@ func (iter *preRecordedQueryIterator) One(ctx context.Context, valuePtr any) err
 	if !iter.Next(ctx, valuePtr) {
 		iter.err = sgbucket.ErrNoRows
 	}
-	return iter.Close()
+	return iter.Close(ctx)
 }
 
-func (iter *preRecordedQueryIterator) Close() error {
+func (iter *preRecordedQueryIterator) Close(_ context.Context) error {
 	iter.rows = nil
 	return iter.err
 }

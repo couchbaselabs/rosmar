@@ -19,9 +19,9 @@ import (
 )
 
 func TestSetXattrs(t *testing.T) {
-	ctx := testCtx(t)
+	ctx := t.Context()
 	ensureNoLeakedFeeds(t)
-	coll := makeTestBucket(t).DefaultDataStore().(*Collection)
+	coll := makeTestBucket(t).DefaultDataStore(ctx).(*Collection)
 
 	addToCollection(t, coll, "key", 0, "value")
 
@@ -44,9 +44,9 @@ func TestSetXattrs(t *testing.T) {
 }
 
 func TestMacroExpansion(t *testing.T) {
-	ctx := testCtx(t)
+	ctx := t.Context()
 	ensureNoLeakedFeeds(t)
-	coll := makeTestBucket(t).DefaultDataStore().(*Collection)
+	coll := makeTestBucket(t).DefaultDataStore(ctx).(*Collection)
 
 	// Successful case - sets cas and crc32c in the _sync xattr
 	opts := &sgbucket.MutateInOptions{}
@@ -94,9 +94,9 @@ func TestMacroExpansion(t *testing.T) {
 }
 
 func TestMacroExpansionMultipleXattrs(t *testing.T) {
-	ctx := testCtx(t)
+	ctx := t.Context()
 	ensureNoLeakedFeeds(t)
-	coll := makeTestBucket(t).DefaultDataStore().(*Collection)
+	coll := makeTestBucket(t).DefaultDataStore(ctx).(*Collection)
 
 	// Successful case - sets cas and crc32c in the _sync xattr
 	opts := &sgbucket.MutateInOptions{}
@@ -133,18 +133,18 @@ func TestMacroExpansionMultipleXattrs(t *testing.T) {
 }
 
 func TestWriteWithXattrsSetAndDeleteError(t *testing.T) {
-	col := makeTestBucket(t).DefaultDataStore()
+	ctx := t.Context()
+	col := makeTestBucket(t).DefaultDataStore(ctx)
 	docID := t.Name()
 
-	ctx := testCtx(t)
 	fakeCas := uint64(1)
 	_, err := col.WriteWithXattrs(ctx, docID, 0, fakeCas, []byte(`{"foo": "bar"}`), map[string][]byte{"xattr1": []byte(`{"a" : "b"}`)}, []string{"xattr1"}, nil)
 	require.ErrorIs(t, err, sgbucket.ErrUpsertAndDeleteSameXattr)
 }
 
 func TestWriteUpdateDeleteXattrTombstone(t *testing.T) {
-	ctx := testCtx(t)
-	col := makeTestBucket(t).DefaultDataStore()
+	ctx := t.Context()
+	col := makeTestBucket(t).DefaultDataStore(ctx)
 
 	key := t.Name()
 	xattrKey := "_xattr1"
@@ -169,7 +169,7 @@ func TestWriteUpdateDeleteXattrTombstone(t *testing.T) {
 }
 
 func TestWriteTombstoneWithXattrs(t *testing.T) {
-	col := makeTestBucket(t).DefaultDataStore()
+	col := makeTestBucket(t).DefaultDataStore(t.Context())
 
 	type casOption uint32
 
@@ -999,7 +999,7 @@ func TestWriteTombstoneWithXattrs(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			ctx := testCtx(t)
+			ctx := t.Context()
 			var exp uint32
 			docID := t.Name()
 			cas := uint64(0)
@@ -1051,7 +1051,7 @@ func TestWriteTombstoneWithXattrs(t *testing.T) {
 }
 
 func TestWriteUpdateWithXattrs(t *testing.T) {
-	col := makeTestBucket(t).DefaultDataStore()
+	col := makeTestBucket(t).DefaultDataStore(t.Context())
 
 	type testCase struct {
 		name         string
@@ -1205,7 +1205,7 @@ func TestWriteUpdateWithXattrs(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			ctx := testCtx(t)
+			ctx := t.Context()
 			docID := t.Name()
 			if test.previousDoc != nil {
 				var exp uint32
@@ -1269,7 +1269,7 @@ func TestWriteUpdateWithXattrs(t *testing.T) {
 }
 
 func TestWriteWithXattrs(t *testing.T) {
-	col := makeTestBucket(t).DefaultDataStore()
+	col := makeTestBucket(t).DefaultDataStore(t.Context())
 
 	type testCase struct {
 		name           string
@@ -1370,10 +1370,10 @@ func TestWriteWithXattrs(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
+			ctx := t.Context()
 			if test.errorFunc != nil && test.errorIs != nil {
 				require.FailNow(t, "test case should specify errFunc  xor errorIs")
 			}
-			ctx := testCtx(t)
 			docID := t.Name()
 			cas, err := col.WriteWithXattrs(ctx, docID, 0, test.cas, test.body, test.xattrs, test.xattrsToDelete, nil)
 			if test.errorFunc != nil {
@@ -1407,12 +1407,12 @@ func TestWriteWithXattrs(t *testing.T) {
 }
 
 func TestWriteWithXattrsSetXattrNil(t *testing.T) {
-	col := makeTestBucket(t).DefaultDataStore()
+	ctx := t.Context()
+	col := makeTestBucket(t).DefaultDataStore(ctx)
 	docID := t.Name()
 
 	for _, cas := range []uint64{0, 1} {
 		t.Run(fmt.Sprintf("cas=%d", cas), func(t *testing.T) {
-			ctx := testCtx(t)
 			_, err := col.WriteWithXattrs(ctx, docID, 0, cas, []byte(`{"foo": "bar"}`), map[string][]byte{"xattr1": nil}, nil, nil)
 			require.ErrorIs(t, err, sgbucket.ErrNilXattrValue)
 		})
@@ -1420,13 +1420,13 @@ func TestWriteWithXattrsSetXattrNil(t *testing.T) {
 }
 
 func TestWriteTombstoneWithXattrsSetXattrNil(t *testing.T) {
-	col := makeTestBucket(t).DefaultDataStore()
+	ctx := t.Context()
+	col := makeTestBucket(t).DefaultDataStore(ctx)
 	docID := t.Name()
 
 	for _, cas := range []uint64{0, 1} {
 		for _, deleteBody := range []bool{false, true} {
 			t.Run(fmt.Sprintf("cas=%d, deleteBody=%v", cas, deleteBody), func(t *testing.T) {
-				ctx := testCtx(t)
 				_, err := col.WriteTombstoneWithXattrs(ctx, docID, 0, cas, map[string][]byte{"_xattr1": nil}, nil, deleteBody, nil)
 				require.ErrorIs(t, err, sgbucket.ErrNilXattrValue)
 			})
@@ -1435,10 +1435,10 @@ func TestWriteTombstoneWithXattrsSetXattrNil(t *testing.T) {
 }
 
 func TestWriteWithXattrsInsertAndDeleteError(t *testing.T) {
-	col := makeTestBucket(t).DefaultDataStore()
+	ctx := t.Context()
+	col := makeTestBucket(t).DefaultDataStore(ctx)
 	docID := t.Name()
 
-	ctx := testCtx(t)
 	_, err := col.WriteWithXattrs(ctx, docID, 0, 0, []byte(`{"foo": "bar"}`), map[string][]byte{"xattr1": []byte(`{"foo": "bar"}`)}, []string{"xattr2"}, nil)
 	require.ErrorIs(t, err, sgbucket.ErrDeleteXattrOnDocumentInsert)
 }
@@ -1455,7 +1455,7 @@ func requireXattrsEqual(t testing.TB, expected map[string][]byte, actual map[str
 }
 
 func TestWriteResurrectionWithXattrs(t *testing.T) {
-	col := makeTestBucket(t).DefaultDataStore()
+	col := makeTestBucket(t).DefaultDataStore(t.Context())
 
 	type testCase struct {
 		name          string
@@ -1551,9 +1551,9 @@ func TestWriteResurrectionWithXattrs(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
+			ctx := t.Context()
 			docID := t.Name()
 			exp := uint32(0)
-			ctx := testCtx(t)
 			if test.previousDoc != nil {
 				if test.previousDoc.Body == nil {
 					_, err := col.WriteTombstoneWithXattrs(ctx, docID, exp, 0, test.previousDoc.Xattrs, nil, false, nil)
@@ -1595,7 +1595,7 @@ func TestWriteResurrectionWithXattrs(t *testing.T) {
 }
 
 func TestUpdateXattrs(t *testing.T) {
-	col := makeTestBucket(t).DefaultDataStore()
+	col := makeTestBucket(t).DefaultDataStore(t.Context())
 
 	type testCase struct {
 		name           string
@@ -1677,7 +1677,7 @@ func TestUpdateXattrs(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			ctx := testCtx(t)
+			ctx := t.Context()
 			var exp uint32
 			docID := t.Name()
 			cas := uint64(0)

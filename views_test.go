@@ -18,46 +18,46 @@ import (
 )
 
 func TestGetDDocs(t *testing.T) {
-	ctx := testCtx(t)
+	ctx := t.Context()
 	ensureNoLeakedFeeds(t)
 
 	ddoc := sgbucket.DesignDoc{Views: sgbucket.ViewMap{"view1": sgbucket.ViewDef{Map: `function(doc){if (doc.key) emit(doc.key,doc.value)}`}}}
-	coll := makeTestBucket(t).DefaultDataStore().(*Collection)
+	coll := makeTestBucket(t).DefaultDataStore(ctx).(*Collection)
 	err := coll.PutDDoc(ctx, "docname", &ddoc)
 	assert.NoError(t, err, "PutDDoc docnamefailed")
 	err = coll.PutDDoc(ctx, "docname2", &ddoc)
 	assert.NoError(t, err, "PutDDoc docname2failed")
 
-	ddocs, getErr := coll.GetDDocs()
+	ddocs, getErr := coll.GetDDocs(ctx)
 	assert.NoError(t, getErr, "GetDDocs failed")
 	assert.Equal(t, len(ddocs), 2)
 }
 
 // Create a simple view and run it on some documents
 func TestView(t *testing.T) {
-	ctx := testCtx(t)
+	ctx := t.Context()
 	ensureNoLeakedFeeds(t)
-	coll := makeTestBucket(t).DefaultDataStore().(*Collection)
+	coll := makeTestBucket(t).DefaultDataStore(ctx).(*Collection)
 
 	ddoc := sgbucket.DesignDoc{Language: "javascript", Views: sgbucket.ViewMap{"view1": sgbucket.ViewDef{Map: `function(doc){if (doc.key) emit(doc.key,doc.value)}`}}}
 	err := coll.PutDDoc(ctx, "docname", &ddoc)
 	assert.NoError(t, err, "PutDDoc failed")
 
 	var echo sgbucket.DesignDoc
-	echo, err = coll.GetDDoc("docname")
+	echo, err = coll.GetDDoc(ctx, "docname")
 	require.NoError(t, err, "GetDDoc failed")
 	assert.Equal(t, ddoc, echo)
 
-	require.NoError(t, setJSON(coll, "doc1", `{"key": "k1", "value": "v1"}`))
-	require.NoError(t, setJSON(coll, "doc2", `{"key": "k2", "value": "v2"}`))
-	require.NoError(t, setJSON(coll, "doc3", `{"key": 17, "value": ["v3"]}`))
-	require.NoError(t, setJSON(coll, "doc4", `{"key": [17, false], "value": null}`))
-	require.NoError(t, setJSON(coll, "doc5", `{"key": [17, true], "value": null}`))
+	require.NoError(t, setJSON(ctx, coll, "doc1", `{"key": "k1", "value": "v1"}`))
+	require.NoError(t, setJSON(ctx, coll, "doc2", `{"key": "k2", "value": "v2"}`))
+	require.NoError(t, setJSON(ctx, coll, "doc3", `{"key": 17, "value": ["v3"]}`))
+	require.NoError(t, setJSON(ctx, coll, "doc4", `{"key": [17, false], "value": null}`))
+	require.NoError(t, setJSON(ctx, coll, "doc5", `{"key": [17, true], "value": null}`))
 
 	// raw docs and counters should not be indexed by views
-	_, err = coll.AddRaw("rawdoc", 0, []byte("this is raw data"))
+	_, err = coll.AddRaw(ctx, "rawdoc", 0, []byte("this is raw data"))
 	require.NoError(t, err)
-	_, err = coll.Incr("counter", 1, 0, 0)
+	_, err = coll.Incr(ctx, "counter", 1, 0, 0)
 	require.NoError(t, err)
 
 	options := map[string]interface{}{"stale": false}
@@ -122,7 +122,7 @@ func TestView(t *testing.T) {
 		Doc: &expectedDoc}, result.Rows[0])
 
 	// Delete the design doc:
-	assert.NoError(t, coll.DeleteDDoc("docname"), "DeleteDDoc")
-	_, getErr := coll.GetDDoc("docname")
+	assert.NoError(t, coll.DeleteDDoc(ctx, "docname"), "DeleteDDoc")
+	_, getErr := coll.GetDDoc(ctx, "docname")
 	assert.True(t, errors.Is(getErr, sgbucket.MissingError{Key: "docname"}))
 }

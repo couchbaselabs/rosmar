@@ -32,7 +32,7 @@ func (bucket *Bucket) StartDCPFeed(
 	traceEnter("StartDCPFeed", "bucket=%s, args=%+v", bucket.GetName(), args)
 	// If no scopes are specified, return feed for the default collection, if it exists
 	if len(args.Scopes) == 0 {
-		return bucket.DefaultDataStore().(*Collection).StartDCPFeed(ctx, args, callback, dbStats)
+		return bucket.DefaultDataStore(ctx).(*Collection).StartDCPFeed(ctx, args, callback, dbStats)
 	}
 
 	// Validate requested collections exist before starting feeds
@@ -92,7 +92,7 @@ func (c *Collection) StartDCPFeed(
 	feed := &dcpFeed{
 		ctx:           ctx,
 		collection:    c,
-		metadataStore: c.bucket.DefaultDataStore().(*Collection),
+		metadataStore: c.bucket.DefaultDataStore(ctx).(*Collection),
 		args:          args,
 		callback:      callback,
 	}
@@ -220,7 +220,7 @@ func (feed *dcpFeed) readCheckpoint() (err error) {
 	}
 	key := feed.checkpointKey()
 	var checkpt checkpoint
-	if _, err = feed.metadataStore.Get(key, &checkpt); err != nil {
+	if _, err = feed.metadataStore.Get(feed.ctx, key, &checkpt); err != nil {
 		if _, ok := err.(sgbucket.MissingError); ok {
 			err = nil
 			debug("%s checkpoint %q missing", feed, key)
@@ -245,7 +245,7 @@ func (feed *dcpFeed) writeCheckpoint() (err error) {
 	key := feed.checkpointKey()
 	colID := feed.collection.GetCollectionID()
 
-	_, err = feed.metadataStore.Update(key, 0, func(current []byte) (updated []byte, expiry *uint32, delete bool, err error) {
+	_, err = feed.metadataStore.Update(feed.ctx, key, 0, func(current []byte) (updated []byte, expiry *uint32, delete bool, err error) {
 		var checkpt checkpoint
 		if current != nil {
 			if err := json.Unmarshal(current, &checkpt); err != nil {

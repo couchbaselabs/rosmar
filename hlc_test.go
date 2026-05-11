@@ -109,11 +109,12 @@ func TestHLCReverseTime(t *testing.T) {
 }
 
 func TestHLCCrossBucket(t *testing.T) {
+	ctx := t.Context()
 	goroutines := 10
 	documentCount := 10
 
-	collection1 := makeTestBucketWithName(t, "bucket1").DefaultDataStore()
-	collection2 := makeTestBucketWithName(t, "bucket2").DefaultDataStore()
+	collection1 := makeTestBucketWithName(t, "bucket1").DefaultDataStore(ctx)
+	collection2 := makeTestBucketWithName(t, "bucket2").DefaultDataStore(ctx)
 
 	wg := sync.WaitGroup{}
 	results := make(chan []uint64)
@@ -123,7 +124,7 @@ func TestHLCCrossBucket(t *testing.T) {
 		defer wg.Done()
 		casValues := make([]uint64, documentCount)
 		for i := 0; i < documentCount; i++ {
-			cas, err := collection.WriteCas(fmt.Sprintf("key_%d_%d", goroutineIdx, i), 0, 0, []byte(" World"), sgbucket.AddOnly)
+			cas, err := collection.WriteCas(ctx, fmt.Sprintf("key_%d_%d", goroutineIdx, i), 0, 0, []byte(" World"), sgbucket.AddOnly)
 			require.NoError(t, err)
 			casValues[i] = cas
 		}

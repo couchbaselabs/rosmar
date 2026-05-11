@@ -40,7 +40,7 @@ func (bucket *Bucket) setName(name string) error {
 }
 
 // The universally unique ID given the bucket when it was created.
-func (bucket *Bucket) UUID() (string, error) {
+func (bucket *Bucket) UUID(_ context.Context) (string, error) {
 	var uuid string
 	row := bucket.db().QueryRow(`SELECT uuid FROM bucket;`)
 	err := scan(row, &uuid)
@@ -115,7 +115,7 @@ func (bucket *Bucket) IsSupported(feature sgbucket.BucketStoreFeature) bool {
 	}
 }
 
-func (bucket *Bucket) GetMaxVbno() (uint16, error) {
+func (bucket *Bucket) GetMaxVbno(_ context.Context) (uint16, error) {
 	return kNumVbuckets, nil
 }
 
@@ -135,7 +135,7 @@ func validateName(name sgbucket.DataStoreName) (sgbucket.DataStoreNameImpl, erro
 	return sgbucket.NewValidDataStoreName(name.ScopeName(), name.CollectionName())
 }
 
-func (bucket *Bucket) DefaultDataStore() sgbucket.DataStore {
+func (bucket *Bucket) DefaultDataStore(_ context.Context) sgbucket.DataStore {
 	traceEnter("DefaultDataStore", "%s", bucket)
 	collection, err := bucket.getOrCreateCollection(defaultDataStoreName, true)
 	if err != nil {
@@ -145,7 +145,7 @@ func (bucket *Bucket) DefaultDataStore() sgbucket.DataStore {
 	return collection
 }
 
-func (bucket *Bucket) MobileSystemDataStore() sgbucket.DataStore {
+func (bucket *Bucket) MobileSystemDataStore(_ context.Context) sgbucket.DataStore {
 	traceEnter("MobileSystemDataStore", "%s", bucket)
 	collection, err := bucket.getOrCreateCollection(mobileSystemDataStoreName, true)
 	if err != nil {
@@ -155,7 +155,7 @@ func (bucket *Bucket) MobileSystemDataStore() sgbucket.DataStore {
 	return collection
 }
 
-func (bucket *Bucket) NamedDataStore(name sgbucket.DataStoreName) (sgbucket.DataStore, error) {
+func (bucket *Bucket) NamedDataStore(_ context.Context, name sgbucket.DataStoreName) (sgbucket.DataStore, error) {
 	traceEnter("NamedDataStore", "%s.%s", bucket, name)
 	sc, err := validateName(name)
 	if err != nil {
@@ -182,7 +182,7 @@ func (bucket *Bucket) CreateDataStore(_ context.Context, name sgbucket.DataStore
 	return err
 }
 
-func (bucket *Bucket) DropDataStore(name sgbucket.DataStoreName) error {
+func (bucket *Bucket) DropDataStore(_ context.Context, name sgbucket.DataStoreName) error {
 	traceEnter("DropDataStore", "%s.%s", bucket, name)
 	sc, err := validateName(name)
 	if err != nil {
@@ -192,7 +192,7 @@ func (bucket *Bucket) DropDataStore(name sgbucket.DataStoreName) error {
 }
 
 // ListDataStores returns a list of the names of all data stores in the bucket.
-func (bucket *Bucket) ListDataStores() (result []sgbucket.DataStoreName, err error) {
+func (bucket *Bucket) ListDataStores(_ context.Context) (result []sgbucket.DataStoreName, err error) {
 	traceEnter("ListDataStores", "%s", bucket)
 	defer func() { traceExit("ListDataStores", err, "%v", result) }()
 	rows, err := bucket.db().Query(`SELECT id, scope, name FROM collections ORDER BY id`)
@@ -343,8 +343,8 @@ func (bucket *Bucket) nextExpiration() (exp Exp, err error) {
 }
 
 // expireDocuments immediately deletes all expired documents in this bucket.
-func (bucket *Bucket) expireDocuments() (int64, error) {
-	names, err := bucket.ListDataStores()
+func (bucket *Bucket) expireDocuments(ctx context.Context) (int64, error) {
+	names, err := bucket.ListDataStores(ctx)
 	if err != nil {
 		return 0, err
 	}
@@ -352,7 +352,7 @@ func (bucket *Bucket) expireDocuments() (int64, error) {
 	for _, name := range names {
 		if coll, err := bucket.getCollection(name.(sgbucket.DataStoreNameImpl)); err != nil {
 			return 0, err
-		} else if n, err := coll.expireDocuments(); err != nil {
+		} else if n, err := coll.expireDocuments(ctx); err != nil {
 			return 0, err
 		} else {
 			count += n
@@ -368,11 +368,11 @@ func (bucket *Bucket) _scheduleExpiration() {
 	}
 }
 
-func (bucket *Bucket) doExpiration() {
+func (bucket *Bucket) doExpiration(ctx context.Context) {
 	bucket.expManager._clearNext()
 
 	debug("EXP: Running scheduled expiration...")
-	if n, err := bucket.expireDocuments(); err != nil {
+	if n, err := bucket.expireDocuments(ctx); err != nil {
 		// If there's an error expiring docs, it means there is a programming error of a leaked expiration goroutine.
 		panic("Error expiring docs: " + err.Error())
 	} else if n > 0 {
