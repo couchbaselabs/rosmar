@@ -23,16 +23,11 @@ var activeFeedCount int32 // for tests
 
 //////// BUCKET API: (sgbucket.MutationFeedStore interface)
 
-func (bucket *Bucket) StartDCPFeed(
-	ctx context.Context,
-	args sgbucket.FeedArguments,
-	callback sgbucket.FeedEventCallbackFunc,
-	dbStats *expvar.Map,
-) error {
+func (bucket *Bucket) StartDCPFeed(ctx context.Context, args sgbucket.FeedArguments, callback sgbucket.FeedEventCallbackFunc, dbStats *expvar.Map, metadataStore sgbucket.DataStore) error {
 	traceEnter("StartDCPFeed", "bucket=%s, args=%+v", bucket.GetName(), args)
 	// If no scopes are specified, return feed for the default collection, if it exists
 	if len(args.Scopes) == 0 {
-		return bucket.DefaultDataStore(ctx).(*Collection).StartDCPFeed(ctx, args, callback, dbStats)
+		return bucket.DefaultDataStore(ctx).(*Collection).StartDCPFeed(ctx, args, callback, dbStats, metadataStore)
 	}
 
 	// Validate requested collections exist before starting feeds
@@ -63,8 +58,7 @@ func (bucket *Bucket) StartDCPFeed(
 		argsCopy := args
 		argsCopy.DoneChan = doneChans[collection]
 
-		// Ignoring error is safe because Collection doesn't have error scenarios for StartDCPFeed
-		_ = collection.StartDCPFeed(ctx, argsCopy, collectionAwareCallback, dbStats)
+		_ = collection.StartDCPFeed(ctx, argsCopy, collectionAwareCallback, dbStats, metadataStore)
 	}
 
 	// coalesce doneChans
@@ -82,17 +76,12 @@ func (bucket *Bucket) StartDCPFeed(
 
 //////// COLLECTION API:
 
-func (c *Collection) StartDCPFeed(
-	ctx context.Context,
-	args sgbucket.FeedArguments,
-	callback sgbucket.FeedEventCallbackFunc,
-	dbStats *expvar.Map,
-) error {
+func (c *Collection) StartDCPFeed(ctx context.Context, args sgbucket.FeedArguments, callback sgbucket.FeedEventCallbackFunc, dbStats *expvar.Map, metadataStore sgbucket.DataStore) error {
 	traceEnter("StartDCPFeed", "collection=%s, args=%+v", c, args)
 	feed := &dcpFeed{
 		ctx:           ctx,
 		collection:    c,
-		metadataStore: c.bucket.DefaultDataStore(ctx).(*Collection),
+		metadataStore: metadataStore,
 		args:          args,
 		callback:      callback,
 	}
@@ -197,7 +186,7 @@ type checkpoint struct {
 type dcpFeed struct {
 	ctx            context.Context // TODO: Use this
 	collection     *Collection
-	metadataStore  *Collection
+	metadataStore  sgbucket.DataStore
 	args           sgbucket.FeedArguments
 	callback       sgbucket.FeedEventCallbackFunc
 	events         eventQueue
