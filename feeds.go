@@ -23,11 +23,11 @@ var activeFeedCount int32 // for tests
 
 //////// BUCKET API: (sgbucket.MutationFeedStore interface)
 
-func (bucket *Bucket) StartDCPFeed(ctx context.Context, args sgbucket.FeedArguments, callback sgbucket.FeedEventCallbackFunc, dbStats *expvar.Map, metadataStore sgbucket.DataStore) error {
+func (bucket *Bucket) StartDCPFeed(ctx context.Context, args sgbucket.FeedArguments, callback sgbucket.FeedEventCallbackFunc, dbStats *expvar.Map) error {
 	traceEnter("StartDCPFeed", "bucket=%s, args=%+v", bucket.GetName(), args)
 	// If no scopes are specified, return feed for the default collection, if it exists
 	if len(args.Scopes) == 0 {
-		return bucket.DefaultDataStore(ctx).(*Collection).StartDCPFeed(ctx, args, callback, dbStats, metadataStore)
+		return bucket.DefaultDataStore(ctx).(*Collection).StartDCPFeed(ctx, args, callback, dbStats)
 	}
 
 	// Validate requested collections exist before starting feeds
@@ -58,7 +58,7 @@ func (bucket *Bucket) StartDCPFeed(ctx context.Context, args sgbucket.FeedArgume
 		argsCopy := args
 		argsCopy.DoneChan = doneChans[collection]
 
-		_ = collection.StartDCPFeed(ctx, argsCopy, collectionAwareCallback, dbStats, metadataStore)
+		_ = collection.StartDCPFeed(ctx, argsCopy, collectionAwareCallback, dbStats)
 	}
 
 	// coalesce doneChans
@@ -76,12 +76,12 @@ func (bucket *Bucket) StartDCPFeed(ctx context.Context, args sgbucket.FeedArgume
 
 //////// COLLECTION API:
 
-func (c *Collection) StartDCPFeed(ctx context.Context, args sgbucket.FeedArguments, callback sgbucket.FeedEventCallbackFunc, dbStats *expvar.Map, metadataStore sgbucket.DataStore) error {
+func (c *Collection) StartDCPFeed(ctx context.Context, args sgbucket.FeedArguments, callback sgbucket.FeedEventCallbackFunc, dbStats *expvar.Map) error {
 	traceEnter("StartDCPFeed", "collection=%s, args=%+v", c, args)
 	feed := &dcpFeed{
 		ctx:           ctx,
 		collection:    c,
-		metadataStore: metadataStore,
+		metadataStore: args.MetadataStore,
 		args:          args,
 		callback:      callback,
 	}
