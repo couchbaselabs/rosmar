@@ -93,6 +93,9 @@ func TestCheckpoint(t *testing.T) {
 
 	// Run the feed:
 	args := sgbucket.FeedArguments{
+		Scopes: map[string][]string{
+			"_default": {"_default"},
+		},
 		ID:               "myID",
 		Backfill:         sgbucket.FeedResume,
 		Dump:             true,
@@ -117,6 +120,9 @@ func TestCheckpoint(t *testing.T) {
 	// Resume the feed:
 	t.Logf("---- Resuming feed from checkpoint ---")
 	args = sgbucket.FeedArguments{
+		Scopes: map[string][]string{
+			"_default": {"_default"},
+		},
 		ID:               "myID",
 		Backfill:         sgbucket.FeedResume,
 		Dump:             true,
@@ -297,6 +303,9 @@ func startFeedWithArgs(t *testing.T, bucket *Bucket, args sgbucket.FeedArguments
 	if args.DoneChan == nil {
 		args.DoneChan = make(chan struct{})
 	}
+	if args.CheckpointPrefix != "" && args.MetadataStore == nil {
+		args.MetadataStore = bucket.DefaultDataStore(context.TODO())
+	}
 	err := bucket.StartDCPFeed(context.TODO(), args, callback, nil)
 	require.NoError(t, err, "StartDCPFeed failed")
 	return events, args.DoneChan
@@ -434,7 +443,8 @@ func TestCollectionMutations(t *testing.T) {
 		Scopes: map[string][]string{
 			"scope1": {"collection1", "collection2"},
 		},
-		Terminator: make(chan bool),
+		Terminator:    make(chan bool),
+		MetadataStore: huddle.MobileSystemDataStore(context.TODO()),
 	}
 	defer close(args.Terminator)
 	err = huddle.StartDCPFeed(context.TODO(), args, callback, nil)
