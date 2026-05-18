@@ -9,31 +9,31 @@
 package rosmar
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 
 	sgbucket "github.com/couchbase/sg-bucket"
 )
 
-// Ensure Collection implements RangeScanStore.
 var _ sgbucket.RangeScanStore = &Collection{}
 
-func (c *Collection) Scan(scanType sgbucket.ScanType, opts sgbucket.ScanOptions) (sgbucket.ScanResultIterator, error) {
+func (c *Collection) Scan(ctx context.Context, scanType sgbucket.ScanType, opts sgbucket.ScanOptions) (sgbucket.ScanResultIterator, error) {
 	rs, ok := scanType.(sgbucket.RangeScan)
 	if !ok {
 		return nil, fmt.Errorf("unsupported scan type: %T", scanType)
 	}
-	return c.rangeScan(rs, opts)
+	return c.rangeScan(ctx, rs, opts)
 }
 
-func (c *Collection) rangeScan(rs sgbucket.RangeScan, opts sgbucket.ScanOptions) (sgbucket.ScanResultIterator, error) {
+func (c *Collection) rangeScan(ctx context.Context, rs sgbucket.RangeScan, opts sgbucket.ScanOptions) (sgbucket.ScanResultIterator, error) {
 	var query string
 	var args []any
 
 	if opts.IDsOnly {
-		query = "SELECT key, cas FROM documents WHERE collection=? AND value IS NOT NULL"
+		query = "SELECT key, cas FROM documents WHERE collection=? AND tombstone=0"
 	} else {
-		query = "SELECT key, value, cas FROM documents WHERE collection=? AND value IS NOT NULL"
+		query = "SELECT key, value, cas FROM documents WHERE collection=? AND tombstone=0"
 	}
 	args = append(args, c.id)
 
@@ -55,20 +55,16 @@ func (c *Collection) rangeScan(rs sgbucket.RangeScan, opts sgbucket.ScanOptions)
 	}
 	query += " ORDER BY key"
 
-	return c.execScan(query, args, opts.IDsOnly)
-}
-
-func (c *Collection) execScan(query string, args []any, idsOnly bool) (sgbucket.ScanResultIterator, error) {
 	rows, err := c.db().Query(query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("range scan query failed: %w", err)
 	}
 
-	iter := &scanIterator{rows: rows, idsOnly: idsOnly}
+	iter := &scanIterator{rows: rows, idsOnly: opts.IDsOnly}
 	if c.bucket.inMemory {
 		// An in-memory database has only a single connection, so leaving sql.Rows open
 		// can cause deadlock. Read all rows eagerly and close immediately.
-		return preRecordScan(iter), nil
+		return preRecordScan(ctx, iter), nil
 	}
 	return iter, nil
 }
@@ -77,27 +73,34 @@ func (c *Collection) execScan(query string, args []any, idsOnly bool) (sgbucket.
 type scanIterator struct {
 	rows    *sql.Rows
 	idsOnly bool
+	err     error
 }
 
-func (it *scanIterator) Next() *sgbucket.ScanResultItem {
-	if !it.rows.Next() {
+func (it *scanIterator) Next(_ context.Context) *sgbucket.ScanResultItem {
+	if it.err != nil || !it.rows.Next() {
 		return nil
 	}
-	item := &sgbucket.ScanResultItem{IDOnly: it.idsOnly}
-	var err error
+	item := &sgbucket.ScanResultItem{}
 	if it.idsOnly {
-		err = it.rows.Scan(&item.ID, &item.Cas)
+		it.err = it.rows.Scan(&item.ID, &item.Cas)
 	} else {
-		err = it.rows.Scan(&item.ID, &item.Body, &item.Cas)
+		it.err = it.rows.Scan(&item.ID, &item.Body, &item.Cas)
 	}
-	if err != nil {
+	if it.err != nil {
 		return nil
 	}
 	return item
 }
 
-func (it *scanIterator) Close() error {
-	return it.rows.Close()
+func (it *scanIterator) Close(_ context.Context) error {
+	closeErr := it.rows.Close()
+	if it.err == nil {
+		it.err = closeErr
+	}
+	if it.err == nil {
+		it.err = it.rows.Err()
+	}
+	return it.err
 }
 
 // preRecordedScanIterator holds all scan results in memory.
@@ -106,10 +109,10 @@ type preRecordedScanIterator struct {
 	err   error
 }
 
-func preRecordScan(iter *scanIterator) *preRecordedScanIterator {
+func preRecordScan(ctx context.Context, iter *scanIterator) *preRecordedScanIterator {
 	var items []*sgbucket.ScanResultItem
 	for {
-		item := iter.Next()
+		item := iter.Next(ctx)
 		if item == nil {
 			break
 		}
@@ -117,11 +120,11 @@ func preRecordScan(iter *scanIterator) *preRecordedScanIterator {
 	}
 	return &preRecordedScanIterator{
 		items: items,
-		err:   iter.Close(),
+		err:   iter.Close(ctx),
 	}
 }
 
-func (it *preRecordedScanIterator) Next() *sgbucket.ScanResultItem {
+func (it *preRecordedScanIterator) Next(_ context.Context) *sgbucket.ScanResultItem {
 	if len(it.items) == 0 || it.err != nil {
 		return nil
 	}
@@ -130,6 +133,11 @@ func (it *preRecordedScanIterator) Next() *sgbucket.ScanResultItem {
 	return item
 }
 
-func (it *preRecordedScanIterator) Close() error {
+func (it *preRecordedScanIterator) Close(_ context.Context) error {
 	return it.err
 }
+
+var (
+	_ sgbucket.ScanResultIterator = (*scanIterator)(nil)
+	_ sgbucket.ScanResultIterator = (*preRecordedScanIterator)(nil)
+)

@@ -1,6 +1,6 @@
 module github.com/couchbaselabs/rosmar
 
-go 1.25.0
+go 1.24.0
 
 require (
 	github.com/couchbase/sg-bucket v0.0.0-20260518185934-fd2c2e344237

@@ -18,9 +18,9 @@ import (
 
 func TestRangeScan(t *testing.T) {
 	ensureNoLeaks(t)
-	coll := makeTestBucket(t).DefaultDataStore().(*Collection)
+	ctx := t.Context()
+	coll := makeTestBucket(t).DefaultDataStore(ctx).(*Collection)
 
-	// Seed test documents
 	docs := map[string]string{
 		"doc_a": `{"name":"alpha"}`,
 		"doc_b": `{"name":"bravo"}`,
@@ -29,23 +29,29 @@ func TestRangeScan(t *testing.T) {
 		"doc_e": `{"name":"echo"}`,
 	}
 	for k, v := range docs {
-		require.NoError(t, coll.SetRaw(k, 0, nil, []byte(v)))
+		require.NoError(t, coll.SetRaw(ctx, k, 0, nil, []byte(v)))
+	}
+
+	collectIDs := func(t *testing.T, iter sgbucket.ScanResultIterator, idsOnly bool) []string {
+		t.Helper()
+		defer func() { assert.NoError(t, iter.Close(ctx)) }()
+		var ids []string
+		for item := iter.Next(ctx); item != nil; item = iter.Next(ctx) {
+			ids = append(ids, item.ID)
+			assert.NotZero(t, item.Cas)
+			if idsOnly {
+				assert.Nil(t, item.Body)
+			} else {
+				assert.NotNil(t, item.Body)
+			}
+		}
+		return ids
 	}
 
 	t.Run("FullRange", func(t *testing.T) {
-		scan := sgbucket.NewRangeScanForPrefix("doc_")
-		iter, err := coll.Scan(scan, sgbucket.ScanOptions{})
+		iter, err := coll.Scan(ctx, sgbucket.NewRangeScanForPrefix("doc_"), sgbucket.ScanOptions{})
 		require.NoError(t, err)
-		defer func() { assert.NoError(t, iter.Close()) }()
-
-		var ids []string
-		for item := iter.Next(); item != nil; item = iter.Next() {
-			ids = append(ids, item.ID)
-			assert.NotNil(t, item.Body)
-			assert.NotZero(t, item.Cas)
-			assert.False(t, item.IDOnly)
-		}
-		require.Equal(t, []string{"doc_a", "doc_b", "doc_c", "doc_d", "doc_e"}, ids)
+		require.Equal(t, []string{"doc_a", "doc_b", "doc_c", "doc_d", "doc_e"}, collectIDs(t, iter, false))
 	})
 
 	t.Run("PartialRange", func(t *testing.T) {
@@ -53,15 +59,9 @@ func TestRangeScan(t *testing.T) {
 			From: &sgbucket.ScanTerm{Term: "doc_b"},
 			To:   &sgbucket.ScanTerm{Term: "doc_d", Exclusive: true},
 		}
-		iter, err := coll.Scan(scan, sgbucket.ScanOptions{})
+		iter, err := coll.Scan(ctx, scan, sgbucket.ScanOptions{})
 		require.NoError(t, err)
-		defer func() { assert.NoError(t, iter.Close()) }()
-
-		var ids []string
-		for item := iter.Next(); item != nil; item = iter.Next() {
-			ids = append(ids, item.ID)
-		}
-		require.Equal(t, []string{"doc_b", "doc_c"}, ids)
+		require.Equal(t, []string{"doc_b", "doc_c"}, collectIDs(t, iter, false))
 	})
 
 	t.Run("ExclusiveFrom", func(t *testing.T) {
@@ -69,85 +69,47 @@ func TestRangeScan(t *testing.T) {
 			From: &sgbucket.ScanTerm{Term: "doc_a", Exclusive: true},
 			To:   &sgbucket.ScanTerm{Term: "doc_c"},
 		}
-		iter, err := coll.Scan(scan, sgbucket.ScanOptions{})
+		iter, err := coll.Scan(ctx, scan, sgbucket.ScanOptions{})
 		require.NoError(t, err)
-		defer func() { assert.NoError(t, iter.Close()) }()
-
-		var ids []string
-		for item := iter.Next(); item != nil; item = iter.Next() {
-			ids = append(ids, item.ID)
-		}
-		require.Equal(t, []string{"doc_b", "doc_c"}, ids)
+		require.Equal(t, []string{"doc_b", "doc_c"}, collectIDs(t, iter, false))
 	})
 
 	t.Run("IDsOnly", func(t *testing.T) {
-		scan := sgbucket.NewRangeScanForPrefix("doc_")
-		iter, err := coll.Scan(scan, sgbucket.ScanOptions{IDsOnly: true})
+		iter, err := coll.Scan(ctx, sgbucket.NewRangeScanForPrefix("doc_"), sgbucket.ScanOptions{IDsOnly: true})
 		require.NoError(t, err)
-		defer func() { assert.NoError(t, iter.Close()) }()
-
-		var ids []string
-		for item := iter.Next(); item != nil; item = iter.Next() {
-			ids = append(ids, item.ID)
-			assert.True(t, item.IDOnly)
-			assert.Nil(t, item.Body)
-		}
-		require.Equal(t, []string{"doc_a", "doc_b", "doc_c", "doc_d", "doc_e"}, ids)
+		require.Equal(t, []string{"doc_a", "doc_b", "doc_c", "doc_d", "doc_e"}, collectIDs(t, iter, true))
 	})
 
 	t.Run("EmptyRange", func(t *testing.T) {
-		scan := sgbucket.NewRangeScanForPrefix("zzz_nonexistent_")
-		iter, err := coll.Scan(scan, sgbucket.ScanOptions{})
+		iter, err := coll.Scan(ctx, sgbucket.NewRangeScanForPrefix("zzz_nonexistent_"), sgbucket.ScanOptions{})
 		require.NoError(t, err)
-		defer func() { assert.NoError(t, iter.Close()) }()
-
-		assert.Nil(t, iter.Next())
+		defer func() { assert.NoError(t, iter.Close(ctx)) }()
+		assert.Nil(t, iter.Next(ctx))
 	})
 
 	t.Run("PrefixScan", func(t *testing.T) {
-		scan := sgbucket.NewRangeScanForPrefix("doc_c")
-		iter, err := coll.Scan(scan, sgbucket.ScanOptions{})
+		iter, err := coll.Scan(ctx, sgbucket.NewRangeScanForPrefix("doc_c"), sgbucket.ScanOptions{})
 		require.NoError(t, err)
-		defer func() { assert.NoError(t, iter.Close()) }()
-
-		var ids []string
-		for item := iter.Next(); item != nil; item = iter.Next() {
-			ids = append(ids, item.ID)
-		}
-		require.Equal(t, []string{"doc_c"}, ids)
+		require.Equal(t, []string{"doc_c"}, collectIDs(t, iter, false))
 	})
 
 	t.Run("TombstonesExcluded", func(t *testing.T) {
-		require.NoError(t, coll.Delete("doc_b"))
+		require.NoError(t, coll.Delete(ctx, "doc_b"))
 
-		scan := sgbucket.NewRangeScanForPrefix("doc_")
-		iter, err := coll.Scan(scan, sgbucket.ScanOptions{})
+		iter, err := coll.Scan(ctx, sgbucket.NewRangeScanForPrefix("doc_"), sgbucket.ScanOptions{})
 		require.NoError(t, err)
-		defer func() { assert.NoError(t, iter.Close()) }()
-
-		var ids []string
-		for item := iter.Next(); item != nil; item = iter.Next() {
-			ids = append(ids, item.ID)
-		}
-		assert.Equal(t, []string{"doc_a", "doc_c", "doc_d", "doc_e"}, ids)
+		assert.Equal(t, []string{"doc_a", "doc_c", "doc_d", "doc_e"}, collectIDs(t, iter, false))
 	})
 
 	t.Run("NoBounds", func(t *testing.T) {
-		scan := sgbucket.RangeScan{}
-		iter, err := coll.Scan(scan, sgbucket.ScanOptions{IDsOnly: true})
+		iter, err := coll.Scan(ctx, sgbucket.RangeScan{}, sgbucket.ScanOptions{IDsOnly: true})
 		require.NoError(t, err)
-		defer func() { assert.NoError(t, iter.Close()) }()
-
-		var ids []string
-		for item := iter.Next(); item != nil; item = iter.Next() {
-			ids = append(ids, item.ID)
-		}
-		// doc_b was deleted above, remaining 4 docs should all be returned in order
-		assert.Equal(t, []string{"doc_a", "doc_c", "doc_d", "doc_e"}, ids)
+		// doc_b was deleted above
+		assert.Equal(t, []string{"doc_a", "doc_c", "doc_d", "doc_e"}, collectIDs(t, iter, true))
 	})
 
 	t.Run("UnsupportedScanType", func(t *testing.T) {
-		_, err := coll.Scan(nil, sgbucket.ScanOptions{})
+		_, err := coll.Scan(ctx, nil, sgbucket.ScanOptions{})
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "unsupported scan type")
 	})
