@@ -53,7 +53,10 @@ func (c *Collection) rangeScan(ctx context.Context, rs sgbucket.RangeScan, opts 
 		}
 		args = append(args, rs.To.Term)
 	}
-	query += " ORDER BY key"
+	// No ORDER BY: gocb's Scan interleaves per-vBucket result streams without a
+	// global sort, so the sgbucket interface promises no global ordering. Not
+	// sorting here forces consumers to be order-agnostic and keeps rosmar's
+	// behavior aligned with CBS.
 
 	rows, err := c.db().Query(query, args...)
 	if err != nil {

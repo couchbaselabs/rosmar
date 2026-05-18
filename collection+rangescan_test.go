@@ -9,6 +9,7 @@
 package rosmar
 
 import (
+	"sort"
 	"testing"
 
 	sgbucket "github.com/couchbase/sg-bucket"
@@ -32,6 +33,8 @@ func TestRangeScan(t *testing.T) {
 		require.NoError(t, coll.SetRaw(ctx, k, 0, nil, []byte(v)))
 	}
 
+	// Sort returned IDs so tests can use Equal against an ordered expected slice.
+	// Range scan returns no ordering guarantee; consumers must be order-agnostic.
 	collectIDs := func(t *testing.T, iter sgbucket.ScanResultIterator, idsOnly bool) []string {
 		t.Helper()
 		defer func() { assert.NoError(t, iter.Close(ctx)) }()
@@ -45,6 +48,7 @@ func TestRangeScan(t *testing.T) {
 				assert.NotNil(t, item.Body)
 			}
 		}
+		sort.Strings(ids)
 		return ids
 	}
 
