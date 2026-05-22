@@ -122,15 +122,33 @@ func (c *Collection) getRaw(q queryable, key string) (val []byte, cas CAS, revSe
 
 func (c *Collection) GetAndTouchRaw(_ context.Context, key string, exp Exp) (val []byte, cas CAS, err error) {
 	traceEnter("GetAndTouchRaw", "%q, %d", key, exp)
-	err = c.withNewCas(func(txn *sql.Tx, newCas CAS) (e *event, err error) {
-		exp = absoluteExpiry(exp)
+	newExp := absoluteExpiry(exp)
+	err = c.bucket.inTransaction(func(txn *sql.Tx) error {
 		var revSeqNo int64
-		val, cas, revSeqNo, err = c.getRaw(txn, key)
-		if err == nil {
-			revSeqNo++
-			_, err = txn.Exec(`UPDATE documents SET exp=?1, revSeqNo=?2 WHERE key=?3`, exp, revSeqNo, key)
+		var existingExp Exp
+		row := txn.QueryRow(
+			`SELECT value, cas, revSeqNo, exp FROM documents WHERE collection=? AND key=?`,
+			c.id, key)
+		if scanErr := scan(row, &val, &cas, &revSeqNo, &existingExp); scanErr != nil {
+			return remapKeyError(scanErr, key)
 		}
-		return
+		if val == nil {
+			return sgbucket.MissingError{Key: key}
+		}
+		if existingExp == newExp {
+			// No-op: CB Server's KV TOUCH/GAT preserves CAS and revSeqNo when the
+			// expiry value is unchanged.
+			return nil
+		}
+		revSeqNo++
+		newCas := CAS(hlc.Now())
+		if _, execErr := txn.Exec(
+			`UPDATE documents SET exp=?1, revSeqNo=?2, cas=?3 WHERE collection=?4 AND key=?5`,
+			newExp, revSeqNo, newCas, c.id, key); execErr != nil {
+			return execErr
+		}
+		cas = newCas
+		return c.setLastCas(txn, newCas)
 	})
 	traceExit("GetAndTouchRaw", err, "cas=0x%x, val %s", cas, val)
 	return
