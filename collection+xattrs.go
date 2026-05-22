@@ -448,6 +448,81 @@ func (c *Collection) getRawWithXattrs(key string, xattrKeys []string) (sgbucket.
 	return rawDoc, nil
 }
 
+// TouchXattrWithCas sets a single property within a system xattr, bumping the document's CAS.
+//
+// This mirrors gocb's subdoc UpsertSpec with StoreSemanticsReplace and a CAS guard, which is what Couchbase Server
+// uses to touch a metadata document during config rollback (see XattrBootstrapPersistence.touchConfigRollback in sync_gateway).
+//
+// Returns sgbucket.CasMismatchErr if the supplied cas does not match the current document CAS.
+func (c *Collection) TouchXattrWithCas(_ context.Context, key, xattrKey, property, value string, cas CAS) (casOut CAS, err error) {
+	traceEnter("TouchXattrWithCas", "%q, %q.%q=%q, cas=0x%x", key, xattrKey, property, value, cas)
+	defer func() { traceExit("TouchXattrWithCas", err, "0x%x", casOut) }()
+	err = c.withNewCas(func(txn *sql.Tx, newCas CAS) (*event, error) {
+		var (
+			bodyVal     []byte
+			existingCas CAS
+			rawXattrs   []byte
+			revSeqNo    uint64
+			isJSON      bool
+		)
+		row := txn.QueryRow(`SELECT value, cas, xattrs, revSeqNo, isJSON FROM documents WHERE collection=?1 AND key=?2`, c.id, key)
+		if err := scan(row, &bodyVal, &existingCas, &rawXattrs, &revSeqNo, &isJSON); err != nil {
+			return nil, remapKeyError(err, key)
+		}
+		if existingCas != cas {
+			return nil, sgbucket.CasMismatchErr{Expected: cas, Actual: existingCas}
+		}
+
+		xattrMap := semiParsedXattrs{}
+		if len(rawXattrs) > 0 {
+			if err := json.Unmarshal(rawXattrs, &xattrMap); err != nil {
+				return nil, fmt.Errorf("document %q xattrs are unreadable: %w", key, err)
+			}
+		}
+		// JSON-merge xattrKey.<property> = value into the xattr blob.
+		var xattrBody map[string]json.RawMessage
+		if existing, ok := xattrMap[xattrKey]; ok && len(existing) > 0 {
+			if err := json.Unmarshal(existing, &xattrBody); err != nil {
+				return nil, fmt.Errorf("document %q xattr %q is not a JSON object: %w", key, xattrKey, err)
+			}
+		}
+		if xattrBody == nil {
+			xattrBody = map[string]json.RawMessage{}
+		}
+		encodedValue, err := json.Marshal(value)
+		if err != nil {
+			return nil, err
+		}
+		xattrBody[property] = encodedValue
+		encodedXattr, err := json.Marshal(xattrBody)
+		if err != nil {
+			return nil, err
+		}
+		xattrMap[xattrKey] = encodedXattr
+		newRawXattrs, err := json.Marshal(xattrMap)
+		if err != nil {
+			return nil, err
+		}
+
+		revSeqNo++
+		if _, err := txn.Exec(
+			`UPDATE documents SET cas=?1, xattrs=?2, revSeqNo=?3 WHERE collection=?4 AND key=?5`,
+			newCas, newRawXattrs, revSeqNo, c.id, key); err != nil {
+			return nil, err
+		}
+		casOut = newCas
+		return &event{
+			key:      key,
+			value:    bodyVal,
+			cas:      newCas,
+			isJSON:   isJSON,
+			xattrs:   newRawXattrs,
+			revSeqNo: revSeqNo,
+		}, nil
+	})
+	return
+}
+
 // DeleteWithXattrs a document's body and xattrs simultaneously.
 func (c *Collection) DeleteWithXattrs(ctx context.Context, key string, xattrKeys []string) error {
 	err := c.withNewCas(func(txn *sql.Tx, newCas CAS) (*event, error) {

@@ -921,13 +921,31 @@ func TestRevSeqNo(t *testing.T) {
 	require.NoError(t, col.Set(ctx, docID, 0, nil, []byte(`{"foo": 4`)))
 	assertRevSeqNo(t, col, docID, `"4"`)
 
-	_, _, err := col.GetAndTouchRaw(ctx, docID, 0)
+	// Doc was last written with exp=0. A Touch/GetAndTouchRaw that doesn't change
+	// the expiry is a no-op on CB Server: CAS and revSeqNo are preserved.
+	_, casBeforeNoOpTouch, err := col.GetRaw(ctx, docID)
+	require.NoError(t, err)
+
+	_, casAfterNoOpGAT, err := col.GetAndTouchRaw(ctx, docID, 0)
+	require.NoError(t, err)
+	assertRevSeqNo(t, col, docID, `"4"`)
+	require.Equal(t, casBeforeNoOpTouch, casAfterNoOpGAT, "no-op GetAndTouchRaw should not bump CAS")
+
+	casAfterNoOpTouch, err := col.Touch(ctx, docID, 0)
+	require.NoError(t, err)
+	assertRevSeqNo(t, col, docID, `"4"`)
+	require.Equal(t, casBeforeNoOpTouch, casAfterNoOpTouch, "no-op Touch should not bump CAS")
+
+	// Changing the expiry is a metadata mutation: CB Server bumps both CAS and revSeqNo.
+	casAfterChangingTouch, err := col.Touch(ctx, docID, 60)
 	require.NoError(t, err)
 	assertRevSeqNo(t, col, docID, `"5"`)
+	require.NotEqual(t, casBeforeNoOpTouch, casAfterChangingTouch, "Touch should bump CAS when exp changes")
 
-	_, err = col.Touch(ctx, docID, 0)
+	_, casAfterChangingGAT, err := col.GetAndTouchRaw(ctx, docID, 120)
 	require.NoError(t, err)
 	assertRevSeqNo(t, col, docID, `"6"`)
+	require.NotEqual(t, casAfterChangingTouch, casAfterChangingGAT, "GetAndTouchRaw should bump CAS when exp changes")
 
 	writeWithXattrsDocID := "writeWithXattrs"
 	_, err = col.WriteWithXattrs(ctx, writeWithXattrsDocID, 0, 0, []byte(`{"foo": 1}`), nil, nil, nil)
