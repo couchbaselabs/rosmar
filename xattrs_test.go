@@ -18,6 +18,66 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestTouchXattrWithCas(t *testing.T) {
+	ctx := t.Context()
+	ensureNoLeakedFeeds(t)
+	coll := makeTestBucket(t).DefaultDataStore(ctx).(*Collection)
+
+	const docID = "doc1"
+	bodyBytes := []byte(`{"hello":"world"}`)
+	xattrsInput := map[string][]byte{
+		syncXattrName: []byte(`{"existing":"value"}`),
+	}
+	originalCas, err := coll.WriteWithXattrs(ctx, docID, 0, 0, bodyBytes, xattrsInput, nil, nil)
+	require.NoError(t, err)
+
+	// Stale CAS should fail.
+	_, err = coll.TouchXattrWithCas(ctx, docID, syncXattrName, "name", "db1", originalCas+1)
+	require.ErrorAs(t, err, &sgbucket.CasMismatchErr{})
+
+	// Correct CAS succeeds and bumps CAS.
+	newCas, err := coll.TouchXattrWithCas(ctx, docID, syncXattrName, "name", "db1", originalCas)
+	require.NoError(t, err)
+	require.NotEqual(t, originalCas, newCas)
+
+	// Verify the xattr property is now visible and the existing properties were preserved.
+	gotBody, gotXattrs, getCas, err := coll.GetWithXattrs(ctx, docID, []string{syncXattrName})
+	require.NoError(t, err)
+	require.Equal(t, newCas, getCas)
+	require.Equal(t, bodyBytes, gotBody)
+	var xattr map[string]string
+	require.NoError(t, json.Unmarshal(gotXattrs[syncXattrName], &xattr))
+	require.Equal(t, "db1", xattr["name"])
+	require.Equal(t, "value", xattr["existing"])
+
+	// The old CAS is now stale.
+	_, err = coll.TouchXattrWithCas(ctx, docID, syncXattrName, "name", "db2", originalCas)
+	require.ErrorAs(t, err, &sgbucket.CasMismatchErr{})
+}
+
+// TestTouchXattrWithCasCreatesXattr verifies that TouchXattrWithCas can populate an xattr on a doc
+// that does not yet have one.
+func TestTouchXattrWithCasCreatesXattr(t *testing.T) {
+	ctx := t.Context()
+	ensureNoLeakedFeeds(t)
+	coll := makeTestBucket(t).DefaultDataStore(ctx).(*Collection)
+
+	const docID = "doc1"
+	require.NoError(t, coll.SetRaw(ctx, docID, 0, nil, []byte(`{"a":1}`)))
+	_, cas, err := coll.GetRaw(ctx, docID)
+	require.NoError(t, err)
+
+	newCas, err := coll.TouchXattrWithCas(ctx, docID, syncXattrName, "name", "db1", cas)
+	require.NoError(t, err)
+	require.NotEqual(t, cas, newCas)
+
+	_, gotXattrs, _, err := coll.GetWithXattrs(ctx, docID, []string{syncXattrName})
+	require.NoError(t, err)
+	var xattr map[string]string
+	require.NoError(t, json.Unmarshal(gotXattrs[syncXattrName], &xattr))
+	require.Equal(t, "db1", xattr["name"])
+}
+
 func TestSetXattrs(t *testing.T) {
 	ctx := t.Context()
 	ensureNoLeakedFeeds(t)
