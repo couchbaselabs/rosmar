@@ -523,6 +523,12 @@ func (c *Collection) Incr(_ context.Context, key string, amt, deflt uint64, exp 
 		if err == nil {
 			result += amt
 		} else if _, ok := err.(sgbucket.MissingError); ok {
+			// Couchbase Server's gocb adapter casts def to int64; values > math.MaxInt64
+			// become negative, which gocbcore interprets as "do not create if absent"
+			// and the server returns KEY_ENOENT. Match that behavior here.
+			if int64(deflt) < 0 {
+				return nil, sgbucket.MissingError{Key: key}
+			}
 			result = deflt
 		} else {
 			return nil, err
