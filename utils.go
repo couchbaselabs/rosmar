@@ -182,3 +182,7 @@ var (
 	_ error = &ErrUnimplemented{}
 	_ error = &DatabaseError{}
 )
+
+func ptr[T any](v T) *T {
+	return &v
+}
