@@ -27,6 +27,7 @@ const (
 	virtualXattrName     = "$document"
 	virtualXattrRevSeqNo = "revid"
 	virtualXattrCAS      = "CAS"
+	virtualXattrExpiry   = "exptime"
 )
 
 // ////// SGBUCKET XATTR STORE INTERFACE
@@ -412,12 +413,13 @@ func (c *Collection) getRawXattrs(txn *sql.Tx, key string) ([]byte, error) {
 // get doc's raw body and an xattr.
 func (c *Collection) getRawWithXattrs(key string, xattrKeys []string) (sgbucket.BucketDocument, error) {
 	var revSeqNo int64
-	row := c.db().QueryRow(`SELECT value, cas, xattrs, tombstone, revSeqNo FROM documents WHERE collection=?1 AND key=?2`, c.id, key)
+	var exp Exp
+	row := c.db().QueryRow(`SELECT value, cas, xattrs, tombstone, revSeqNo, exp FROM documents WHERE collection=?1 AND key=?2`, c.id, key)
 	rawDoc := sgbucket.BucketDocument{
 		Xattrs: make(map[string][]byte, len(xattrKeys)),
 	}
 	var xattrs []byte
-	err := scan(row, &rawDoc.Body, &rawDoc.Cas, &xattrs, &rawDoc.IsTombstone, &revSeqNo)
+	err := scan(row, &rawDoc.Body, &rawDoc.Cas, &xattrs, &rawDoc.IsTombstone, &revSeqNo, &exp)
 	if err != nil {
 		return sgbucket.BucketDocument{}, remapKeyError(err, key)
 	}
@@ -437,6 +439,9 @@ func (c *Collection) getRawWithXattrs(key string, xattrKeys []string) (sgbucket.
 			continue
 		} else if xattrKey == virtualXattrName+"."+virtualXattrCAS {
 			rawDoc.Xattrs[xattrKey] = []byte(fmt.Sprintf(`"0x%s"`, strconv.FormatUint(rawDoc.Cas, 16)))
+			continue
+		} else if xattrKey == virtualXattrName+"."+virtualXattrExpiry {
+			rawDoc.Xattrs[xattrKey] = []byte(strconv.FormatUint(uint64(exp), 10))
 			continue
 		}
 		val, ok := xattrMap[xattrKey]
