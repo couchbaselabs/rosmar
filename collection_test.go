@@ -1088,6 +1088,30 @@ func TestVirtualXattr(t *testing.T) {
 		expectedCAS := fmt.Sprintf(`0x%s`, strconv.FormatUint(cas, 16))
 		require.Equal(t, expectedCAS, fetchedCAS)
 	})
+
+	// $document.exptime returns the doc expiry as a JSON number (always present, even when 0).
+	t.Run("expiry", func(t *testing.T) {
+		xattrKey := fmt.Sprintf("%s.%s", virtualXattrName, virtualXattrExpiry)
+
+		// Doc written above has no expiry — should return 0.
+		xattrs, _, err := col.GetXattrs(ctx, docID, []string{xattrKey})
+		require.NoError(t, err)
+		require.Contains(t, xattrs, xattrKey)
+		var fetchedExpiry uint32
+		require.NoError(t, json.Unmarshal(xattrs[xattrKey], &fetchedExpiry))
+		require.Equal(t, uint32(0), fetchedExpiry)
+
+		// Write a doc with a real expiry and confirm it round-trips.
+		expDocID := docID + "_exp"
+		expiry := uint32(time.Now().Add(1 * time.Hour).Unix())
+		require.NoError(t, col.Set(ctx, expDocID, expiry, nil, []byte(`{"foo": 2}`)))
+
+		xattrs, _, err = col.GetXattrs(ctx, expDocID, []string{xattrKey})
+		require.NoError(t, err)
+		require.Contains(t, xattrs, xattrKey)
+		require.NoError(t, json.Unmarshal(xattrs[xattrKey], &fetchedExpiry))
+		require.Equal(t, expiry, fetchedExpiry)
+	})
 }
 
 func assertRevSeqNo(t *testing.T, col *Collection, docID string, expectedRevSeqNo string) {
