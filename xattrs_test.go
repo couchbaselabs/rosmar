@@ -1802,9 +1802,9 @@ func requireDocFoundError(t testing.TB, err error) {
 }
 
 func TestSetHierarchicalPath(t *testing.T) {
-	ctx := testCtx(t)
+	ctx := t.Context()
 	ensureNoLeakedFeeds(t)
-	coll := makeTestBucket(t).DefaultDataStore().(*Collection)
+	coll := makeTestBucket(t).DefaultDataStore(ctx).(*Collection)
 
 	addToCollection(t, coll, "key", 0, "value")
 

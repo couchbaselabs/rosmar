@@ -669,7 +669,7 @@ func (c *Collection) writeWithXattrs(
 					existingVal = json.RawMessage(`{}`)
 				}
 
-				xattrPayload := xattrsPayload[xattrKey]
+				xattrPayload := xattrsPayload[xattrPath]
 				xattrPayload.setMarshaled(existingVal)
 				parsedXattr, err := xattrPayload.unmarshalJSON()
 				if err != nil {
@@ -680,22 +680,37 @@ func (c *Collection) writeWithXattrs(
 		}
 
 		for xattrPath, xattrVal := range xattrsPayload {
+			subpaths := strings.Split(xattrPath, ".")
+			xattrKey := subpaths[0]
+			subpath := subpaths[1:]
 			if !xattrVal.isNil() {
 				// Set xattr:
-				if opts.insertXattr && xattrs[xattrPath] != nil {
+				if opts.insertXattr && xattrs[xattrKey] != nil {
 					return nil, sgbucket.ErrPathExists
 				}
-				subpaths := strings.Split(xattrPath, ".")
-				xattrKey := subpaths[0]
-				// Expand any macros specified in the mutateOpts
-				parsedXattr := parsedXattrs[xattrKey]
-				fmt.Printf("parsedXattrBefore=%s\n", parsedXattr)
-				err := upsertSubdocValue(parsedXattr, subpaths[1:], xattrVal)
-				if err != nil {
-					return nil, fmt.Errorf("Could not set subpath %q in xattr %q: %w", xattrPath, xattrKey, err)
+				var parsedXattr any
+				if len(subpath) > 0 {
+					// Hierarchical path: upsert sub-path into existing (or new) xattr map
+					var baseMap map[string]any
+					if existing, ok := xattrs[xattrKey]; ok {
+						if err := json.Unmarshal(existing, &baseMap); err != nil {
+							return nil, err
+						}
+					} else {
+						baseMap = make(map[string]any)
+					}
+					newVal, err := xattrVal.unmarshalJSON()
+					if err != nil {
+						return nil, err
+					}
+					if err := upsertSubdocValue(baseMap, subpath, newVal); err != nil {
+						return nil, fmt.Errorf("could not set subpath %q in xattr %q: %w", xattrPath, xattrKey, err)
+					}
+					parsedXattr = baseMap
+				} else {
+					// Non-hierarchical: use the already-parsed value
+					parsedXattr = parsedXattrs[xattrPath]
 				}
-				fmt.Printf("subpaths=%q, xattrKey=%q, xattrVal=%s\n", subpaths, xattrKey, xattrVal)
-				fmt.Printf("parsedXattrAfter=%s\n", parsedXattr)
 				if err := e.expandXattrMacros(xattrKey, parsedXattr, mutateOpts); err != nil {
 					return nil, err
 				}
@@ -708,13 +723,13 @@ func (c *Collection) writeWithXattrs(
 				if xattrs == nil {
 					xattrs = semiParsedXattrs{}
 				}
-				xattrs[xattrPath] = json.RawMessage(rawXattr)
-				trace("\t\tSet doc %q xattr %q = %s", key, xattrPath, rawXattr)
+				xattrs[xattrKey] = json.RawMessage(rawXattr)
+				trace("\t\tSet doc %q xattr %q = %s", key, xattrKey, rawXattr)
 			} else {
 				// Delete xattr:
-				if _, found := xattrs[xattrPath]; found {
-					delete(xattrs, xattrPath)
-					trace("\t\tDeleted doc %q xattr %s", key, xattrPath)
+				if _, found := xattrs[xattrKey]; found {
+					delete(xattrs, xattrKey)
+					trace("\t\tDeleted doc %q xattr %s", key, xattrKey)
 				} else {
 					return nil, fmt.Errorf("%s: %w", xattrPath, sgbucket.ErrPathNotFound)
 				}

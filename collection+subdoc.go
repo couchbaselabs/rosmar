@@ -13,7 +13,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"maps"
 	"strings"
 
 	sgbucket "github.com/couchbase/sg-bucket"
@@ -171,20 +170,6 @@ func upsertSubdocValue(source any, path []string, value interface{}) error {
 		delete(parent, lastPath)
 	}
 	return nil
-}
-
-func upsertXattrSubdocValue(source map[string]any, paths []string, value any) map[string]any {
-	var output map[string]any
-	maps.Copy(output, source)
-	m := source
-	for i, path := range paths {
-		for j, subpath := range paths {
-			if j <= i {
-				m = m[subpath]
-			}
-		}
-	}
-	return output
 }
 
 var (
