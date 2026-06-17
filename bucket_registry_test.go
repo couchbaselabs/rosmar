@@ -17,17 +17,18 @@ import (
 )
 
 func TestReuseInMemoryBucket(t *testing.T) {
+	ctx := t.Context()
 	ensureNoLeaks(t)
 	bucketName := strings.ToLower(t.Name())
 	bucket1, err := OpenBucket(InMemoryURL, bucketName, CreateOrOpen)
 	require.NoError(t, err)
 	key := "foo"
 	body := []byte("bar")
-	require.NoError(t, bucket1.DefaultDataStore().Set("foo", 0, nil, body))
+	require.NoError(t, bucket1.DefaultDataStore(ctx).Set(ctx, "foo", 0, nil, body))
 	require.False(t, bucket1.closed)
-	bucket1.Close(testCtx(t))
+	bucket1.Close(ctx)
 	defer func() {
-		assert.NoError(t, bucket1.CloseAndDelete(testCtx(t)))
+		assert.NoError(t, bucket1.CloseAndDelete(ctx))
 		assert.Len(t, GetBucketNames(), 0)
 	}()
 
@@ -39,7 +40,7 @@ func TestReuseInMemoryBucket(t *testing.T) {
 	require.False(t, bucket2.closed)
 	require.Equal(t, []string{bucketName}, GetBucketNames())
 	var bucket2Body []byte
-	_, err = bucket2.DefaultDataStore().Get(key, &bucket2Body)
+	_, err = bucket2.DefaultDataStore(ctx).Get(ctx, key, &bucket2Body)
 	require.NoError(t, err)
 	require.Equal(t, body, bucket2Body)
 }
@@ -51,12 +52,12 @@ func TestBucketRegistryRefCountPersistentBucket(t *testing.T) {
 	bucket, err := OpenBucket(uriFromPath(t.TempDir()+"/"+bucketName), bucketName, CreateOrOpen)
 	require.NoError(t, err)
 	require.Equal(t, []string{bucketName}, GetBucketNames())
-	bucket.Close(testCtx(t))
+	bucket.Close(t.Context())
 	require.Len(t, GetBucketNames(), 0)
 }
 
 func TestDuplicateBucketNamesDifferentPath(t *testing.T) {
-
+	ctx := t.Context()
 	ensureNoLeaks(t)
 
 	bucketName := strings.ToLower(t.Name())
@@ -71,13 +72,13 @@ func TestDuplicateBucketNamesDifferentPath(t *testing.T) {
 	require.ErrorContains(t, err, "already exists")
 	require.Equal(t, []string{bucketName}, GetBucketNames())
 
-	bucket1.Close(testCtx(t))
+	bucket1.Close(ctx)
 	require.Len(t, GetBucketNames(), 0)
 
 	// Close bucket1, should allow bucket2 to open
 	bucket2, err = OpenBucket(path2, bucketName, CreateOrOpen)
 	require.NoError(t, err)
-	defer bucket2.Close(testCtx(t))
+	defer bucket2.Close(ctx)
 	require.Equal(t, []string{bucketName}, GetBucketNames())
 
 }

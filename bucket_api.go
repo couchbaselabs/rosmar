@@ -40,7 +40,7 @@ func (bucket *Bucket) setName(name string) error {
 }
 
 // The universally unique ID given the bucket when it was created.
-func (bucket *Bucket) UUID() (string, error) {
+func (bucket *Bucket) UUID(_ context.Context) (string, error) {
 	var uuid string
 	row := bucket.db().QueryRow(`SELECT uuid FROM bucket;`)
 	err := scan(row, &uuid)
@@ -51,7 +51,10 @@ func (bucket *Bucket) UUID() (string, error) {
 func (bucket *Bucket) Close(_ context.Context) {
 	traceEnter("Bucket.Close", "%s", bucket)
 
-	unregisterBucket(bucket)
+	err := unregisterBucket(bucket)
+	if err != nil {
+		warn("Error closing bucket %s: %v", bucket, err)
+	}
 
 	bucket.mutex.Lock()
 	defer bucket.mutex.Unlock()
@@ -60,23 +63,33 @@ func (bucket *Bucket) Close(_ context.Context) {
 }
 
 // _closeSqliteDB closes the underlying sqlite database and shuts down dcpFeeds. Must have a lock to call this function.
-func (bucket *Bucket) _closeSqliteDB() {
+func (bucket *Bucket) _closeSqliteDB() error {
 	bucket.expManager.stop()
 	for _, c := range bucket.collections {
 		c.close()
 	}
-	if bucket.sqliteDB != nil {
-		bucket.sqliteDB.Close()
-		bucket.collections = nil
+	if bucket.sqliteDB == nil {
+		return nil
 	}
+	bucket.collections = nil
+	return bucket.sqliteDB.Close()
 }
 
 // Closes a bucket and deletes its directory and files (unless it's in-memory.)
-func (bucket *Bucket) CloseAndDelete(ctx context.Context) (err error) {
+func (bucket *Bucket) CloseAndDelete(ctx context.Context) error {
+	err := bucket.close()
+	if err != nil {
+		return err
+	}
+	return deleteBucket(ctx, bucket)
+}
+
+// close a bucket, but doesn't delete its directory or files.
+func (bucket *Bucket) close() error {
 	bucket.mutex.Lock()
 	defer bucket.mutex.Unlock()
-	bucket._closeSqliteDB()
-	return deleteBucket(ctx, bucket)
+	defer func() { bucket.closed = true }()
+	return bucket._closeSqliteDB()
 }
 
 func (bucket *Bucket) IsSupported(feature sgbucket.BucketStoreFeature) bool {
@@ -95,12 +108,16 @@ func (bucket *Bucket) IsSupported(feature sgbucket.BucketStoreFeature) bool {
 		return false
 	case sgbucket.BucketStoreFeatureMultiXattrSubdocOperations:
 		return true
+	case sgbucket.BucketStoreFeatureSystemCollections:
+		return true
+	case sgbucket.BucketStoreFeatureRangeScan:
+		return true
 	default:
 		return false
 	}
 }
 
-func (bucket *Bucket) GetMaxVbno() (uint16, error) {
+func (bucket *Bucket) GetMaxVbno(_ context.Context) (uint16, error) {
 	return kNumVbuckets, nil
 }
 
@@ -111,11 +128,16 @@ var defaultDataStoreName = sgbucket.DataStoreNameImpl{
 	Collection: sgbucket.DefaultCollection,
 }
 
+var mobileSystemDataStoreName = sgbucket.DataStoreNameImpl{
+	Scope:      sgbucket.MobileSystemScope,
+	Collection: sgbucket.MobileSystemCollection,
+}
+
 func validateName(name sgbucket.DataStoreName) (sgbucket.DataStoreNameImpl, error) {
 	return sgbucket.NewValidDataStoreName(name.ScopeName(), name.CollectionName())
 }
 
-func (bucket *Bucket) DefaultDataStore() sgbucket.DataStore {
+func (bucket *Bucket) DefaultDataStore(_ context.Context) sgbucket.DataStore {
 	traceEnter("DefaultDataStore", "%s", bucket)
 	collection, err := bucket.getOrCreateCollection(defaultDataStoreName, true)
 	if err != nil {
@@ -125,7 +147,17 @@ func (bucket *Bucket) DefaultDataStore() sgbucket.DataStore {
 	return collection
 }
 
-func (bucket *Bucket) NamedDataStore(name sgbucket.DataStoreName) (sgbucket.DataStore, error) {
+func (bucket *Bucket) MobileSystemDataStore(_ context.Context) sgbucket.DataStore {
+	traceEnter("MobileSystemDataStore", "%s", bucket)
+	collection, err := bucket.getOrCreateCollection(mobileSystemDataStoreName, true)
+	if err != nil {
+		warn("MobileSystemDataStore() ->  %v", err)
+		return nil
+	}
+	return collection
+}
+
+func (bucket *Bucket) NamedDataStore(_ context.Context, name sgbucket.DataStoreName) (sgbucket.DataStore, error) {
 	traceEnter("NamedDataStore", "%s.%s", bucket, name)
 	sc, err := validateName(name)
 	if err != nil {
@@ -152,7 +184,7 @@ func (bucket *Bucket) CreateDataStore(_ context.Context, name sgbucket.DataStore
 	return err
 }
 
-func (bucket *Bucket) DropDataStore(name sgbucket.DataStoreName) error {
+func (bucket *Bucket) DropDataStore(_ context.Context, name sgbucket.DataStoreName) error {
 	traceEnter("DropDataStore", "%s.%s", bucket, name)
 	sc, err := validateName(name)
 	if err != nil {
@@ -162,7 +194,7 @@ func (bucket *Bucket) DropDataStore(name sgbucket.DataStoreName) error {
 }
 
 // ListDataStores returns a list of the names of all data stores in the bucket.
-func (bucket *Bucket) ListDataStores() (result []sgbucket.DataStoreName, err error) {
+func (bucket *Bucket) ListDataStores(_ context.Context) (result []sgbucket.DataStoreName, err error) {
 	traceEnter("ListDataStores", "%s", bucket)
 	defer func() { traceExit("ListDataStores", err, "%v", result) }()
 	rows, err := bucket.db().Query(`SELECT id, scope, name FROM collections ORDER BY id`)
@@ -174,6 +206,10 @@ func (bucket *Bucket) ListDataStores() (result []sgbucket.DataStoreName, err err
 		var scope, name string
 		if err := rows.Scan(&id, &scope, &name); err != nil {
 			return nil, err
+		}
+		if scope == sgbucket.MobileSystemScope {
+			// skip listing _system._mobile in available data stores
+			continue
 		}
 		result = append(result, sgbucket.DataStoreNameImpl{Scope: scope, Collection: name})
 	}
@@ -309,8 +345,8 @@ func (bucket *Bucket) nextExpiration() (exp Exp, err error) {
 }
 
 // expireDocuments immediately deletes all expired documents in this bucket.
-func (bucket *Bucket) expireDocuments() (int64, error) {
-	names, err := bucket.ListDataStores()
+func (bucket *Bucket) expireDocuments(ctx context.Context) (int64, error) {
+	names, err := bucket.ListDataStores(ctx)
 	if err != nil {
 		return 0, err
 	}
@@ -318,7 +354,7 @@ func (bucket *Bucket) expireDocuments() (int64, error) {
 	for _, name := range names {
 		if coll, err := bucket.getCollection(name.(sgbucket.DataStoreNameImpl)); err != nil {
 			return 0, err
-		} else if n, err := coll.expireDocuments(); err != nil {
+		} else if n, err := coll.expireDocuments(ctx); err != nil {
 			return 0, err
 		} else {
 			count += n
@@ -334,11 +370,11 @@ func (bucket *Bucket) _scheduleExpiration() {
 	}
 }
 
-func (bucket *Bucket) doExpiration() {
+func (bucket *Bucket) doExpiration(ctx context.Context) {
 	bucket.expManager._clearNext()
 
 	debug("EXP: Running scheduled expiration...")
-	if n, err := bucket.expireDocuments(); err != nil {
+	if n, err := bucket.expireDocuments(ctx); err != nil {
 		// If there's an error expiring docs, it means there is a programming error of a leaked expiration goroutine.
 		panic("Error expiring docs: " + err.Error())
 	} else if n > 0 {

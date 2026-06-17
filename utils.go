@@ -88,11 +88,6 @@ func ifelse[T any](cond bool, ifTrue T, ifFalse T) T {
 	}
 }
 
-// Quick and dirty heuristic to check whether a byte-string is a JSON object.
-func looksLikeJSON(data []byte) bool {
-	return len(data) >= 2 && data[0] == '{' && data[len(data)-1] == '}'
-}
-
 //////// ENCODING / DECODING VALUES:
 
 //////// CRC32:
@@ -187,3 +182,7 @@ var (
 	_ error = &ErrUnimplemented{}
 	_ error = &DatabaseError{}
 )
+
+func ptr[T any](v T) *T {
+	return &v
+}

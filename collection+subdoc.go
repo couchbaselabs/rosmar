@@ -19,7 +19,7 @@ import (
 	sgbucket "github.com/couchbase/sg-bucket"
 )
 
-func (c *Collection) GetSubDocRaw(_ context.Context, key string, subdocKey string) (value []byte, casOut uint64, err error) {
+func (c *Collection) GetSubDocRaw(ctx context.Context, key string, subdocKey string) (value []byte, casOut uint64, err error) {
 	// TODO: Use SQLite JSON syntax to get the property
 	traceEnter("SubdocGetRaw", "%q, %q", key, subdocKey)
 	defer func() { traceExit("SubdocGetRaw", err, "0x%x, %s", casOut, value) }()
@@ -30,7 +30,7 @@ func (c *Collection) GetSubDocRaw(_ context.Context, key string, subdocKey strin
 	}
 
 	var fullDoc map[string]interface{}
-	casOut, err = c.Get(key, &fullDoc)
+	casOut, err = c.Get(ctx, key, &fullDoc)
 	if err != nil {
 		return
 	}
@@ -44,14 +44,14 @@ func (c *Collection) GetSubDocRaw(_ context.Context, key string, subdocKey strin
 	return value, casOut, err
 }
 
-func (c *Collection) SubdocInsert(_ context.Context, key string, subdocKey string, cas CAS, value any) (err error) {
+func (c *Collection) SubdocInsert(ctx context.Context, key string, subdocKey string, cas CAS, value any) (err error) {
 	traceEnter("SubdocInsert", "%q, %q, %d", key, subdocKey, cas)
-	_, err = c.subdocWrite(key, subdocKey, cas, value, true)
+	_, err = c.subdocWrite(ctx, key, subdocKey, cas, value, true)
 	traceExit("SubdocInsert", err, "ok")
 	return
 }
 
-func (c *Collection) WriteSubDoc(_ context.Context, key string, subdocKey string, cas CAS, rawValue []byte) (casOut CAS, err error) {
+func (c *Collection) WriteSubDoc(ctx context.Context, key string, subdocKey string, cas CAS, rawValue []byte) (casOut CAS, err error) {
 	traceEnter("WriteSubDoc", "%q, %q, %d, %s", key, subdocKey, cas, rawValue)
 	var value any
 	if len(rawValue) > 0 {
@@ -59,13 +59,13 @@ func (c *Collection) WriteSubDoc(_ context.Context, key string, subdocKey string
 			return 0, err
 		}
 	}
-	casOut, err = c.subdocWrite(key, subdocKey, cas, value, false)
+	casOut, err = c.subdocWrite(ctx, key, subdocKey, cas, value, false)
 	traceExit("WriteSubDoc", err, "0x%x", casOut)
 	return
 }
 
 // common code of SubdocInsert and WriteSubDoc
-func (c *Collection) subdocWrite(key string, subdocKey string, cas CAS, value any, insert bool) (casOut CAS, err error) {
+func (c *Collection) subdocWrite(ctx context.Context, key string, subdocKey string, cas CAS, value any, insert bool) (casOut CAS, err error) {
 	path, err := parseSubdocPath(subdocKey)
 	if err != nil {
 		return
@@ -74,7 +74,7 @@ func (c *Collection) subdocWrite(key string, subdocKey string, cas CAS, value an
 	for {
 		// Get doc (if it exists) to change sub doc value in
 		var fullDoc map[string]any
-		casOut, err = c.Get(key, &fullDoc)
+		casOut, err = c.Get(ctx, key, &fullDoc)
 		var missingError sgbucket.MissingError
 		if err != nil && !(!insert && errors.As(err, &missingError)) {
 			return 0, err // SubdocInsert should fail if doc doesn't exist; WriteSubDoc doesn't
@@ -107,7 +107,7 @@ func (c *Collection) subdocWrite(key string, subdocKey string, cas CAS, value an
 		}
 
 		// Write full doc back to collection
-		casOut, err = c.WriteCas(key, 0, casOut, fullDoc, 0)
+		casOut, err = c.WriteCas(ctx, key, 0, casOut, fullDoc, 0)
 
 		if err != nil {
 			if _, ok := err.(sgbucket.CasMismatchErr); ok && cas == 0 {

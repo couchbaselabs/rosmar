@@ -8,8 +8,11 @@
 
 # config file for golangci-lint
 
+version: "2"
+
 run:
   timeout: 3m
+  allow-parallel-runners: true
 
 linters:
   enable:
@@ -18,10 +21,8 @@ linters:
     - errcheck # Errcheck is a program for checking for unchecked errors in go programs. These unchecked errors can be critical bugs in some cases
     #- goconst # Finds repeated strings that could be replaced by a constant
     #- gocritic # The most opinionated Go source code linter
-    - goimports # Goimports does everything that gofmt does. Additionally it checks unused imports
     #- goprintffuncname # Checks that printf-like functions are named with `f` at the end
     #- gosec # (gas) Inspects source code for security problems
-    #- gosimple # (megacheck) Linter for Go source code that specializes in simplifying a code
     - govet # (vet, vetshadow) Vet examines Go source code and reports suspicious constructs, such as Printf calls whose arguments do not align with the format string
     #- ineffassign # Detects when assignments to existing variables are not used
     #- nakedret # Finds naked returns in functions greater than a specified function length
@@ -43,14 +44,12 @@ linters:
     - gocyclo # Computes and checks the cyclomatic complexity of functions
     - godot # Check if comments end in a period
     - godox # Tool for detection of FIXME, TODO and other comment keywords
-    - gofmt # Gofmt checks whether code was gofmt-ed. By default this tool runs with -s option to check for code simplification
     - gomodguard # Allow and block list linter for direct Go module dependencies.
     - lll # Reports long lines
     - misspell # Finds commonly misspelled English words in comments
     - nestif # Reports deeply nested if statements
     - nolintlint # Reports ill-formed or insufficient nolint directives
     - rowserrcheck # checks whether Err of rows is checked successfully
-    - stylecheck # Stylecheck is a replacement for golint
     - testpackage # linter that makes you use a separate _test package
     - unused # (megacheck) Checks Go code for unused constants, variables, functions and types
     - whitespace # Tool for detection of leading and trailing whitespace
@@ -62,7 +61,6 @@ linters:
     - gocritic # The most opinionated Go source code linter
     - goprintffuncname # Checks that printf-like functions are named with `f` at the end
     - gosec # (gas) Inspects source code for security problems
-    - gosimple # (megacheck) Linter for Go source code that specializes in simplifying a code
     - ineffassign # Detects when assignments to existing variables are not used
     - nakedret # Finds naked returns in functions greater than a specified function length
     - prealloc # Finds slice declarations that could potentially be preallocated
@@ -70,6 +68,8 @@ linters:
     - staticcheck # (megacheck) Staticcheck is a go vet on steroids, applying a ton of static analysis checks
     - unconvert # Remove unnecessary type conversions
     - unparam # Reports unused function parameters
+  exclusions:
+    generated: strict
 
 # Don't enable fieldalignment, changing the field alignment requires checking to see if anyone uses constructors
 # without names. If there is a memory issue on a specific field, that is best found with a heap profile.
@@ -78,9 +78,9 @@ linters:
 #    enable:
 #      - fieldalignment # detect Go structs that would take less memory if their fields were sorted
 
-# Disable goconst in test files, often we have duplicated strings across tests, but don't make sense as constants.
-issues:
-  exclude-rules:
-    - path: (_test\.go|utilities_testing\.go)
-      linters:
-        - goconst
+
+formatters:
+  enable:
+    - goimports
+  exclusions:
+    generated: strict

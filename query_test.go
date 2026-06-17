@@ -19,24 +19,25 @@ import (
 )
 
 func TestQuery(t *testing.T) {
-	ctx := testCtx(t)
+	ctx := t.Context()
 	ensureNoLeakedFeeds(t)
-	coll := makeTestBucket(t).DefaultDataStore().(*Collection)
-	require.NoError(t, setJSON(coll, "doc1", `{"key": "k1", "value": "v1"}`))
-	require.NoError(t, setJSON(coll, "doc2", `{"key": "k2", "value": "v2"}`))
-	require.NoError(t, setJSON(coll, "doc3", `{"key": 17, "value": ["v3"]}`))
-	require.NoError(t, setJSON(coll, "doc4", `{"key": [17, false], "value": null}`))
-	require.NoError(t, setJSON(coll, "doc5", `{"key": [17, true], "value": null}`))
+	coll := makeTestBucket(t).DefaultDataStore(ctx).(*Collection)
+	require.NoError(t, setJSON(ctx, coll, "doc1", `{"key": "k1", "value": "v1"}`))
+	require.NoError(t, setJSON(ctx, coll, "doc2", `{"key": "k2", "value": "v2"}`))
+	require.NoError(t, setJSON(ctx, coll, "doc3", `{"key": 17, "value": ["v3"]}`))
+	require.NoError(t, setJSON(ctx, coll, "doc4", `{"key": [17, false], "value": null}`))
+	require.NoError(t, setJSON(ctx, coll, "doc5", `{"key": [17, true], "value": null}`))
 
 	// Add a matching doc to a different collection, to make sure the query won't return it:
-	coll2, err := coll.bucket.NamedDataStore(sgbucket.DataStoreNameImpl{Scope: "foo", Collection: "bar"})
+	coll2, err := coll.bucket.NamedDataStore(ctx, sgbucket.DataStoreNameImpl{Scope: "foo", Collection: "bar"})
 	require.NoError(t, err)
-	require.NoError(t, setJSON(coll2, "doc1", `{"key": "k1", "value": "v1"}`))
+	require.NoError(t, setJSON(ctx, coll2, "doc1", `{"key": "k1", "value": "v1"}`))
 
-	require.True(t, coll.CanQueryIn(sgbucket.SQLiteLanguage))
-	require.False(t, coll.CanQueryIn(sgbucket.SQLppLanguage))
+	require.True(t, coll.CanQueryIn(ctx, sgbucket.SQLiteLanguage))
+	require.False(t, coll.CanQueryIn(ctx, sgbucket.SQLppLanguage))
 
 	rows, err := coll.Query(
+		ctx,
 		sgbucket.SQLiteLanguage,
 		`SELECT json_quote(id) as id, json_quote(body->'key') as key FROM $_keyspace
 		 WHERE body->>'value' IS NOT NULL ORDER BY id`,
@@ -59,20 +60,21 @@ func TestQuery(t *testing.T) {
 		assert.Equal(t, 2, len(row))
 		n++
 	}
-	assert.NoError(t, rows.Close(), "rows.Close")
+	assert.NoError(t, rows.Close(ctx), "rows.Close")
 	assert.Equal(t, 3, n)
 }
 
 func TestCreateIndex(t *testing.T) {
+	ctx := t.Context()
 	ensureNoLeakedFeeds(t)
-	coll := makeTestBucket(t).DefaultDataStore().(*Collection)
+	coll := makeTestBucket(t).DefaultDataStore(ctx).(*Collection)
 
-	err := coll.CreateIndex("myIndex", "body->>'location'", "body->>'location' NOT NULL")
+	err := coll.CreateIndex(ctx, "myIndex", "body->>'location'", "body->>'location' NOT NULL")
 	require.NoError(t, err)
-	err = coll.CreateIndex("myIndex", "body->>'location'", "body->>'location' NOT NULL")
+	err = coll.CreateIndex(ctx, "myIndex", "body->>'location'", "body->>'location' NOT NULL")
 	assert.Equal(t, err, sgbucket.ErrIndexExists)
 
-	exp, err := coll.ExplainQuery(`SELECT id, body->>'location' FROM $_keyspace WHERE body->>'location' > 100`, nil)
+	exp, err := coll.ExplainQuery(ctx, `SELECT id, body->>'location' FROM $_keyspace WHERE body->>'location' > 100`, nil)
 	require.NoError(t, err)
 	require.NotNil(t, exp)
 

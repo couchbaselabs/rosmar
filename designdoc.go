@@ -16,7 +16,7 @@ import (
 	sgbucket "github.com/couchbase/sg-bucket"
 )
 
-func (c *Collection) GetDDocs() (ddocs map[string]sgbucket.DesignDoc, err error) {
+func (c *Collection) GetDDocs(_ context.Context) (ddocs map[string]sgbucket.DesignDoc, err error) {
 	traceEnter("GetDDocs", "")
 	return c.getDDocs(c.db())
 }
@@ -49,7 +49,7 @@ func (c *Collection) getDDocs(q queryable) (ddocs map[string]sgbucket.DesignDoc,
 	return ddocs, rows.Close()
 }
 
-func (c *Collection) GetDDoc(designDoc string) (ddoc sgbucket.DesignDoc, err error) {
+func (c *Collection) GetDDoc(_ context.Context, designDoc string) (ddoc sgbucket.DesignDoc, err error) {
 	traceEnter("GetDDoc", "%q", designDoc)
 	ddoc, err = c.getDDoc(c.db(), designDoc)
 	traceExit("GetDDoc", err, "ok")
@@ -108,7 +108,7 @@ func (c *Collection) PutDDoc(_ context.Context, designDoc string, ddoc *sgbucket
 	return err
 }
 
-func (c *Collection) DeleteDDoc(designDoc string) error {
+func (c *Collection) DeleteDDoc(_ context.Context, designDoc string) error {
 	traceEnter("DeleteDDoc", "%q", designDoc)
 	err := c.bucket.inTransaction(func(txn *sql.Tx) error {
 		result, err := txn.Exec(`DELETE FROM designDocs WHERE collection=?1 AND name=?2`,

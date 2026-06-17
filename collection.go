@@ -76,7 +76,7 @@ func (c *Collection) GetCollectionID() uint32 {
 
 //// Raw:
 
-func (c *Collection) Exists(key string) (exists bool, err error) {
+func (c *Collection) Exists(_ context.Context, key string) (exists bool, err error) {
 	traceEnter("Exists", "%q", key)
 	exists, err = c.exists(c.db(), key)
 	traceExit("Exists", err, "%v", exists)
@@ -95,7 +95,7 @@ func (c *Collection) exists(q queryable, key string) (exists bool, err error) {
 	return
 }
 
-func (c *Collection) GetRaw(key string) (val []byte, cas CAS, err error) {
+func (c *Collection) GetRaw(_ context.Context, key string) (val []byte, cas CAS, err error) {
 	traceEnter("GetRaw", "%q", key)
 	val, cas, _, err = c.getRaw(c.db(), key)
 	traceExit("GetRaw", err, "cas=0x%x, val %s", cas, val)
@@ -120,25 +120,43 @@ func (c *Collection) getRaw(q queryable, key string) (val []byte, cas CAS, revSe
 	return
 }
 
-func (c *Collection) GetAndTouchRaw(key string, exp Exp) (val []byte, cas CAS, err error) {
+func (c *Collection) GetAndTouchRaw(_ context.Context, key string, exp Exp) (val []byte, cas CAS, err error) {
 	traceEnter("GetAndTouchRaw", "%q, %d", key, exp)
-	err = c.withNewCas(func(txn *sql.Tx, newCas CAS) (e *event, err error) {
-		exp = absoluteExpiry(exp)
+	newExp := absoluteExpiry(exp)
+	err = c.bucket.inTransaction(func(txn *sql.Tx) error {
 		var revSeqNo int64
-		val, cas, revSeqNo, err = c.getRaw(txn, key)
-		if err == nil {
-			revSeqNo++
-			_, err = txn.Exec(`UPDATE documents SET exp=?1, revSeqNo=?2 WHERE key=?3`, exp, revSeqNo, key)
+		var existingExp Exp
+		row := txn.QueryRow(
+			`SELECT value, cas, revSeqNo, exp FROM documents WHERE collection=? AND key=?`,
+			c.id, key)
+		if scanErr := scan(row, &val, &cas, &revSeqNo, &existingExp); scanErr != nil {
+			return remapKeyError(scanErr, key)
 		}
-		return
+		if val == nil {
+			return sgbucket.MissingError{Key: key}
+		}
+		if existingExp == newExp {
+			// No-op: CB Server's KV TOUCH/GAT preserves CAS and revSeqNo when the
+			// expiry value is unchanged.
+			return nil
+		}
+		revSeqNo++
+		newCas := CAS(hlc.Now())
+		if _, execErr := txn.Exec(
+			`UPDATE documents SET exp=?1, revSeqNo=?2, cas=?3 WHERE collection=?4 AND key=?5`,
+			newExp, revSeqNo, newCas, c.id, key); execErr != nil {
+			return execErr
+		}
+		cas = newCas
+		return c.setLastCas(txn, newCas)
 	})
 	traceExit("GetAndTouchRaw", err, "cas=0x%x, val %s", cas, val)
 	return
 }
 
-func (c *Collection) AddRaw(key string, exp Exp, val []byte) (added bool, err error) {
+func (c *Collection) AddRaw(_ context.Context, key string, exp Exp, val []byte) (added bool, err error) {
 	traceEnter("AddRaw", "%q, %d, ...", key, exp)
-	added, err = c.add(key, exp, val, looksLikeJSON(val))
+	added, err = c.add(key, exp, val, json.Valid(val))
 	traceExit("AddRaw", err, "%v", added)
 	return
 }
@@ -179,9 +197,9 @@ func (c *Collection) add(key string, exp Exp, val []byte, isJSON bool) (added bo
 	return
 }
 
-func (c *Collection) SetRaw(key string, exp Exp, opts *sgbucket.UpsertOptions, val []byte) (err error) {
+func (c *Collection) SetRaw(_ context.Context, key string, exp Exp, opts *sgbucket.UpsertOptions, val []byte) (err error) {
 	traceEnter("SetRaw", "%q, %d, ...", key, exp)
-	err = c.set(key, exp, opts, val, false)
+	err = c.set(key, exp, opts, val, json.Valid(val))
 	traceExit("SetRaw", err, "ok")
 	return
 }
@@ -248,7 +266,7 @@ func (c *Collection) _set(txn *sql.Tx, key string, exp Exp, opts *sgbucket.Upser
 
 // Non-Raw:
 
-func (c *Collection) Get(key string, outVal any) (cas CAS, err error) {
+func (c *Collection) Get(_ context.Context, key string, outVal any) (cas CAS, err error) {
 	traceEnter("Get", "%q", key)
 	cas, err = c.get(c.db(), key, outVal)
 	traceExit("Get", err, "cas=0x%x, val %v", cas, outVal)
@@ -272,12 +290,12 @@ func (c *Collection) GetExpiry(_ context.Context, key string) (exp Exp, err erro
 	return
 }
 
-func (c *Collection) Touch(key string, exp Exp) (cas CAS, err error) {
-	_, cas, err = c.GetAndTouchRaw(key, exp)
+func (c *Collection) Touch(ctx context.Context, key string, exp Exp) (cas CAS, err error) {
+	_, cas, err = c.GetAndTouchRaw(ctx, key, exp)
 	return
 }
 
-func (c *Collection) Add(key string, exp Exp, val any) (added bool, err error) {
+func (c *Collection) Add(_ context.Context, key string, exp Exp, val any) (added bool, err error) {
 	traceEnter("Add", "%q, %v", key, val)
 	raw, err := encodeAsRaw(val, true)
 	if err == nil {
@@ -287,7 +305,7 @@ func (c *Collection) Add(key string, exp Exp, val any) (added bool, err error) {
 	return
 }
 
-func (c *Collection) Set(key string, exp Exp, opts *sgbucket.UpsertOptions, val any) (err error) {
+func (c *Collection) Set(_ context.Context, key string, exp Exp, opts *sgbucket.UpsertOptions, val any) (err error) {
 	traceEnter("Set", "%q, %v", key, val)
 	raw, err := encodeAsRaw(val, true)
 	if err == nil {
@@ -297,7 +315,7 @@ func (c *Collection) Set(key string, exp Exp, opts *sgbucket.UpsertOptions, val 
 	return
 }
 
-func (c *Collection) WriteCas(key string, exp Exp, cas CAS, val any, opt sgbucket.WriteOptions) (casOut CAS, err error) {
+func (c *Collection) WriteCas(_ context.Context, key string, exp Exp, cas CAS, val any, opt sgbucket.WriteOptions) (casOut CAS, err error) {
 	// Marshal JSON if the value is not raw:
 	isJSON := (opt&(sgbucket.Raw|sgbucket.Append) == 0)
 	raw, err := encodeAsRaw(val, isJSON)
@@ -311,6 +329,8 @@ func (c *Collection) WriteCas(key string, exp Exp, cas CAS, val any, opt sgbucke
 	}
 	if raw == nil {
 		isJSON = false
+	} else if (opt & sgbucket.Raw) != 0 {
+		isJSON = json.Valid(raw)
 	}
 
 	err = c.withNewCas(func(txn *sql.Tx, newCas CAS) (*event, error) {
@@ -384,7 +404,7 @@ func (c *Collection) WriteCas(key string, exp Exp, cas CAS, val any, opt sgbucke
 }
 
 // Remove creates a document tombstone. It removes the document's value and user xattrs.
-func (c *Collection) Remove(key string, cas CAS) (casOut CAS, err error) {
+func (c *Collection) Remove(_ context.Context, key string, cas CAS) (casOut CAS, err error) {
 	traceEnter("Remove", "%q, 0x%x", key, cas)
 	casOut, err = c.remove(key, &cas)
 	traceExit("Remove", err, "0x%x", casOut)
@@ -392,7 +412,7 @@ func (c *Collection) Remove(key string, cas CAS) (casOut CAS, err error) {
 }
 
 // Delete creates a document tombstone. It removes the document's value and user xattrs. Equivalent to Remove without a CAS check.
-func (c *Collection) Delete(key string) (err error) {
+func (c *Collection) Delete(_ context.Context, key string) (err error) {
 	traceEnter("Delete", "%q", key)
 	_, err = c.remove(key, nil)
 	traceExit("Delete", err, "ok")
@@ -451,7 +471,7 @@ func (c *Collection) remove(key string, ifCas *CAS) (casOut CAS, err error) {
 	return
 }
 
-func (c *Collection) Update(key string, exp Exp, callback sgbucket.UpdateFunc) (casOut CAS, err error) {
+func (c *Collection) Update(ctx context.Context, key string, exp Exp, callback sgbucket.UpdateFunc) (casOut CAS, err error) {
 	traceEnter("Update", "%q, %d, ...", key, exp)
 	defer func() { traceExit("Update", err, "0x%x", casOut) }()
 	for {
@@ -484,7 +504,7 @@ func (c *Collection) Update(key string, exp Exp, callback sgbucket.UpdateFunc) (
 		}
 
 		var opt sgbucket.WriteOptions = 0 // Hardcoded; callback cannot customize this :(
-		casOut, err = c.WriteCas(key, exp, cas, raw, opt)
+		casOut, err = c.WriteCas(ctx, key, exp, cas, raw, opt)
 		if err == nil {
 			break
 		} else if _, ok := err.(sgbucket.CasMismatchErr); !ok {
@@ -494,7 +514,7 @@ func (c *Collection) Update(key string, exp Exp, callback sgbucket.UpdateFunc) (
 	return casOut, err
 }
 
-func (c *Collection) Incr(key string, amt, deflt uint64, exp Exp) (result uint64, err error) {
+func (c *Collection) Incr(_ context.Context, key string, amt, deflt uint64, exp Exp) (result uint64, err error) {
 	traceEnter("Incr", "%q, %d, %d", key, amt, deflt)
 	err = c.withNewCas(func(txn *sql.Tx, newCas CAS) (*event, error) {
 		exp = absoluteExpiry(exp)
@@ -503,6 +523,12 @@ func (c *Collection) Incr(key string, amt, deflt uint64, exp Exp) (result uint64
 		if err == nil {
 			result += amt
 		} else if _, ok := err.(sgbucket.MissingError); ok {
+			// Couchbase Server's gocb adapter casts def to int64; values > math.MaxInt64
+			// become negative, which gocbcore interprets as "do not create if absent"
+			// and the server returns KEY_ENOENT. Match that behavior here.
+			if int64(deflt) < 0 {
+				return nil, sgbucket.MissingError{Key: key}
+			}
 			result = deflt
 		} else {
 			return nil, err
@@ -536,7 +562,7 @@ func (c *Collection) IsSupported(feature sgbucket.BucketStoreFeature) bool {
 //////// EXPIRATION
 
 // _expireDocuments immediately deletes all expired documents in this collection.
-func (c *Collection) expireDocuments() (count int64, err error) {
+func (c *Collection) expireDocuments(ctx context.Context) (count int64, err error) {
 	traceEnter("_expireDocuments", "")
 	defer func() { traceExit("_expireDocuments", err, "%d", count) }()
 
@@ -563,7 +589,7 @@ func (c *Collection) expireDocuments() (count int64, err error) {
 	// will get its own db connection, and if the db only supports one connection (i.e. in-memory)
 	// having both queries active would deadlock.)
 	for _, key := range keys {
-		if c.Delete(key) == nil {
+		if c.Delete(ctx, key) == nil {
 			count++
 		}
 	}
@@ -620,6 +646,10 @@ func (c *Collection) withNewCas(fn func(txn *sql.Tx, newCas CAS) (*event, error)
 		c.postNewEvent(e)
 	}
 	return err
+}
+
+func (c *Collection) GetMaxVbno(ctx context.Context) (uint16, error) {
+	return c.bucket.GetMaxVbno(ctx)
 }
 
 var (

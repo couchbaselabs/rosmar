@@ -15,6 +15,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 
 	sgbucket "github.com/couchbase/sg-bucket"
@@ -25,6 +26,8 @@ type semiParsedXattrs = map[string]json.RawMessage
 const (
 	virtualXattrName     = "$document"
 	virtualXattrRevSeqNo = "revid"
+	virtualXattrCAS      = "CAS"
+	virtualXattrExpiry   = "exptime"
 )
 
 // ////// SGBUCKET XATTR STORE INTERFACE
@@ -410,12 +413,13 @@ func (c *Collection) getRawXattrs(txn *sql.Tx, key string) ([]byte, error) {
 // get doc's raw body and an xattr.
 func (c *Collection) getRawWithXattrs(key string, xattrKeys []string) (sgbucket.BucketDocument, error) {
 	var revSeqNo int64
-	row := c.db().QueryRow(`SELECT value, cas, xattrs, tombstone, revSeqNo FROM documents WHERE collection=?1 AND key=?2`, c.id, key)
+	var exp Exp
+	row := c.db().QueryRow(`SELECT value, cas, xattrs, tombstone, revSeqNo, exp FROM documents WHERE collection=?1 AND key=?2`, c.id, key)
 	rawDoc := sgbucket.BucketDocument{
 		Xattrs: make(map[string][]byte, len(xattrKeys)),
 	}
 	var xattrs []byte
-	err := scan(row, &rawDoc.Body, &rawDoc.Cas, &xattrs, &rawDoc.IsTombstone, &revSeqNo)
+	err := scan(row, &rawDoc.Body, &rawDoc.Cas, &xattrs, &rawDoc.IsTombstone, &revSeqNo, &exp)
 	if err != nil {
 		return sgbucket.BucketDocument{}, remapKeyError(err, key)
 	}
@@ -428,10 +432,16 @@ func (c *Collection) getRawWithXattrs(key string, xattrKeys []string) (sgbucket.
 	}
 	for _, xattrKey := range xattrKeys {
 		if xattrKey == virtualXattrName {
-			rawDoc.Xattrs[xattrKey] = []byte(fmt.Sprintf(`{"value_crc32c":%q,"%s":"%d"}`, encodedCRC32c(rawDoc.Body), virtualXattrRevSeqNo, revSeqNo))
+			rawDoc.Xattrs[xattrKey] = []byte(fmt.Sprintf(`{"value_crc32c":%q,"%s":"%d","%s":"0x%s"}`, encodedCRC32c(rawDoc.Body), virtualXattrRevSeqNo, revSeqNo, virtualXattrCAS, strconv.FormatUint(rawDoc.Cas, 16)))
 			continue
 		} else if xattrKey == virtualXattrName+"."+virtualXattrRevSeqNo {
 			rawDoc.Xattrs[xattrKey] = []byte(fmt.Sprintf(`"%d"`, revSeqNo))
+			continue
+		} else if xattrKey == virtualXattrName+"."+virtualXattrCAS {
+			rawDoc.Xattrs[xattrKey] = []byte(fmt.Sprintf(`"0x%s"`, strconv.FormatUint(rawDoc.Cas, 16)))
+			continue
+		} else if xattrKey == virtualXattrName+"."+virtualXattrExpiry {
+			rawDoc.Xattrs[xattrKey] = []byte(strconv.FormatUint(uint64(exp), 10))
 			continue
 		}
 		val, ok := xattrMap[xattrKey]
@@ -441,6 +451,81 @@ func (c *Collection) getRawWithXattrs(key string, xattrKeys []string) (sgbucket.
 		rawDoc.Xattrs[xattrKey] = val
 	}
 	return rawDoc, nil
+}
+
+// TouchXattrWithCas sets a single property within a system xattr, bumping the document's CAS.
+//
+// This mirrors gocb's subdoc UpsertSpec with StoreSemanticsReplace and a CAS guard, which is what Couchbase Server
+// uses to touch a metadata document during config rollback (see XattrBootstrapPersistence.touchConfigRollback in sync_gateway).
+//
+// Returns sgbucket.CasMismatchErr if the supplied cas does not match the current document CAS.
+func (c *Collection) TouchXattrWithCas(_ context.Context, key, xattrKey, property, value string, cas CAS) (casOut CAS, err error) {
+	traceEnter("TouchXattrWithCas", "%q, %q.%q=%q, cas=0x%x", key, xattrKey, property, value, cas)
+	defer func() { traceExit("TouchXattrWithCas", err, "0x%x", casOut) }()
+	err = c.withNewCas(func(txn *sql.Tx, newCas CAS) (*event, error) {
+		var (
+			bodyVal     []byte
+			existingCas CAS
+			rawXattrs   []byte
+			revSeqNo    uint64
+			isJSON      bool
+		)
+		row := txn.QueryRow(`SELECT value, cas, xattrs, revSeqNo, isJSON FROM documents WHERE collection=?1 AND key=?2`, c.id, key)
+		if err := scan(row, &bodyVal, &existingCas, &rawXattrs, &revSeqNo, &isJSON); err != nil {
+			return nil, remapKeyError(err, key)
+		}
+		if existingCas != cas {
+			return nil, sgbucket.CasMismatchErr{Expected: cas, Actual: existingCas}
+		}
+
+		xattrMap := semiParsedXattrs{}
+		if len(rawXattrs) > 0 {
+			if err := json.Unmarshal(rawXattrs, &xattrMap); err != nil {
+				return nil, fmt.Errorf("document %q xattrs are unreadable: %w", key, err)
+			}
+		}
+		// JSON-merge xattrKey.<property> = value into the xattr blob.
+		var xattrBody map[string]json.RawMessage
+		if existing, ok := xattrMap[xattrKey]; ok && len(existing) > 0 {
+			if err := json.Unmarshal(existing, &xattrBody); err != nil {
+				return nil, fmt.Errorf("document %q xattr %q is not a JSON object: %w", key, xattrKey, err)
+			}
+		}
+		if xattrBody == nil {
+			xattrBody = map[string]json.RawMessage{}
+		}
+		encodedValue, err := json.Marshal(value)
+		if err != nil {
+			return nil, err
+		}
+		xattrBody[property] = encodedValue
+		encodedXattr, err := json.Marshal(xattrBody)
+		if err != nil {
+			return nil, err
+		}
+		xattrMap[xattrKey] = encodedXattr
+		newRawXattrs, err := json.Marshal(xattrMap)
+		if err != nil {
+			return nil, err
+		}
+
+		revSeqNo++
+		if _, err := txn.Exec(
+			`UPDATE documents SET cas=?1, xattrs=?2, revSeqNo=?3 WHERE collection=?4 AND key=?5`,
+			newCas, newRawXattrs, revSeqNo, c.id, key); err != nil {
+			return nil, err
+		}
+		casOut = newCas
+		return &event{
+			key:      key,
+			value:    bodyVal,
+			cas:      newCas,
+			isJSON:   isJSON,
+			xattrs:   newRawXattrs,
+			revSeqNo: revSeqNo,
+		}, nil
+	})
+	return
 }
 
 // DeleteWithXattrs a document's body and xattrs simultaneously.
