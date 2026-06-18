@@ -152,6 +152,9 @@ func evalSubdocPath(subdoc any, path []string) (any, error) {
 // Creates intermediate maps for any missing path components, matching Couchbase Server subdoc upsert behavior.
 // Returns ErrPathMismatch if a non-leaf path entry exists but is not a map.
 func upsertSubdocValue(source any, path []string, value interface{}) error {
+	if len(path) == 0 {
+		return fmt.Errorf("subdoc path must not be empty")
+	}
 	current, ok := source.(map[string]any)
 	if !ok {
 		return sgbucket.ErrPathMismatch

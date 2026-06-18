@@ -10,6 +10,7 @@ package rosmar
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"testing"
 
@@ -1503,6 +1504,50 @@ func TestWriteWithXattrsInsertAndDeleteError(t *testing.T) {
 	require.ErrorIs(t, err, sgbucket.ErrDeleteXattrOnDocumentInsert)
 }
 
+// TestWriteWithXattrsInvalidPaths verifies that writeWithXattrs rejects unsupported or
+// malformed xattr key paths before making any changes.
+func TestWriteWithXattrsInvalidPaths(t *testing.T) {
+	ctx := t.Context()
+	col := makeTestBucket(t).DefaultDataStore(ctx)
+	body := []byte(`{"foo": "bar"}`)
+
+	invalidPaths := []string{
+		"",           // empty key
+		"$document",  // starts with $
+		"xattr$key",  // $ in key
+		"xattr[0]",   // [ in key
+		"xattr]key",  // ] in key
+		"_sync..rev", // empty component from consecutive dots
+		"_sync.",     // trailing dot → empty component
+		"._sync",     // leading dot → empty top-level key
+		"_sync.$rev", // $ in sub-path
+		"_sync.[0]",  // [ in sub-path
+		"_sync.rev]", // ] in sub-path
+	}
+
+	for _, path := range invalidPaths {
+		t.Run(fmt.Sprintf("path=%q", path), func(t *testing.T) {
+			_, err := col.WriteWithXattrs(ctx, t.Name(), 0, 0, body,
+				map[string][]byte{path: []byte(`{"a":"b"}`)}, nil, nil)
+			require.Error(t, err, "expected error for xattr path %q", path)
+		})
+	}
+}
+
+// TestSetXattrsInvalidPaths verifies SetXattrs also rejects bad paths.
+func TestSetXattrsInvalidPaths(t *testing.T) {
+	ctx := t.Context()
+	coll := makeTestBucket(t).DefaultDataStore(ctx).(*Collection)
+	require.NoError(t, coll.SetRaw(ctx, t.Name(), 0, nil, []byte(`{"a":1}`)))
+
+	for _, path := range []string{"$key", "key[0]", "_sync..rev", "_sync."} {
+		t.Run(fmt.Sprintf("path=%q", path), func(t *testing.T) {
+			_, err := coll.SetXattrs(ctx, t.Name(), map[string][]byte{path: []byte(`{}`)})
+			require.Error(t, err, "expected error for xattr path %q", path)
+		})
+	}
+}
+
 func requireXattrsEqual(t testing.TB, expected map[string][]byte, actual map[string][]byte) {
 	require.Len(t, actual, len(expected), "Expected xattrs to be the same length %v, got %v", expected, actual)
 	for k, v := range expected {
@@ -1854,6 +1899,37 @@ func TestDeleteSubDocPaths(t *testing.T) {
 	assert.ErrorAs(t, err, &missingErr)
 }
 
+// TestDeleteSubDocPathsEmptyComponents verifies that paths with empty components
+// (trailing dot, consecutive dots) are rejected rather than silently misbehaving.
+func TestDeleteSubDocPathsEmptyComponents(t *testing.T) {
+	ctx := t.Context()
+	ensureNoLeakedFeeds(t)
+	coll := makeTestBucket(t).DefaultDataStore(ctx).(*Collection)
+
+	const docID = "doc1"
+	_, err := coll.WriteWithXattrs(ctx, docID, 0, 0, []byte(`{"val":1}`),
+		map[string][]byte{syncXattrName: []byte(`{"rev":"1-a"}`)}, nil, nil)
+	require.NoError(t, err)
+
+	for _, path := range []string{
+		syncXattrName + ".",     // trailing dot → empty field component
+		syncXattrName + "..rev", // consecutive dots → empty intermediate component
+		syncXattrName + ".rev.", // trailing dot after field name
+	} {
+		t.Run(path, func(t *testing.T) {
+			err := coll.DeleteSubDocPaths(ctx, docID, path)
+			require.Error(t, err, "expected error for path %q", path)
+		})
+	}
+
+	// Document should be untouched.
+	xvMap, _, err := coll.GetXattrs(ctx, docID, []string{syncXattrName})
+	require.NoError(t, err)
+	var got map[string]any
+	require.NoError(t, json.Unmarshal(xvMap[syncXattrName], &got))
+	assert.Equal(t, "1-a", got["rev"])
+}
+
 // TestSetXattrsNestedPath verifies that SetXattrs with a dotted path creates intermediate
 // maps when they don't exist, matching Couchbase Server subdoc upsert behavior.
 // This is the behavior exercised by attachment compaction mark phase, which stamps a nested
@@ -2002,4 +2078,102 @@ func TestGetXattrsSubPath(t *testing.T) {
 	require.Error(t, err)
 	var missingErr sgbucket.XattrMissingError
 	assert.ErrorAs(t, err, &missingErr)
+}
+
+// TestGetXattrsSubPathErrors verifies that getRawWithXattrs returns real errors for corrupt
+// xattr JSON and for path mismatches, rather than silently returning XattrMissingError.
+func TestGetXattrsSubPathErrors(t *testing.T) {
+	ctx := t.Context()
+	ensureNoLeakedFeeds(t)
+	coll := makeTestBucket(t).DefaultDataStore(ctx).(*Collection)
+
+	const (
+		docID    = "doc"
+		xattrKey = "_sync"
+	)
+
+	// Write a doc with a valid xattr so we have a document to corrupt.
+	require.NoError(t, coll.SetRaw(ctx, docID, 0, nil, []byte(`{}`)))
+	_, err := coll.SetXattrs(ctx, docID, map[string][]byte{
+		xattrKey: []byte(`{"seq":1}`),
+	})
+	require.NoError(t, err)
+
+	t.Run("corrupt parent xattr JSON returns error", func(t *testing.T) {
+		_, dbErr := coll.db().Exec(
+			`UPDATE documents SET xattrs=? WHERE collection=? AND key=?`,
+			[]byte(`{"`+xattrKey+`": not-json}`), coll.id, docID)
+		require.NoError(t, dbErr)
+
+		_, _, getErr := coll.GetXattrs(ctx, docID, []string{xattrKey + ".seq"})
+		require.Error(t, getErr, "expected error for corrupt parent xattr JSON")
+		// Must NOT silently become XattrMissingError.
+		var corruptMissingErr sgbucket.XattrMissingError
+		assert.False(t, errors.As(getErr, &corruptMissingErr), "corrupt JSON should not produce XattrMissingError, got: %v", getErr)
+	})
+
+	// Restore a valid xattr for the remaining subtests.
+	_, err = coll.db().Exec(
+		`UPDATE documents SET xattrs=? WHERE collection=? AND key=?`,
+		[]byte(`{"`+xattrKey+`":{"seq":1}}`), coll.id, docID)
+	require.NoError(t, err)
+
+	t.Run("missing sub-key returns XattrMissingError", func(t *testing.T) {
+		// ErrPathNotFound is expected and should surface as XattrMissingError.
+		_, _, getErr := coll.GetXattrs(ctx, docID, []string{xattrKey + ".nonexistent"})
+		require.Error(t, getErr)
+		var notFoundMissingErr sgbucket.XattrMissingError
+		assert.ErrorAs(t, getErr, &notFoundMissingErr)
+	})
+
+	t.Run("path mismatch returns error", func(t *testing.T) {
+		// _sync.seq is a number, not an object; asking for _sync.seq.child is ErrPathMismatch.
+		_, _, getErr := coll.GetXattrs(ctx, docID, []string{xattrKey + ".seq.child"})
+		require.Error(t, getErr, "expected error for path mismatch")
+		var mismatchMissingErr sgbucket.XattrMissingError
+		assert.False(t, errors.As(getErr, &mismatchMissingErr), "path mismatch should not produce XattrMissingError, got: %v", getErr)
+	})
+}
+
+// TestDeleteSubDocPathsFeedEvent verifies that the DCP feed event emitted by DeleteSubDocPaths
+// carries the correct Expiry and Opcode — a regression test for the bug where exp and tombstone
+// were not read from the database so events always had Expiry=0 and Opcode=FeedOpMutation.
+func TestDeleteSubDocPathsFeedEvent(t *testing.T) {
+	ctx := t.Context()
+	ensureNoLeakedFeeds(t)
+	bucket := makeTestBucket(t)
+	coll := bucket.DefaultDataStore(ctx).(*Collection)
+
+	const (
+		aliveDocID     = "alive-doc"
+		tombstoneDocID = "tombstone-doc"
+		xattrKey       = syncXattrName
+		exp            = uint32(0x70000000) // far-future absolute expiry
+	)
+	xattrBody := []byte(`{"rev":"1-a","extra":"keep"}`)
+
+	// Create an alive doc with a non-zero expiry.
+	_, err := coll.WriteWithXattrs(ctx, aliveDocID, exp, 0, []byte(`{"val":1}`),
+		map[string][]byte{xattrKey: xattrBody}, nil, nil)
+	require.NoError(t, err)
+
+	// Create a tombstone with the same xattr.
+	_, err = coll.WriteTombstoneWithXattrs(ctx, tombstoneDocID, exp, 0,
+		map[string][]byte{xattrKey: xattrBody}, nil, false, nil)
+	require.NoError(t, err)
+
+	events, _ := startFeed(t, bucket)
+
+	// DeleteSubDocPaths on the alive doc — event must be FeedOpMutation with the correct expiry.
+	err = coll.DeleteSubDocPaths(ctx, aliveDocID, xattrKey+".rev")
+	require.NoError(t, err)
+	e := <-events
+	assert.Equal(t, sgbucket.FeedOpMutation, e.Opcode, "alive doc should emit FeedOpMutation")
+	assert.Equal(t, uint32(exp), e.Expiry, "alive doc expiry should be preserved in feed event")
+
+	// DeleteSubDocPaths on the tombstone — event must be FeedOpDeletion.
+	err = coll.DeleteSubDocPaths(ctx, tombstoneDocID, xattrKey+".rev")
+	require.NoError(t, err)
+	e = <-events
+	assert.Equal(t, sgbucket.FeedOpDeletion, e.Opcode, "tombstone doc should emit FeedOpDeletion")
 }

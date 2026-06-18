@@ -266,6 +266,34 @@ func TestEvalSubdocPaths(t *testing.T) {
 	assert.Error(t, err)
 }
 
+func TestUpsertSubdocValue(t *testing.T) {
+	doc := map[string]any{"a": map[string]any{"b": 1}}
+
+	// Empty path must return an error, not panic.
+	err := upsertSubdocValue(doc, []string{}, "v")
+	require.Error(t, err)
+
+	// Non-map source must return ErrPathMismatch.
+	err = upsertSubdocValue("not-a-map", []string{"x"}, "v")
+	require.ErrorIs(t, err, sgbucket.ErrPathMismatch)
+
+	// Single-component path sets the key.
+	require.NoError(t, upsertSubdocValue(doc, []string{"x"}, "hello"))
+	assert.Equal(t, "hello", doc["x"])
+
+	// Multi-component path navigates into existing nested map.
+	require.NoError(t, upsertSubdocValue(doc, []string{"a", "c"}, 99))
+	assert.Equal(t, 99, doc["a"].(map[string]any)["c"])
+
+	// Multi-component path creates intermediate maps for missing components.
+	require.NoError(t, upsertSubdocValue(doc, []string{"new", "nested", "key"}, true))
+	assert.Equal(t, true, doc["new"].(map[string]any)["nested"].(map[string]any)["key"])
+
+	// Nil value deletes the key.
+	require.NoError(t, upsertSubdocValue(doc, []string{"x"}, nil))
+	assert.NotContains(t, doc, "x")
+}
+
 func initSubDocTest(t *testing.T) (CAS, sgbucket.DataStore) {
 	ensureNoLeaks(t)
 

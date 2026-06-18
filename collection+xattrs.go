@@ -152,12 +152,14 @@ func (c *Collection) DeleteSubDocPaths(
 			cas: newCas,
 		}
 		var revSeqNo uint64
-		row := txn.QueryRow(`SELECT value, isJSON, xattrs, revSeqNo FROM documents WHERE collection=?1 AND key=?2`, c.id, key)
+		var tombstone int
+		row := txn.QueryRow(`SELECT value, isJSON, xattrs, revSeqNo, exp, tombstone FROM documents WHERE collection=?1 AND key=?2`, c.id, key)
 		var rawXattrs []byte
-		err := scan(row, &e.value, &e.isJSON, &rawXattrs, &revSeqNo)
+		err := scan(row, &e.value, &e.isJSON, &rawXattrs, &revSeqNo, &e.exp, &tombstone)
 		if err != nil {
 			return nil, remapKeyError(err, key)
 		}
+		e.isDeletion = tombstone != 0
 		if rawXattrs, err = deleteSubDocPaths(rawXattrs, xattrKeys...); err != nil {
 			return nil, err
 		}
@@ -456,12 +458,19 @@ func (c *Collection) getRawWithXattrs(key string, xattrKeys []string) (sgbucket.
 				subPath := strings.Split(xattrKey[dotIdx+1:], ".")
 				if parentVal, parentOk := xattrMap[parentKey]; parentOk {
 					var parentObj any
-					if jsonErr := json.Unmarshal(parentVal, &parentObj); jsonErr == nil {
-						if subVal, pathErr := evalSubdocPath(parentObj, subPath); pathErr == nil {
-							if encoded, marshalErr := json.Marshal(subVal); marshalErr == nil {
-								rawDoc.Xattrs[xattrKey] = encoded
-							}
+					if jsonErr := json.Unmarshal(parentVal, &parentObj); jsonErr != nil {
+						return sgbucket.BucketDocument{}, fmt.Errorf("document %q xattr %q is unreadable: %w", key, parentKey, jsonErr)
+					}
+					subVal, pathErr := evalSubdocPath(parentObj, subPath)
+					if pathErr != nil && !errors.Is(pathErr, sgbucket.ErrPathNotFound) {
+						return sgbucket.BucketDocument{}, fmt.Errorf("document %q xattr path %q: %w", key, xattrKey, pathErr)
+					}
+					if pathErr == nil {
+						encoded, marshalErr := json.Marshal(subVal)
+						if marshalErr != nil {
+							return sgbucket.BucketDocument{}, fmt.Errorf("document %q xattr path %q value is unserializable: %w", key, xattrKey, marshalErr)
 						}
+						rawDoc.Xattrs[xattrKey] = encoded
 					}
 				}
 			}
@@ -603,6 +612,11 @@ func (c *Collection) writeWithXattrs(
 	opts writeXattrOptions, // option flags
 	mutateOpts *sgbucket.MutateInOptions, // expiry and macro expansion options
 ) (casOut CAS, err error) {
+	for xattrPath := range xattrsPayload {
+		if err := validateXattrPath(xattrPath); err != nil {
+			return 0, err
+		}
+	}
 	parsedXattrs := make(map[string]any, len(xattrsPayload))
 	for xattrKey, xattrVal := range xattrsPayload {
 		if !xattrVal.isNil() {
@@ -778,12 +792,42 @@ func (c *Collection) writeWithXattrs(
 
 // Checks an xattr key: Rosmar doesn't support multi-component key paths for xattrs.
 func validateXattrKey(xattrKey string) error {
+	if xattrKey == "" {
+		return fmt.Errorf("rosmar does not support empty Xattr key")
+	}
 	if strings.ContainsAny(xattrKey, `$.[]`) {
 		// TODO: Support hierarchical paths
 		return fmt.Errorf("rosmar does not support Xattr key `%s`", xattrKey)
-	} else {
+	}
+	return nil
+}
+
+// validateXattrPath validates a full xattr path, which may include dot-separated sub-path components.
+// The top-level key must not be empty or contain $, [, ].
+// Sub-path components must not be empty (e.g., from ".." or leading/trailing ".") and must not
+// contain $, [, ].
+func validateXattrPath(xattrPath string) error {
+	dotIdx := strings.IndexByte(xattrPath, '.')
+	topKey := xattrPath
+	if dotIdx >= 0 {
+		topKey = xattrPath[:dotIdx]
+	}
+	if err := validateXattrKey(topKey); err != nil {
+		return err
+	}
+	if dotIdx < 0 {
 		return nil
 	}
+	subPath := xattrPath[dotIdx+1:]
+	if strings.ContainsAny(subPath, `$[]`) {
+		return fmt.Errorf("rosmar does not support Xattr sub-path `%s`", xattrPath)
+	}
+	for _, component := range strings.Split(subPath, ".") {
+		if component == "" {
+			return fmt.Errorf("xattr path `%s` contains an empty path component", xattrPath)
+		}
+	}
+	return nil
 }
 
 // Converts an Xattr key to a SQLite JSON path.
@@ -835,20 +879,15 @@ func deleteSubDocPaths(rawXattrs []byte, paths ...string) ([]byte, error) {
 
 // deleteSubDocPath removes a single subdoc path from the raw xattrs JSON.
 func deleteSubDocPath(rawXattrs []byte, path string) ([]byte, error) {
+	if err := validateXattrPath(path); err != nil {
+		return nil, err
+	}
 	dotIdx := strings.IndexByte(path, '.')
 	if dotIdx < 0 {
 		return removeXattrs(rawXattrs, path)
 	}
 	xattrName := path[:dotIdx]
 	fieldPath := path[dotIdx+1:]
-	if err := validateXattrKey(xattrName); err != nil {
-		return nil, err
-	}
-	// Reject special characters that indicate unsupported path expressions (arrays, etc.),
-	// but allow '.' for multi-level navigation.
-	if strings.ContainsAny(fieldPath, `$[]`) {
-		return nil, fmt.Errorf("rosmar does not support Xattr sub-path `%s`", path)
-	}
 	keys := strings.Split(fieldPath, ".")
 	var outerErr error
 	result := processXattrs(rawXattrs, func(xattrs semiParsedXattrs) {
