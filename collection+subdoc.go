@@ -149,25 +149,29 @@ func evalSubdocPath(subdoc any, path []string) (any, error) {
 }
 
 // Upserts the value at the specified JSON path in the source.
-// Returns ErrPathMismatch if non-leaf path entries do not exist.
+// Creates intermediate maps for any missing path components, matching Couchbase Server subdoc upsert behavior.
+// Returns ErrPathMismatch if a non-leaf path entry exists but is not a map.
 func upsertSubdocValue(source any, path []string, value interface{}) error {
-
-	// eval path exists
-	subdoc, err := evalSubdocPath(source, path[0:len(path)-1])
-	if err != nil {
-		return err
-	}
-
-	parent, ok := subdoc.(map[string]any)
+	current, ok := source.(map[string]any)
 	if !ok {
 		return sgbucket.ErrPathMismatch
 	}
-	// add value to map:
+	for _, prop := range path[:len(path)-1] {
+		child, exists := current[prop]
+		if !exists || child == nil {
+			child = map[string]any{}
+			current[prop] = child
+		}
+		current, ok = child.(map[string]any)
+		if !ok {
+			return sgbucket.ErrPathMismatch
+		}
+	}
 	lastPath := path[len(path)-1]
 	if value != nil {
-		parent[lastPath] = value
+		current[lastPath] = value
 	} else {
-		delete(parent, lastPath)
+		delete(current, lastPath)
 	}
 	return nil
 }

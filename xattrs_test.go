@@ -1817,3 +1817,189 @@ func TestSetHierarchicalPath(t *testing.T) {
 	require.NoError(t, json.Unmarshal(xattrs["_sync"], &syncXattr))
 	require.Equal(t, map[string]string{"foo": "bar"}, syncXattr)
 }
+
+func TestDeleteSubDocPaths(t *testing.T) {
+	ctx := t.Context()
+	ensureNoLeakedFeeds(t)
+	coll := makeTestBucket(t).DefaultDataStore(ctx).(*Collection)
+
+	// Dotted path: delete a field within an xattr.
+	const docID = "doc1"
+	_, err := coll.WriteWithXattrs(ctx, docID, 0, 0, []byte(`{"val":"subdoc"}`),
+		map[string][]byte{syncXattrName: []byte(`{"rev":"1-a","other":"keep"}`)}, nil, nil)
+	require.NoError(t, err)
+
+	err = coll.DeleteSubDocPaths(ctx, docID, syncXattrName+".rev")
+	require.NoError(t, err)
+
+	xvMap, _, err := coll.GetXattrs(ctx, docID, []string{syncXattrName})
+	require.NoError(t, err)
+	var got map[string]any
+	require.NoError(t, json.Unmarshal(xvMap[syncXattrName], &got))
+	assert.NotContains(t, got, "rev")
+	assert.Equal(t, "keep", got["other"])
+
+	// Simple path: delete an entire xattr.
+	const docID2 = "doc2"
+	_, err = coll.WriteWithXattrs(ctx, docID2, 0, 0, []byte(`{"val":"simple"}`),
+		map[string][]byte{syncXattrName: []byte(`{"rev":"1-a"}`)}, nil, nil)
+	require.NoError(t, err)
+
+	err = coll.DeleteSubDocPaths(ctx, docID2, syncXattrName)
+	require.NoError(t, err)
+
+	_, _, err = coll.GetXattrs(ctx, docID2, []string{syncXattrName})
+	require.Error(t, err)
+	var missingErr sgbucket.XattrMissingError
+	assert.ErrorAs(t, err, &missingErr)
+}
+
+// TestSetXattrsNestedPath verifies that SetXattrs with a dotted path creates intermediate
+// maps when they don't exist, matching Couchbase Server subdoc upsert behavior.
+// This is the behavior exercised by attachment compaction mark phase, which stamps a nested
+// path like "_sync-compact.compactID.<runID>" on attachment docs that may not yet have
+// the xattr at all.
+func TestSetXattrsNestedPath(t *testing.T) {
+	ctx := t.Context()
+	ensureNoLeakedFeeds(t)
+	coll := makeTestBucket(t).DefaultDataStore(ctx).(*Collection)
+
+	const (
+		docID    = "att-doc"
+		xattrKey = "_sync-compact"
+		compactIDKey = "compactID"
+		runID    = "run1"
+	)
+	nestedPath := xattrKey + "." + compactIDKey + "." + runID
+
+	// Create a raw doc with no xattrs, like a legacy attachment document.
+	require.NoError(t, coll.SetRaw(ctx, docID, 0, nil, []byte(`{}`)))
+
+	// SetXattrs with a three-level dot path on a doc that has no xattrs yet should
+	// create all intermediate maps.
+	_, err := coll.SetXattrs(ctx, docID, map[string][]byte{
+		nestedPath: []byte(`"1234567890"`),
+	})
+	require.NoError(t, err)
+
+	// The top-level xattr should now contain the nested structure.
+	xattrs, _, err := coll.GetXattrs(ctx, docID, []string{xattrKey})
+	require.NoError(t, err)
+	require.Contains(t, xattrs, xattrKey)
+
+	var xattrValue map[string]any
+	require.NoError(t, json.Unmarshal(xattrs[xattrKey], &xattrValue))
+	compactID, ok := xattrValue[compactIDKey]
+	require.True(t, ok, "expected %q key in xattr", compactIDKey)
+	runMap, ok := compactID.(map[string]any)
+	require.True(t, ok)
+	assert.Contains(t, runMap, runID)
+
+	// A second SetXattrs call with a different runID should add to the existing map
+	// without overwriting the first entry.
+	const runID2 = "run2"
+	nestedPath2 := xattrKey + "." + compactIDKey + "." + runID2
+	_, err = coll.SetXattrs(ctx, docID, map[string][]byte{
+		nestedPath2: []byte(`"9999999999"`),
+	})
+	require.NoError(t, err)
+
+	xattrs, _, err = coll.GetXattrs(ctx, docID, []string{xattrKey})
+	require.NoError(t, err)
+	require.NoError(t, json.Unmarshal(xattrs[xattrKey], &xattrValue))
+	compactID, ok = xattrValue[compactIDKey]
+	require.True(t, ok)
+	runMap, ok = compactID.(map[string]any)
+	require.True(t, ok)
+	assert.Contains(t, runMap, runID, "first run entry should still be present")
+	assert.Contains(t, runMap, runID2, "second run entry should be present")
+}
+
+// TestDeleteSubDocPathsDeepNested verifies that DeleteSubDocPaths supports three-level
+// dotted paths (xattrName.fieldName.subFieldName), as used by attachment compaction cleanup.
+func TestDeleteSubDocPathsDeepNested(t *testing.T) {
+	ctx := t.Context()
+	ensureNoLeakedFeeds(t)
+	coll := makeTestBucket(t).DefaultDataStore(ctx).(*Collection)
+
+	const (
+		docID        = "att-doc"
+		xattrKey     = "_sync-compact"
+		compactIDKey = "compactID"
+		run1         = "run1"
+		run2         = "run2"
+	)
+
+	// Set up a document with a three-level nested xattr structure:
+	// _sync-compact = {"compactID": {"run1": 111, "run2": 222}}
+	_, err := coll.WriteWithXattrs(ctx, docID, 0, 0, []byte(`{}`),
+		map[string][]byte{
+			xattrKey: []byte(`{"` + compactIDKey + `":{"` + run1 + `":111,"` + run2 + `":222}}`),
+		}, nil, nil)
+	require.NoError(t, err)
+
+	// Delete just run1 via a three-level path.
+	err = coll.DeleteSubDocPaths(ctx, docID, xattrKey+"."+compactIDKey+"."+run1)
+	require.NoError(t, err)
+
+	xvMap, _, err := coll.GetXattrs(ctx, docID, []string{xattrKey})
+	require.NoError(t, err)
+	var got map[string]any
+	require.NoError(t, json.Unmarshal(xvMap[xattrKey], &got))
+	compactIDs, ok := got[compactIDKey].(map[string]any)
+	require.True(t, ok, "compactID field should be a map")
+	assert.NotContains(t, compactIDs, run1, "run1 should have been deleted")
+	assert.Contains(t, compactIDs, run2, "run2 should still be present")
+
+	// Delete run2; compactID map is now empty but xattr still exists.
+	err = coll.DeleteSubDocPaths(ctx, docID, xattrKey+"."+compactIDKey+"."+run2)
+	require.NoError(t, err)
+
+	xvMap, _, err = coll.GetXattrs(ctx, docID, []string{xattrKey})
+	require.NoError(t, err)
+	require.NoError(t, json.Unmarshal(xvMap[xattrKey], &got))
+	compactIDs, ok = got[compactIDKey].(map[string]any)
+	require.True(t, ok, "compactID field should still be an (empty) map")
+	assert.Empty(t, compactIDs)
+}
+
+// TestGetXattrsSubPath verifies that GetXattrs supports dotted sub-path keys such as
+// "_sync-compact.compactID", returning the value at that nested location keyed by the
+// full dotted path — matching Couchbase Server subdoc read behaviour.
+func TestGetXattrsSubPath(t *testing.T) {
+	ctx := t.Context()
+	ensureNoLeakedFeeds(t)
+	coll := makeTestBucket(t).DefaultDataStore(ctx).(*Collection)
+
+	const (
+		docID        = "att-doc"
+		xattrKey     = "_sync-compact"
+		compactIDKey = "compactID"
+		run1         = "run1"
+	)
+	subPath := xattrKey + "." + compactIDKey
+
+	// Create a document with _sync-compact = {"compactID": {"run1": 111}}
+	require.NoError(t, coll.SetRaw(ctx, docID, 0, nil, []byte(`{}`)))
+	_, err := coll.SetXattrs(ctx, docID, map[string][]byte{
+		xattrKey + "." + compactIDKey + "." + run1: []byte(`111`),
+	})
+	require.NoError(t, err)
+
+	// Read the sub-path _sync-compact.compactID — should return {"run1": 111}.
+	xvMap, _, err := coll.GetXattrs(ctx, docID, []string{subPath})
+	require.NoError(t, err)
+	require.Contains(t, xvMap, subPath)
+	var compactIDs map[string]any
+	require.NoError(t, json.Unmarshal(xvMap[subPath], &compactIDs))
+	assert.Equal(t, float64(111), compactIDs[run1])
+
+	// After removing the whole xattr, GetXattrs on the sub-path should return XattrMissingError.
+	_, cas, err := coll.GetXattrs(ctx, docID, []string{xattrKey})
+	require.NoError(t, err)
+	require.NoError(t, coll.RemoveXattrs(ctx, docID, []string{xattrKey}, cas))
+	_, _, err = coll.GetXattrs(ctx, docID, []string{subPath})
+	require.Error(t, err)
+	var missingErr sgbucket.XattrMissingError
+	assert.ErrorAs(t, err, &missingErr)
+}
