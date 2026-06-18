@@ -1865,10 +1865,10 @@ func TestSetXattrsNestedPath(t *testing.T) {
 	coll := makeTestBucket(t).DefaultDataStore(ctx).(*Collection)
 
 	const (
-		docID    = "att-doc"
-		xattrKey = "_sync-compact"
+		docID        = "att-doc"
+		xattrKey     = "_sync-compact"
 		compactIDKey = "compactID"
-		runID    = "run1"
+		runID        = "run1"
 	)
 	nestedPath := xattrKey + "." + compactIDKey + "." + runID
 
