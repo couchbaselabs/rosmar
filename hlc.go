@@ -10,7 +10,6 @@ package rosmar
 
 import (
 	"sync"
-	"time"
 )
 
 var hlc *HybridLogicalClock
@@ -38,7 +37,7 @@ type systemClock struct{}
 
 // getTime returns the current time in nanoseconds.
 func (c *systemClock) getTime() uint64 {
-	return uint64(time.Now().UnixNano())
+	return rosmarWallClock()
 }
 
 // NewHybridLogicalClock returns a new HLC from a previously initialized time.
