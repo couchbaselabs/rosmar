@@ -22,16 +22,18 @@ on:
       - 'release/*'
 
 env:
-  GO_VERSION: &go_version 1.25.8
-  GO_TEST_ANNOTATIONS_VERSION: &go_test_annotations_version guyarb/golang-test-annotations@v0.8.0
+  ACTIONS_CHECKOUT_VERSION: &actions_checkout_version actions/checkout@v6
+  ACTIONS_SETUP_GO_VERSION: &actions_setup_go_version actions/setup-go@v6
+  GO_VERSION: &go_version 1.26.4
+  GO_TEST_ANNOTATIONS_VERSION: &go_test_annotations_version guyarb/golang-test-annotations@v0.9.0
 
 jobs:
   addlicense:
     name: addlicense
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-go@v6
+      - uses: *actions_checkout_version
+      - uses: *actions_setup_go_version
         with:
           go-version: *go_version
       - run: go install github.com/google/addlicense@latest
@@ -44,8 +46,8 @@ jobs:
       matrix:
         os: [macos-latest, windows-latest, ubuntu-latest]
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-go@v6
+      - uses: *actions_checkout_version
+      - uses: *actions_setup_go_version
         with:
           go-version: *go_version
       - name: Build
@@ -63,21 +65,24 @@ jobs:
     name: lint
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-go@v6
+      - uses: *actions_checkout_version
+      - uses: *actions_setup_go_version
         with:
           go-version: *go_version
-          cache: false
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v9
         with:
-          version: v2.11.1
+          version: v2.12.2
 
   test-race:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest, ubuntu-latest]
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-go@v6
+      - uses: *actions_checkout_version
+      - uses: *actions_setup_go_version
         with:
           go-version: *go_version
       - name: Run Tests
