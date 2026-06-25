@@ -141,7 +141,7 @@ func (c *Collection) GetAndTouchRaw(_ context.Context, key string, exp Exp) (val
 			return nil
 		}
 		revSeqNo++
-		newCas := CAS(hlc.Now())
+		newCas := CAS(hlc.Now(0))
 		if _, execErr := txn.Exec(
 			`UPDATE documents SET exp=?1, revSeqNo=?2, cas=?3 WHERE collection=?4 AND key=?5`,
 			newExp, revSeqNo, newCas, c.id, key); execErr != nil {
@@ -613,11 +613,11 @@ func (c *Collection) getLastCas(q queryable) (cas CAS, err error) {
 }
 
 // getLastTimestamp returns the last timestamp assigned to any doc in bucket. Returns 0 in the case of no cas values assigned.
-func (bucket *Bucket) getLastTimestamp() Timestamp {
-	var lastTimestamp Timestamp
+func (bucket *Bucket) getLastTimestamp() uint64 {
+	var lastTimestamp uint64
 	row := bucket.db().QueryRow("SELECT lastCas FROM bucket")
 	_ = scan(row, &lastTimestamp)
-	return Timestamp(lastTimestamp)
+	return lastTimestamp
 }
 
 // Updates the collection's and the bucket's lastCas.
@@ -634,7 +634,7 @@ func (c *Collection) setLastCas(txn *sql.Tx, cas CAS) (err error) {
 func (c *Collection) withNewCas(fn func(txn *sql.Tx, newCas CAS) (*event, error)) error {
 	var e *event
 	err := c.bucket.inTransaction(func(txn *sql.Tx) error {
-		newCas := uint64(hlc.Now())
+		newCas := hlc.Now(0)
 		var err error
 		e, err = fn(txn, newCas)
 		if err != nil {

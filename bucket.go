@@ -29,6 +29,8 @@ import (
 	sqlite3 "github.com/mattn/go-sqlite3"
 )
 
+var hlc = sgbucket.NewHybridLogicalClock()
+
 // Rosmar implementation of a collection-aware bucket.
 // Implements sgbucket interfaces BucketStore, DynamicDataStoreBucket, DeletableStore, MutationFeedStore2.
 type Bucket struct {
@@ -195,7 +197,7 @@ func OpenBucket(urlStr string, bucketName string, mode OpenMode) (b *Bucket, err
 		return nil, err
 	}
 
-	hlc.updateLatestTime(bucket.getLastTimestamp())
+	hlc.UpdateFloor(bucket.getLastTimestamp())
 
 	exists, bucketCopy := registerBucket(bucket)
 	// someone else beat registered the bucket in the registry, that's OK we'll close ours
