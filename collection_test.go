@@ -232,6 +232,43 @@ func TestParseSubdocPaths(t *testing.T) {
 	assert.Error(t, err)
 }
 
+// TestParseSubdocPathSharesXattrPathRules is a regression test verifying that parseSubdocPath
+// (used by WriteSubDoc/SubdocInsert/expandXattrMacros) and validateXattrPath (used by
+// SetXattrs/WriteWithXattrs) reject the same set of characters and empty path components,
+// since they now share a single validateSubdocPath implementation instead of drifting
+// independently.
+func TestParseSubdocPathSharesXattrPathRules(t *testing.T) {
+	invalidPaths := []string{
+		"",         // empty key
+		"foo.",     // trailing dot -> empty component
+		"foo..bar", // consecutive dots -> empty component
+		"foo$bar",  // '$' is reserved for CBS macros/virtual attributes
+		"foo[0]",   // array indexing unsupported
+		"foo`bar`", // backtick escaping unsupported
+		`foo\bar`,  // backslash escaping unsupported
+	}
+	for _, path := range invalidPaths {
+		t.Run(fmt.Sprintf("path=%q", path), func(t *testing.T) {
+			_, err := parseSubdocPath(path)
+			require.Error(t, err, "parseSubdocPath should reject %q", path)
+			if path != "" {
+				require.Error(t, validateXattrPath(path), "validateXattrPath should also reject %q", path)
+			}
+		})
+	}
+}
+
+// TestWriteSubDocRejectsDollarSign verifies that WriteSubDoc (a body subdoc path, not an xattr
+// path) rejects '$' just like SetXattrs already does — a regression test for parseSubdocPath and
+// validateXattrPath previously enforcing different rules.
+func TestWriteSubDocRejectsDollarSign(t *testing.T) {
+	ctx := t.Context()
+	_, coll := initSubDocTest(t)
+
+	_, err := coll.WriteSubDoc(ctx, "key", "rosmar.$foo", 0, []byte(`"x"`))
+	require.Error(t, err)
+}
+
 func TestEvalSubdocPaths(t *testing.T) {
 	rawJson := `{"one":1, "two":{"etc":2}, "array":[3,4]}`
 	var doc map[string]any
@@ -270,28 +307,46 @@ func TestUpsertSubdocValue(t *testing.T) {
 	doc := map[string]any{"a": map[string]any{"b": 1}}
 
 	// Empty path must return an error, not panic.
-	err := upsertSubdocValue(doc, []string{}, "v")
+	err := upsertSubdocValue(doc, []string{}, "v", true)
 	require.Error(t, err)
 
 	// Non-map source must return ErrPathMismatch.
-	err = upsertSubdocValue("not-a-map", []string{"x"}, "v")
+	err = upsertSubdocValue("not-a-map", []string{"x"}, "v", true)
 	require.ErrorIs(t, err, sgbucket.ErrPathMismatch)
 
 	// Single-component path sets the key.
-	require.NoError(t, upsertSubdocValue(doc, []string{"x"}, "hello"))
+	require.NoError(t, upsertSubdocValue(doc, []string{"x"}, "hello", true))
 	assert.Equal(t, "hello", doc["x"])
 
 	// Multi-component path navigates into existing nested map.
-	require.NoError(t, upsertSubdocValue(doc, []string{"a", "c"}, 99))
+	require.NoError(t, upsertSubdocValue(doc, []string{"a", "c"}, 99, true))
 	assert.Equal(t, 99, doc["a"].(map[string]any)["c"])
 
-	// Multi-component path creates intermediate maps for missing components.
-	require.NoError(t, upsertSubdocValue(doc, []string{"new", "nested", "key"}, true))
+	// Multi-component path creates intermediate maps for missing components when
+	// createIntermediatePaths is true.
+	require.NoError(t, upsertSubdocValue(doc, []string{"new", "nested", "key"}, true, true))
 	assert.Equal(t, true, doc["new"].(map[string]any)["nested"].(map[string]any)["key"])
 
 	// Nil value deletes the key.
-	require.NoError(t, upsertSubdocValue(doc, []string{"x"}, nil))
+	require.NoError(t, upsertSubdocValue(doc, []string{"x"}, nil, true))
 	assert.NotContains(t, doc, "x")
+}
+
+// TestUpsertSubdocValueStrict verifies that createIntermediatePaths=false reports a missing
+// intermediate path component as ErrPathNotFound instead of silently creating it — this is the
+// mode expandXattrMacros uses, since a missing intermediate object during macro expansion
+// indicates a caller bug rather than something to paper over.
+func TestUpsertSubdocValueStrict(t *testing.T) {
+	doc := map[string]any{"a": map[string]any{"b": 1}}
+
+	// Existing intermediate path still works.
+	require.NoError(t, upsertSubdocValue(doc, []string{"a", "c"}, 99, false))
+	assert.Equal(t, 99, doc["a"].(map[string]any)["c"])
+
+	// Missing intermediate path component is reported as ErrPathNotFound, not silently created.
+	err := upsertSubdocValue(doc, []string{"missing", "nested", "key"}, true, false)
+	require.ErrorIs(t, err, sgbucket.ErrPathNotFound)
+	assert.NotContains(t, doc, "missing")
 }
 
 func initSubDocTest(t *testing.T) (CAS, sgbucket.DataStore) {

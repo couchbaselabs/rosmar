@@ -2229,3 +2229,102 @@ func TestValidateXattrPathRejectsBackticks(t *testing.T) {
 		})
 	}
 }
+
+// TestGetXattrsSubPathNullValue is a regression test verifying that GetXattrs on a dotted path
+// pointing at an explicit JSON null leaf returns the null value, rather than conflating "value is
+// null" with "path not found" and returning XattrMissingError.
+func TestGetXattrsSubPathNullValue(t *testing.T) {
+	ctx := t.Context()
+	ensureNoLeakedFeeds(t)
+	coll := makeTestBucket(t).DefaultDataStore(ctx).(*Collection)
+
+	const docID = "doc"
+	_, err := coll.WriteWithXattrs(ctx, docID, 0, 0, []byte(`{"val":1}`),
+		map[string][]byte{syncXattrName: []byte(`{"rev":null,"other":"keep"}`)}, nil, nil)
+	require.NoError(t, err)
+
+	xvMap, _, err := coll.GetXattrs(ctx, docID, []string{syncXattrName + ".rev"})
+	require.NoError(t, err, "an explicit null xattr field should be returned, not treated as missing")
+	require.Contains(t, xvMap, syncXattrName+".rev")
+	assert.JSONEq(t, "null", string(xvMap[syncXattrName+".rev"]))
+}
+
+// TestWriteWithXattrsDeleteSubPathMissingLeaf is a regression test verifying that deleting a
+// dotted xattr sub-path via WriteWithXattrs/RemoveXattrs reports sgbucket.ErrPathNotFound when
+// the leaf field doesn't exist, matching the behavior of deleting a whole (non-dotted) xattr name
+// that doesn't exist, instead of silently succeeding.
+func TestWriteWithXattrsDeleteSubPathMissingLeaf(t *testing.T) {
+	ctx := t.Context()
+	ensureNoLeakedFeeds(t)
+	coll := makeTestBucket(t).DefaultDataStore(ctx).(*Collection)
+
+	const docID = "doc"
+	_, err := coll.WriteWithXattrs(ctx, docID, 0, 0, []byte(`{"val":1}`),
+		map[string][]byte{syncXattrName: []byte(`{"other":"keep"}`)}, nil, nil)
+	require.NoError(t, err)
+
+	_, cas, err := coll.GetXattrs(ctx, docID, []string{syncXattrName})
+	require.NoError(t, err)
+
+	err = coll.RemoveXattrs(ctx, docID, []string{syncXattrName + ".nonexistent"}, cas)
+	require.ErrorIs(t, err, sgbucket.ErrPathNotFound)
+
+	// Sibling field must be untouched.
+	xvMap, _, err := coll.GetXattrs(ctx, docID, []string{syncXattrName})
+	require.NoError(t, err)
+	var got map[string]any
+	require.NoError(t, json.Unmarshal(xvMap[syncXattrName], &got))
+	assert.Equal(t, "keep", got["other"])
+}
+
+// TestMacroExpansionMissingIntermediatePath is a regression test verifying that macro expansion
+// targeting a multi-level path whose intermediate object doesn't already exist in the xattr
+// fails loudly (ErrPathNotFound) instead of silently fabricating the missing intermediate object,
+// which would produce an unexpected nested xattr shape.
+func TestMacroExpansionMissingIntermediatePath(t *testing.T) {
+	ctx := t.Context()
+	ensureNoLeakedFeeds(t)
+	coll := makeTestBucket(t).DefaultDataStore(ctx).(*Collection)
+
+	opts := &sgbucket.MutateInOptions{
+		MacroExpansion: []sgbucket.MacroExpansionSpec{
+			{Path: "_xattr1.meta.testcas", Type: sgbucket.MacroCas},
+		},
+	}
+	// "_xattr1" exists but has no "meta" sub-object, so the macro path's intermediate
+	// component is missing.
+	xattrsInput := map[string][]byte{"_xattr1": []byte(`{"x":"abc"}`)}
+	_, err := coll.WriteWithXattrs(ctx, t.Name(), 0, 0, []byte(`{"a":123}`), xattrsInput, nil, opts)
+	require.ErrorIs(t, err, sgbucket.ErrPathNotFound)
+}
+
+// TestWriteWithXattrsPreserveXattrHierarchicalPath is a regression test verifying that the
+// preserveXattr option keeps the existing xattr value (only applying macro expansion) for a
+// hierarchical (dotted) xattr path, rather than silently discarding the preserved value and
+// applying the incoming payload's value instead.
+func TestWriteWithXattrsPreserveXattrHierarchicalPath(t *testing.T) {
+	ctx := t.Context()
+	ensureNoLeakedFeeds(t)
+	coll := makeTestBucket(t).DefaultDataStore(ctx).(*Collection)
+
+	const docID = "doc"
+	_, err := coll.WriteWithXattrs(ctx, docID, 0, 0, []byte(`{"foo":"bar"}`),
+		map[string][]byte{syncXattrName: []byte(`{"nested":{"keep":"me"}}`)}, nil, nil)
+	require.NoError(t, err)
+	_, _, cas, err := coll.GetWithXattrs(ctx, docID, []string{syncXattrName})
+	require.NoError(t, err)
+
+	xattrs := map[string]payload{
+		syncXattrName + ".nested.keep": {marshaled: []byte(`"clobber"`)},
+	}
+	_, err = coll.writeWithXattrs(docID, nil, xattrs, &cas, nil, writeXattrOptions{preserveXattr: true}, nil)
+	require.NoError(t, err)
+
+	_, xv, _, err := coll.GetWithXattrs(ctx, docID, []string{syncXattrName})
+	require.NoError(t, err)
+	var got map[string]any
+	require.NoError(t, json.Unmarshal(xv[syncXattrName], &got))
+	nested, ok := got["nested"].(map[string]any)
+	require.True(t, ok, "nested field should still be a map")
+	assert.Equal(t, "me", nested["keep"], "preserveXattr should keep the existing value, not the incoming payload's value")
+}
