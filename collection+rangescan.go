@@ -95,6 +95,13 @@ func (it *scanIterator) Next(_ context.Context) *sgbucket.ScanResultItem {
 	return item
 }
 
+func (it *scanIterator) Err() error {
+	if it.err != nil {
+		return it.err
+	}
+	return it.rows.Err()
+}
+
 func (it *scanIterator) Close(_ context.Context) error {
 	closeErr := it.rows.Close()
 	if it.err == nil {
@@ -134,6 +141,10 @@ func (it *preRecordedScanIterator) Next(_ context.Context) *sgbucket.ScanResultI
 	item := it.items[0]
 	it.items = it.items[1:]
 	return item
+}
+
+func (it *preRecordedScanIterator) Err() error {
+	return it.err
 }
 
 func (it *preRecordedScanIterator) Close(_ context.Context) error {

@@ -48,6 +48,8 @@ func TestRangeScan(t *testing.T) {
 				assert.NotNil(t, item.Body)
 			}
 		}
+		// A clean drain must leave no error, distinguishable from an error via Err().
+		assert.NoError(t, iter.Err())
 		sort.Strings(ids)
 		return ids
 	}
@@ -89,6 +91,8 @@ func TestRangeScan(t *testing.T) {
 		require.NoError(t, err)
 		defer func() { assert.NoError(t, iter.Close(ctx)) }()
 		assert.Nil(t, iter.Next(ctx))
+		// An empty range is clean EOF, not an error.
+		assert.NoError(t, iter.Err())
 	})
 
 	t.Run("PrefixScan", func(t *testing.T) {
