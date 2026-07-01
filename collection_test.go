@@ -686,6 +686,38 @@ func TestWriteWithXattrNoBody(t *testing.T) {
 
 }
 
+// Test that WriteWithXattrs' xattrsToDelete supports a dotted subdoc path, removing only that
+// field from the xattr and leaving the rest of the xattr intact.
+func TestWriteWithXattrsDeleteSubDocPath(t *testing.T) {
+	ctx := t.Context()
+	col := makeTestBucket(t).DefaultDataStore(ctx)
+
+	const docID = "WriteWithXattrsDeleteSubDocPath"
+
+	val := map[string]interface{}{"type": docID}
+
+	xattrVal := map[string]interface{}{"rev": "1-1234", "seq": float64(123)}
+	xattrs := map[string][]byte{syncXattrName: mustMarshalJSON(t, xattrVal)}
+	cas, err := col.WriteWithXattrs(ctx, docID, 0, 0, mustMarshalJSON(t, val), xattrs, nil, nil)
+	require.NoError(t, err)
+
+	// Update the body while deleting just the "rev" field from the _sync xattr, leaving "seq"
+	// untouched. (WriteWithXattrs requires a body or xattr value to accompany a delete.)
+	updatedVal := map[string]interface{}{"type": docID, "updated": true}
+	_, err = col.WriteWithXattrs(ctx, docID, 0, cas, mustMarshalJSON(t, updatedVal), nil, []string{syncXattrName + ".rev"}, nil)
+	require.NoError(t, err)
+
+	getVal, getXattrs, _, err := col.GetWithXattrs(ctx, docID, []string{syncXattrName})
+	require.NoError(t, err)
+
+	var fetchedVal, fetchedXattr map[string]interface{}
+	require.NoError(t, json.Unmarshal(getVal, &fetchedVal))
+	require.Equal(t, updatedVal, fetchedVal)
+
+	require.NoError(t, json.Unmarshal(getXattrs[syncXattrName], &fetchedXattr))
+	require.Equal(t, map[string]interface{}{"seq": float64(123)}, fetchedXattr)
+}
+
 func TestWriteCasWithXattrNoXattr(t *testing.T) {
 	ctx := t.Context()
 	col := makeTestBucket(t).DefaultDataStore(ctx).(*Collection)

@@ -556,7 +556,9 @@ func (c *Collection) TouchXattrWithCas(_ context.Context, key, xattrKey, propert
 	return
 }
 
-// DeleteWithXattrs a document's body and xattrs simultaneously.
+// DeleteWithXattrs a document's body and xattrs simultaneously. xattrKeys entries may be
+// simple xattr names (e.g., "_sync") to remove the whole xattr, or dotted paths
+// (e.g., "_sync.rev") to remove a field within an xattr.
 func (c *Collection) DeleteWithXattrs(ctx context.Context, key string, xattrKeys []string) error {
 	err := c.withNewCas(func(txn *sql.Tx, newCas CAS) (*event, error) {
 		e := &event{
@@ -569,7 +571,7 @@ func (c *Collection) DeleteWithXattrs(ctx context.Context, key string, xattrKeys
 		err := scan(row, &e.xattrs, &bodyExists, &e.revSeqNo)
 		if err != nil {
 			return nil, remapKeyError(err, key)
-		} else if e.xattrs, err = removeXattrs(e.xattrs, xattrKeys...); err != nil {
+		} else if e.xattrs, err = deleteSubDocPaths(e.xattrs, xattrKeys...); err != nil {
 			return nil, err
 		}
 		e.revSeqNo++
@@ -817,7 +819,6 @@ func validateXattrKey(xattrKey string) error {
 		return fmt.Errorf("rosmar does not support empty Xattr key")
 	}
 	if strings.ContainsAny(xattrKey, "$.[]`\\") {
-		// TODO: Support hierarchical paths
 		return fmt.Errorf("rosmar does not support Xattr key `%s`", xattrKey)
 	}
 	return nil
@@ -852,11 +853,6 @@ func validateXattrPath(xattrPath string) error {
 	return nil
 }
 
-// Converts an Xattr key to a SQLite JSON path.
-func xattrKeyToSQLitePath(xattrKey string) (path string, err error) {
-	return `$.` + xattrKey, validateXattrKey(xattrKey)
-}
-
 // Semi-parses the xattrs from JSON, passes that to the callback, then re-marshals and returns it.
 func processXattrs(rawXattrs []byte, fn func(xattrs semiParsedXattrs)) []byte {
 	if len(rawXattrs) > 0 {
@@ -870,19 +866,6 @@ func processXattrs(rawXattrs []byte, fn func(xattrs semiParsedXattrs)) []byte {
 		}
 	}
 	return rawXattrs
-}
-
-// Removes Xattrs from the raw JSON form.
-func removeXattrs(rawXattrs []byte, xattrKeys ...string) (rawResult []byte, err error) {
-	rawResult = processXattrs(rawXattrs, func(xattrs semiParsedXattrs) {
-		for _, key := range xattrKeys {
-			if err = validateXattrKey(key); err != nil {
-				break
-			}
-			delete(xattrs, key)
-		}
-	})
-	return
 }
 
 // deleteSubDocPaths removes one or more subdoc paths from the raw xattrs JSON.
@@ -904,34 +887,10 @@ func deleteSubDocPath(rawXattrs []byte, path string) ([]byte, error) {
 	if err := validateXattrPath(path); err != nil {
 		return nil, err
 	}
-	dotIdx := strings.IndexByte(path, '.')
-	if dotIdx < 0 {
-		return removeXattrs(rawXattrs, path)
-	}
-	xattrName := path[:dotIdx]
-	fieldPath := path[dotIdx+1:]
-	keys := strings.Split(fieldPath, ".")
+	keys := strings.Split(path, ".")
 	var outerErr error
 	result := processXattrs(rawXattrs, func(xattrs semiParsedXattrs) {
-		raw, ok := xattrs[xattrName]
-		if !ok {
-			return
-		}
-		var subObj map[string]json.RawMessage
-		if err := json.Unmarshal(raw, &subObj); err != nil {
-			outerErr = fmt.Errorf("xattr %q is not a JSON object: %w", xattrName, err)
-			return
-		}
-		if err := deleteNestedKey(subObj, keys); err != nil {
-			outerErr = err
-			return
-		}
-		updated, err := json.Marshal(subObj)
-		if err != nil {
-			outerErr = err
-			return
-		}
-		xattrs[xattrName] = json.RawMessage(updated)
+		outerErr = deleteNestedKey(xattrs, keys)
 	})
 	return result, outerErr
 }
