@@ -758,8 +758,27 @@ func (c *Collection) writeWithXattrs(
 				}
 				xattrs[xattrKey] = json.RawMessage(rawXattr)
 				trace("\t\tSet doc %q xattr %q = %s", key, xattrKey, rawXattr)
+			} else if len(subpath) > 0 {
+				// Delete a sub-path within an existing xattr, leaving the rest of the xattr intact.
+				existing, found := xattrs[xattrKey]
+				if !found {
+					return nil, fmt.Errorf("%s: %w", xattrPath, sgbucket.ErrPathNotFound)
+				}
+				var subObj map[string]json.RawMessage
+				if err := json.Unmarshal(existing, &subObj); err != nil {
+					return nil, fmt.Errorf("xattr %q is not a JSON object: %w", xattrKey, err)
+				}
+				if err := deleteNestedKey(subObj, subpath); err != nil {
+					return nil, err
+				}
+				updated, err := json.Marshal(subObj)
+				if err != nil {
+					return nil, err
+				}
+				xattrs[xattrKey] = json.RawMessage(updated)
+				trace("\t\tDeleted doc %q xattr path %q", key, xattrPath)
 			} else {
-				// Delete xattr:
+				// Delete the entire xattr:
 				if _, found := xattrs[xattrKey]; found {
 					delete(xattrs, xattrKey)
 					trace("\t\tDeleted doc %q xattr %s", key, xattrKey)
@@ -790,12 +809,14 @@ func (c *Collection) writeWithXattrs(
 
 //////// HELPERS:
 
-// Checks an xattr key: Rosmar doesn't support multi-component key paths for xattrs.
+// validateXattrKey checks a single xattr key component, i.e. the top-level xattr name with no
+// dot-separated sub-path (e.g. "_sync", not "_sync.rev"). Use validateXattrPath to validate a
+// full (possibly dotted) subdoc path.
 func validateXattrKey(xattrKey string) error {
 	if xattrKey == "" {
 		return fmt.Errorf("rosmar does not support empty Xattr key")
 	}
-	if strings.ContainsAny(xattrKey, `$.[]`) {
+	if strings.ContainsAny(xattrKey, "$.[]`\\") {
 		// TODO: Support hierarchical paths
 		return fmt.Errorf("rosmar does not support Xattr key `%s`", xattrKey)
 	}
@@ -805,7 +826,8 @@ func validateXattrKey(xattrKey string) error {
 // validateXattrPath validates a full xattr path, which may include dot-separated sub-path components.
 // The top-level key must not be empty or contain $, [, ].
 // Sub-path components must not be empty (e.g., from ".." or leading/trailing ".") and must not
-// contain $, [, ].
+// contain $, [, ]. Rosmar does not implement Couchbase Server's backtick escaping of sub-path
+// components, so backticks and backslashes are rejected rather than silently mishandled.
 func validateXattrPath(xattrPath string) error {
 	dotIdx := strings.IndexByte(xattrPath, '.')
 	topKey := xattrPath
@@ -819,7 +841,7 @@ func validateXattrPath(xattrPath string) error {
 		return nil
 	}
 	subPath := xattrPath[dotIdx+1:]
-	if strings.ContainsAny(subPath, `$[]`) {
+	if strings.ContainsAny(subPath, "$[]`\\") {
 		return fmt.Errorf("rosmar does not support Xattr sub-path `%s`", xattrPath)
 	}
 	for _, component := range strings.Split(subPath, ".") {

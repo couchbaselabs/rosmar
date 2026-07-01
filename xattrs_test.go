@@ -2177,3 +2177,55 @@ func TestDeleteSubDocPathsFeedEvent(t *testing.T) {
 	e = <-events
 	assert.Equal(t, sgbucket.FeedOpDeletion, e.Opcode, "tombstone doc should emit FeedOpDeletion")
 }
+
+// TestRemoveXattrsDeleteSubPath verifies that RemoveXattrs only removes the targeted nested field
+// when given a dotted sub-path, rather than deleting the entire top-level xattr — a regression
+// test for a bug where the top-level xattr key was always deleted regardless of any sub-path
+// suffix.
+func TestRemoveXattrsDeleteSubPath(t *testing.T) {
+	ctx := t.Context()
+	ensureNoLeakedFeeds(t)
+	coll := makeTestBucket(t).DefaultDataStore(ctx).(*Collection)
+
+	const docID = "doc"
+	_, err := coll.WriteWithXattrs(ctx, docID, 0, 0, []byte(`{"val":1}`),
+		map[string][]byte{syncXattrName: []byte(`{"rev":"1-a","other":"keep"}`)}, nil, nil)
+	require.NoError(t, err)
+
+	// Deleting the dotted sub-path should remove only that field...
+	_, cas, err := coll.GetXattrs(ctx, docID, []string{syncXattrName})
+	require.NoError(t, err)
+	require.NoError(t, coll.RemoveXattrs(ctx, docID, []string{syncXattrName + ".rev"}, cas))
+
+	xvMap, _, err := coll.GetXattrs(ctx, docID, []string{syncXattrName})
+	require.NoError(t, err)
+	var got map[string]any
+	require.NoError(t, json.Unmarshal(xvMap[syncXattrName], &got))
+	assert.NotContains(t, got, "rev", "sub-path delete should remove only the targeted field")
+	assert.Equal(t, "keep", got["other"], "sub-path delete must not remove sibling fields")
+
+	// ...while deleting the plain xattr name still removes the whole xattr.
+	_, cas, err = coll.GetXattrs(ctx, docID, []string{syncXattrName})
+	require.NoError(t, err)
+	require.NoError(t, coll.RemoveXattrs(ctx, docID, []string{syncXattrName}, cas))
+	_, _, err = coll.GetXattrs(ctx, docID, []string{syncXattrName})
+	require.Error(t, err)
+	var missingErr sgbucket.XattrMissingError
+	assert.ErrorAs(t, err, &missingErr)
+}
+
+// TestValidateXattrPathRejectsBackticks verifies that xattr paths containing backticks or
+// backslashes are rejected rather than silently mishandled, since rosmar does not implement
+// Couchbase Server's backtick escaping of sub-path components.
+func TestValidateXattrPathRejectsBackticks(t *testing.T) {
+	ctx := t.Context()
+	coll := makeTestBucket(t).DefaultDataStore(ctx).(*Collection)
+	require.NoError(t, coll.SetRaw(ctx, t.Name(), 0, nil, []byte(`{"a":1}`)))
+
+	for _, path := range []string{"_sync.`a.b`", "_sync.a\\.b", "`_sync`.rev"} {
+		t.Run(path, func(t *testing.T) {
+			_, err := coll.SetXattrs(ctx, t.Name(), map[string][]byte{path: []byte(`"v"`)})
+			require.Error(t, err, "expected error for xattr path %q", path)
+		})
+	}
+}
