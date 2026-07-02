@@ -137,6 +137,8 @@ func (c *Collection) RemoveXattrs(_ context.Context, key string, xattrKeys []str
 }
 
 // Remove one or more subdoc paths from a document.
+// Paths can be simple xattr names (e.g., "_sync") to remove the whole xattr, or
+// dotted paths (e.g., "_sync.rev") to remove a field within an xattr.
 func (c *Collection) DeleteSubDocPaths(
 	_ context.Context,
 	key string,
@@ -150,16 +152,20 @@ func (c *Collection) DeleteSubDocPaths(
 			cas: newCas,
 		}
 		var revSeqNo uint64
-		row := txn.QueryRow(`SELECT value, xattrs, revSeqNo FROM documents WHERE collection=?1 AND key=?2`, c.id, key)
+		var tombstone int
+		row := txn.QueryRow(`SELECT value, isJSON, xattrs, revSeqNo, exp, tombstone FROM documents WHERE collection=?1 AND key=?2`, c.id, key)
 		var rawXattrs []byte
-		err := scan(row, &e.value, &rawXattrs, &revSeqNo)
+		err := scan(row, &e.value, &e.isJSON, &rawXattrs, &revSeqNo, &e.exp, &tombstone)
 		if err != nil {
 			return nil, remapKeyError(err, key)
 		}
-		if rawXattrs, err = removeXattrs(rawXattrs, xattrKeys...); err != nil {
+		e.isDeletion = tombstone != 0
+		if rawXattrs, err = deleteSubDocPaths(rawXattrs, xattrKeys...); err != nil {
 			return nil, err
 		}
 		e.xattrs = rawXattrs
+		revSeqNo++
+		e.revSeqNo = revSeqNo
 		_, err = txn.Exec(`UPDATE documents SET xattrs=?1, cas=?2, revSeqNo=?3 WHERE collection=?4 AND key=?5`, rawXattrs, newCas, revSeqNo, c.id, key)
 		return e, err
 	})
@@ -446,6 +452,28 @@ func (c *Collection) getRawWithXattrs(key string, xattrKeys []string) (sgbucket.
 		}
 		val, ok := xattrMap[xattrKey]
 		if !ok {
+			// For dotted keys, try navigating into the parent xattr value.
+			if dotIdx := strings.IndexByte(xattrKey, '.'); dotIdx >= 0 {
+				parentKey := xattrKey[:dotIdx]
+				subPath := strings.Split(xattrKey[dotIdx+1:], ".")
+				if parentVal, parentOk := xattrMap[parentKey]; parentOk {
+					var parentObj any
+					if jsonErr := json.Unmarshal(parentVal, &parentObj); jsonErr != nil {
+						return sgbucket.BucketDocument{}, fmt.Errorf("document %q xattr %q is unreadable: %w", key, parentKey, jsonErr)
+					}
+					subVal, pathErr := evalSubdocPath(parentObj, subPath)
+					if pathErr != nil && !errors.Is(pathErr, sgbucket.ErrPathNotFound) {
+						return sgbucket.BucketDocument{}, fmt.Errorf("document %q xattr path %q: %w", key, xattrKey, pathErr)
+					}
+					if pathErr == nil {
+						encoded, marshalErr := json.Marshal(subVal)
+						if marshalErr != nil {
+							return sgbucket.BucketDocument{}, fmt.Errorf("document %q xattr path %q value is unserializable: %w", key, xattrKey, marshalErr)
+						}
+						rawDoc.Xattrs[xattrKey] = encoded
+					}
+				}
+			}
 			continue
 		}
 		rawDoc.Xattrs[xattrKey] = val
@@ -528,7 +556,9 @@ func (c *Collection) TouchXattrWithCas(_ context.Context, key, xattrKey, propert
 	return
 }
 
-// DeleteWithXattrs a document's body and xattrs simultaneously.
+// DeleteWithXattrs a document's body and xattrs simultaneously. xattrKeys entries may be
+// simple xattr names (e.g., "_sync") to remove the whole xattr, or dotted paths
+// (e.g., "_sync.rev") to remove a field within an xattr.
 func (c *Collection) DeleteWithXattrs(ctx context.Context, key string, xattrKeys []string) error {
 	err := c.withNewCas(func(txn *sql.Tx, newCas CAS) (*event, error) {
 		e := &event{
@@ -541,7 +571,7 @@ func (c *Collection) DeleteWithXattrs(ctx context.Context, key string, xattrKeys
 		err := scan(row, &e.xattrs, &bodyExists, &e.revSeqNo)
 		if err != nil {
 			return nil, remapKeyError(err, key)
-		} else if e.xattrs, err = removeXattrs(e.xattrs, xattrKeys...); err != nil {
+		} else if e.xattrs, err = deleteSubDocPaths(e.xattrs, xattrKeys...); err != nil {
 			return nil, err
 		}
 		e.revSeqNo++
@@ -584,12 +614,13 @@ func (c *Collection) writeWithXattrs(
 	opts writeXattrOptions, // option flags
 	mutateOpts *sgbucket.MutateInOptions, // expiry and macro expansion options
 ) (casOut CAS, err error) {
+	for xattrPath := range xattrsPayload {
+		if err := validateXattrPath(xattrPath); err != nil {
+			return 0, err
+		}
+	}
 	parsedXattrs := make(map[string]any, len(xattrsPayload))
 	for xattrKey, xattrVal := range xattrsPayload {
-		// Validate xattr key/value before going into the transaction:
-		if err = validateXattrKey(xattrKey); err != nil {
-			return
-		}
 		if !xattrVal.isNil() {
 			parsedXattr, err := xattrVal.unmarshalJSON()
 			if err != nil {
@@ -665,30 +696,64 @@ func (c *Collection) writeWithXattrs(
 			if opts.insertXattr {
 				return nil, fmt.Errorf("illegal options to rosmar.Collection.writeWithXattr")
 			}
-			for xattrKey := range xattrsPayload {
+			for xattrPath := range xattrsPayload {
+				subpaths := strings.Split(xattrPath, ".")
+				xattrKey := subpaths[0]
 				existingVal, ok := xattrs[xattrKey]
 				if !ok {
 					existingVal = json.RawMessage(`{}`)
 				}
 
-				xattrPayload := xattrsPayload[xattrKey]
+				xattrPayload := xattrsPayload[xattrPath]
 				xattrPayload.setMarshaled(existingVal)
 				parsedXattr, err := xattrPayload.unmarshalJSON()
 				if err != nil {
 					return nil, err
 				}
-				parsedXattrs[xattrKey] = parsedXattr
+				// Keyed by the full xattrPath (not xattrKey) to match how the set/delete loop
+				// below looks this up for non-hierarchical paths.
+				parsedXattrs[xattrPath] = parsedXattr
 			}
 		}
 
-		for xattrKey, xattrVal := range xattrsPayload {
+		for xattrPath, xattrVal := range xattrsPayload {
+			subpaths := strings.Split(xattrPath, ".")
+			xattrKey := subpaths[0]
+			subpath := subpaths[1:]
 			if !xattrVal.isNil() {
 				// Set xattr:
 				if opts.insertXattr && xattrs[xattrKey] != nil {
 					return nil, sgbucket.ErrPathExists
 				}
-				// Expand any macros specified in the mutateOpts
-				parsedXattr := parsedXattrs[xattrKey]
+				var parsedXattr any
+				switch {
+				case opts.preserveXattr:
+					// preserveXattr means keep the existing xattr's value (computed above into
+					// parsedXattrs) and only apply macro expansion below — the incoming payload
+					// value itself is ignored, whether the path is hierarchical or not.
+					parsedXattr = parsedXattrs[xattrPath]
+				case len(subpath) > 0:
+					// Hierarchical path: upsert sub-path into existing (or new) xattr map
+					var baseMap map[string]any
+					if existing, ok := xattrs[xattrKey]; ok {
+						if err := json.Unmarshal(existing, &baseMap); err != nil {
+							return nil, err
+						}
+					} else {
+						baseMap = make(map[string]any)
+					}
+					newVal, err := xattrVal.unmarshalJSON()
+					if err != nil {
+						return nil, err
+					}
+					if err := upsertSubdocValue(baseMap, subpath, newVal, true); err != nil {
+						return nil, fmt.Errorf("could not set subpath %q in xattr %q: %w", xattrPath, xattrKey, err)
+					}
+					parsedXattr = baseMap
+				default:
+					// Non-hierarchical: use the already-parsed value
+					parsedXattr = parsedXattrs[xattrPath]
+				}
 				if err := e.expandXattrMacros(xattrKey, parsedXattr, mutateOpts); err != nil {
 					return nil, err
 				}
@@ -703,13 +768,36 @@ func (c *Collection) writeWithXattrs(
 				}
 				xattrs[xattrKey] = json.RawMessage(rawXattr)
 				trace("\t\tSet doc %q xattr %q = %s", key, xattrKey, rawXattr)
+			} else if len(subpath) > 0 {
+				// Delete a sub-path within an existing xattr, leaving the rest of the xattr intact.
+				existing, found := xattrs[xattrKey]
+				if !found {
+					return nil, fmt.Errorf("%s: %w", xattrPath, sgbucket.ErrPathNotFound)
+				}
+				var subObj map[string]json.RawMessage
+				if err := json.Unmarshal(existing, &subObj); err != nil {
+					return nil, fmt.Errorf("xattr %q is not a JSON object: %w", xattrKey, err)
+				}
+				deletedLeaf, err := deleteNestedKey(subObj, subpath)
+				if err != nil {
+					return nil, err
+				}
+				if !deletedLeaf {
+					return nil, fmt.Errorf("%s: %w", xattrPath, sgbucket.ErrPathNotFound)
+				}
+				updated, err := json.Marshal(subObj)
+				if err != nil {
+					return nil, err
+				}
+				xattrs[xattrKey] = json.RawMessage(updated)
+				trace("\t\tDeleted doc %q xattr path %q", key, xattrPath)
 			} else {
-				// Delete xattr:
+				// Delete the entire xattr:
 				if _, found := xattrs[xattrKey]; found {
 					delete(xattrs, xattrKey)
 					trace("\t\tDeleted doc %q xattr %s", key, xattrKey)
 				} else {
-					return nil, fmt.Errorf("%s: %w", xattrKey, sgbucket.ErrPathNotFound)
+					return nil, fmt.Errorf("%s: %w", xattrPath, sgbucket.ErrPathNotFound)
 				}
 			}
 		}
@@ -735,19 +823,12 @@ func (c *Collection) writeWithXattrs(
 
 //////// HELPERS:
 
-// Checks an xattr key: Rosmar doesn't support multi-component key paths for xattrs.
-func validateXattrKey(xattrKey string) error {
-	if strings.ContainsAny(xattrKey, `$.[]`) {
-		// TODO: Support hierarchical paths
-		return fmt.Errorf("rosmar does not support Xattr key `%s`", xattrKey)
-	} else {
-		return nil
-	}
-}
-
-// Converts an Xattr key to a SQLite JSON path.
-func xattrKeyToSQLitePath(xattrKey string) (path string, err error) {
-	return `$.` + xattrKey, validateXattrKey(xattrKey)
+// validateXattrPath validates a full xattr path, which may include dot-separated sub-path
+// components (e.g. "_sync" or "_sync.rev"). Delegates to validateSubdocPath — the same
+// character/empty-component rules used by parseSubdocPath — so the two validators can't
+// silently drift apart (see collection+subdoc.go).
+func validateXattrPath(xattrPath string) error {
+	return validateSubdocPath(xattrPath)
 }
 
 // Semi-parses the xattrs from JSON, passes that to the callback, then re-marshals and returns it.
@@ -765,17 +846,67 @@ func processXattrs(rawXattrs []byte, fn func(xattrs semiParsedXattrs)) []byte {
 	return rawXattrs
 }
 
-// Removes Xattrs from the raw JSON form.
-func removeXattrs(rawXattrs []byte, xattrKeys ...string) (rawResult []byte, err error) {
-	rawResult = processXattrs(rawXattrs, func(xattrs semiParsedXattrs) {
-		for _, key := range xattrKeys {
-			if err = validateXattrKey(key); err != nil {
-				break
-			}
-			delete(xattrs, key)
+// deleteSubDocPaths removes one or more subdoc paths from the raw xattrs JSON.
+// Paths may be simple xattr names (e.g., "_sync") or dotted paths into an xattr
+// (e.g., "_sync.rev" removes "rev" from "_sync", "_sync-compact.compactID.runID"
+// removes "runID" from the nested "compactID" object inside "_sync-compact").
+func deleteSubDocPaths(rawXattrs []byte, paths ...string) ([]byte, error) {
+	var err error
+	for _, path := range paths {
+		if rawXattrs, err = deleteSubDocPath(rawXattrs, path); err != nil {
+			return nil, err
 		}
+	}
+	return rawXattrs, nil
+}
+
+// deleteSubDocPath removes a single subdoc path from the raw xattrs JSON.
+func deleteSubDocPath(rawXattrs []byte, path string) ([]byte, error) {
+	if err := validateXattrPath(path); err != nil {
+		return nil, err
+	}
+	keys := strings.Split(path, ".")
+	var outerErr error
+	result := processXattrs(rawXattrs, func(xattrs semiParsedXattrs) {
+		// DeleteSubDocPaths/DeleteWithXattrs treat deleting an already-absent path as a no-op,
+		// so the "found" return is intentionally ignored here.
+		_, outerErr = deleteNestedKey(xattrs, keys)
 	})
-	return
+	return result, outerErr
+}
+
+// deleteNestedKey removes the key at the end of the given key path from obj, reporting via
+// found whether that key was actually present. For a single-element path it deletes directly;
+// for a longer path it navigates into the nested JSON object at path[0] before recursing.
+func deleteNestedKey(obj map[string]json.RawMessage, keys []string) (found bool, err error) {
+	if len(keys) == 0 {
+		return false, nil
+	}
+	if len(keys) == 1 {
+		if _, ok := obj[keys[0]]; !ok {
+			return false, nil
+		}
+		delete(obj, keys[0])
+		return true, nil
+	}
+	raw, ok := obj[keys[0]]
+	if !ok {
+		return false, nil // path doesn't exist, treat as no-op
+	}
+	var nested map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &nested); err != nil {
+		return false, fmt.Errorf("path component %q is not a JSON object: %w", keys[0], err)
+	}
+	found, err = deleteNestedKey(nested, keys[1:])
+	if err != nil || !found {
+		return false, err
+	}
+	updated, err := json.Marshal(nested)
+	if err != nil {
+		return false, err
+	}
+	obj[keys[0]] = json.RawMessage(updated)
+	return true, nil
 }
 
 // Removes user (non-underscore-prefixed) Xattrs.
@@ -838,7 +969,7 @@ func (e *event) expandXattrMacros(xattrKey string, xattr any, mutateOpts *sgbuck
 			return err
 		}
 
-		if err := upsertSubdocValue(xattrMap, path[1:], expandedValue); err != nil {
+		if err := upsertSubdocValue(xattrMap, path[1:], expandedValue, false); err != nil {
 			return fmt.Errorf("Unable to set macro expansion value at path: %v: %w", v.Path, err)
 		}
 	}

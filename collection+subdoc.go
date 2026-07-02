@@ -87,7 +87,7 @@ func (c *Collection) subdocWrite(ctx context.Context, key string, subdocKey stri
 
 		// Find the parent of the path:
 		subdoc, err := evalSubdocPath(fullDoc, path[0:len(path)-1])
-		if subdoc == nil {
+		if err != nil {
 			return 0, err
 		}
 		parent, ok := subdoc.(map[string]any)
@@ -118,56 +118,89 @@ func (c *Collection) subdocWrite(ctx context.Context, key string, subdocKey stri
 	}
 }
 
+// disallowedSubdocPathChars are characters rosmar does not support within a subdoc/xattr path
+// component: `$` (CBS macro/virtual-attribute sigil), `[` `]` (array indexing), and backtick/
+// backslash (CBS's escaping of literal dots or backticks within a path component, which rosmar
+// does not implement). This is shared by parseSubdocPath and validateXattrPath so the two
+// validators can't silently drift apart.
+const disallowedSubdocPathChars = "$[]`\\"
+
+// validateSubdocPath checks that a (possibly dotted) subdoc path is non-empty, free of
+// disallowedSubdocPathChars, and has no empty components (e.g. from a leading, trailing, or
+// doubled dot).
+func validateSubdocPath(path string) error {
+	if path == "" {
+		return fmt.Errorf("invalid subdoc key %q", path)
+	}
+	if strings.ContainsAny(path, disallowedSubdocPathChars) {
+		return &ErrUnimplemented{reason: "rosmar does not support this character in subdoc path: " + path}
+	}
+	for _, component := range strings.Split(path, ".") {
+		if component == "" {
+			return fmt.Errorf("subdoc path %q contains an empty path component", path)
+		}
+	}
+	return nil
+}
+
 // Parses a subdoc key into an array of JSON path components.
 func parseSubdocPath(subdocKey string) ([]string, error) {
-	if subdocKey == "" {
-		return nil, fmt.Errorf("invalid subdoc key %q", subdocKey)
+	if err := validateSubdocPath(subdocKey); err != nil {
+		return nil, err
 	}
-	if strings.ContainsAny(subdocKey, "[]") {
-		return nil, &ErrUnimplemented{reason: "Rosmar does not support arrays in subdoc keys: key is " + subdocKey}
-	}
-	if strings.ContainsAny(subdocKey, "\\`") {
-		return nil, &ErrUnimplemented{reason: "Rosmar does not support escape characters in subdoc keys: key is " + subdocKey}
-	}
-	path := strings.Split(subdocKey, ".")
-	return path, nil
+	return strings.Split(subdocKey, "."), nil
 }
 
 // Evaluates a parsed JSON path on a value.
 func evalSubdocPath(subdoc any, path []string) (any, error) {
 	for _, prop := range path {
-		if asMap, ok := subdoc.(map[string]any); ok {
-			subdoc = asMap[prop]
-			if subdoc == nil {
-				return nil, sgbucket.ErrPathNotFound
-			}
-		} else {
+		asMap, ok := subdoc.(map[string]any)
+		if !ok {
 			return nil, sgbucket.ErrPathMismatch
 		}
+		val, exists := asMap[prop]
+		if !exists {
+			return nil, sgbucket.ErrPathNotFound
+		}
+		subdoc = val
 	}
 	return subdoc, nil
 }
 
 // Upserts the value at the specified JSON path in the source.
-// Returns ErrPathMismatch if non-leaf path entries do not exist.
-func upsertSubdocValue(source any, path []string, value interface{}) error {
-
-	// eval path exists
-	subdoc, err := evalSubdocPath(source, path[0:len(path)-1])
-	if err != nil {
-		return err
+// If createIntermediatePaths is true, creates intermediate maps for any missing path components,
+// matching Couchbase Server subdoc upsert behavior. If false, a missing intermediate path
+// component is reported as sgbucket.ErrPathNotFound instead of being silently created — used for
+// macro expansion, where a missing intermediate object indicates a caller bug rather than
+// something to paper over.
+// Returns ErrPathMismatch if a non-leaf path entry exists but is not a map.
+func upsertSubdocValue(source any, path []string, value any, createIntermediatePaths bool) error {
+	if len(path) == 0 {
+		return fmt.Errorf("subdoc path must not be empty")
 	}
-
-	parent, ok := subdoc.(map[string]any)
+	current, ok := source.(map[string]any)
 	if !ok {
 		return sgbucket.ErrPathMismatch
 	}
-	// add value to map:
+	for _, prop := range path[:len(path)-1] {
+		child, exists := current[prop]
+		if !exists || child == nil {
+			if !createIntermediatePaths {
+				return sgbucket.ErrPathNotFound
+			}
+			child = map[string]any{}
+			current[prop] = child
+		}
+		current, ok = child.(map[string]any)
+		if !ok {
+			return sgbucket.ErrPathMismatch
+		}
+	}
 	lastPath := path[len(path)-1]
 	if value != nil {
-		parent[lastPath] = value
+		current[lastPath] = value
 	} else {
-		delete(parent, lastPath)
+		delete(current, lastPath)
 	}
 	return nil
 }
