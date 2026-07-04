@@ -31,6 +31,12 @@ import (
 
 var hlc = sgbucket.NewHybridLogicalClock()
 
+// SetClockForTest overrides rosmar's process-global HLC clock function, used to generate CAS values for every
+// rosmar bucket in the process. For deterministic testing only - see sgbucket.HybridLogicalClock.SetClockForTest.
+func SetClockForTest(getTime func() uint64) {
+	hlc.SetClockForTest(getTime)
+}
+
 // Rosmar implementation of a collection-aware bucket.
 // Implements sgbucket interfaces BucketStore, DynamicDataStoreBucket, DeletableStore, MutationFeedStore2.
 type Bucket struct {
