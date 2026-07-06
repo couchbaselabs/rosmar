@@ -102,15 +102,29 @@ func (it *scanIterator) Err() error {
 	return it.rows.Err()
 }
 
-func (it *scanIterator) Close(_ context.Context) error {
+// drainErr closes the underlying rows and returns the first real error seen
+// during iteration or while releasing resources, or nil for a clean scan. It
+// records that error in it.err (first error wins) but does not apply the
+// ErrScanCancelled cancellation semantics — that is layered on by Close.
+func (it *scanIterator) drainErr() error {
 	closeErr := it.rows.Close()
-	if it.err == nil {
-		it.err = closeErr
-	}
 	if it.err == nil {
 		it.err = it.rows.Err()
 	}
+	if it.err == nil {
+		it.err = closeErr
+	}
 	return it.err
+}
+
+func (it *scanIterator) Close(_ context.Context) error {
+	if err := it.drainErr(); err != nil {
+		return err
+	}
+	// Clean end-of-stream: mirror gocb by recording a cancellation so a later
+	// Err reports it, while Close itself returns nil.
+	it.err = sgbucket.ErrScanCancelled
+	return nil
 }
 
 // preRecordedScanIterator holds all scan results in memory.
@@ -130,7 +144,10 @@ func preRecordScan(ctx context.Context, iter *scanIterator) *preRecordedScanIter
 	}
 	return &preRecordedScanIterator{
 		items: items,
-		err:   iter.Close(ctx),
+		// Capture the real terminal error only. Applying the user-facing Close
+		// here would record ErrScanCancelled and make Next return nil for every
+		// buffered item.
+		err: iter.drainErr(),
 	}
 }
 
@@ -148,7 +165,13 @@ func (it *preRecordedScanIterator) Err() error {
 }
 
 func (it *preRecordedScanIterator) Close(_ context.Context) error {
-	return it.err
+	if it.err != nil {
+		return it.err
+	}
+	// Clean end-of-stream: mirror gocb by recording a cancellation so a later
+	// Err reports it, while Close itself returns nil.
+	it.err = sgbucket.ErrScanCancelled
+	return nil
 }
 
 var (
