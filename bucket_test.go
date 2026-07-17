@@ -82,6 +82,27 @@ func TestNewBucket(t *testing.T) {
 	require.Equal(t, uint(0), bucketCount(bucketName))
 }
 
+// TestDeleteBucketWithLeftoverSidecarFiles ensures DeleteBucketAt succeeds even when WAL-mode
+// sidecar files (rosmar.sqlite3-wal, rosmar.sqlite3-shm) are still present in the bucket
+// directory alongside the main db file, e.g. if SQLite has not yet cleaned them up when the
+// last connection closed.
+func TestDeleteBucketWithLeftoverSidecarFiles(t *testing.T) {
+	ensureNoLeaks(t)
+	dir := testBucketPath(t)
+	bucketName := strings.ToLower(t.Name())
+	bucket, err := OpenBucket(uriFromPath(dir), bucketName, CreateNew)
+	require.NoError(t, err)
+	bucket.Close(t.Context())
+
+	for _, suffix := range []string{"-wal", "-shm"} {
+		require.NoError(t, os.WriteFile(dir+string(os.PathSeparator)+kDBFilename+suffix, []byte("leftover"), 0o644))
+	}
+
+	require.NoError(t, DeleteBucketAt(uriFromPath(dir)))
+	_, err = os.Stat(dir)
+	assert.True(t, errors.Is(err, os.ErrNotExist), "expected bucket directory to be fully removed, got err=%v", err)
+}
+
 func TestGetMissingBucket(t *testing.T) {
 	ensureNoLeaks(t)
 	path := uriFromPath(testBucketPath(t))

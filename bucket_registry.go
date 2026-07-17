@@ -101,14 +101,27 @@ func (r *bucketRegistry) unregisterBucket(bucket *Bucket) error {
 func (r *bucketRegistry) deleteBucket(ctx context.Context, bucket *Bucket) error {
 	name := bucket.name
 	r.lock.Lock()
-	defer r.lock.Unlock()
-
 	_, ok := r.buckets[name]
 	if ok {
 		delete(r.buckets, name)
 	}
 	delete(r.bucketCount, name)
+	// unlock before calling DeleteBucketAt, which itself takes the lock (via isURLInUse) to check
+	// for other open Bucket instances still backed by this URL
+	r.lock.Unlock()
 	return DeleteBucketAt(bucket.url)
+}
+
+// isURLInUse reports whether any currently-registered bucket is backed by the given URL.
+func (r *bucketRegistry) isURLInUse(url string) bool {
+	r.lock.Lock()
+	defer r.lock.Unlock()
+	for _, b := range r.buckets {
+		if b.url == url {
+			return true
+		}
+	}
+	return false
 }
 
 // getBucketNames returns a list of all bucket names in the bucketRegistry.
@@ -141,6 +154,11 @@ func unregisterBucket(bucket *Bucket) error {
 // deleteBucket will delete a bucket from the registry and from disk.
 func deleteBucket(ctx context.Context, bucket *Bucket) error {
 	return cluster.deleteBucket(ctx, bucket)
+}
+
+// isURLInUse reports whether any currently-registered bucket is backed by the given URL.
+func isURLInUse(url string) bool {
+	return cluster.isURLInUse(url)
 }
 
 // GetBucketNames returns a list of all bucket names.

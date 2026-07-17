@@ -235,7 +235,7 @@ func OpenBucketIn(dirUrlStr string, bucketName string, mode OpenMode) (*Bucket, 
 
 // Deletes the bucket at the given URL, i.e. the filesystem directory at its path, if it exists.
 // If given `InMemoryURL` it's a no-op.
-// Warning: Never call this while there are any open Bucket instances on this URL!
+// Returns an error if any other Bucket instance is still open on this URL.
 func DeleteBucketAt(urlStr string) (err error) {
 	traceEnter("DeleteBucketAt", "%q", urlStr)
 	defer func() { traceExit("DeleteBucket", err, "ok") }()
@@ -256,14 +256,26 @@ func DeleteBucketAt(urlStr string) (err error) {
 		dir = strings.TrimPrefix(dir, "/")
 	}
 
-	err = os.Remove(filepath.Join(dir, kDBFilename))
+	_, err = os.Stat(filepath.Join(dir, kDBFilename))
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil
 	} else if err != nil {
 		return err
-	} else {
-		return os.Remove(dir)
 	}
+
+	if isURLInUse(urlStr) {
+		return fmt.Errorf("cannot delete bucket at %q: still in use by an open Bucket instance", urlStr)
+	}
+
+	// Explicitly remove the db file plus its WAL-mode sidecar files (rosmar.sqlite3-wal,
+	// rosmar.sqlite3-shm), which may not have been cleaned up yet by SQLite when the last
+	// connection closed, then remove the now-empty directory.
+	for _, suffix := range []string{"", "-wal", "-shm"} {
+		if err := os.Remove(filepath.Join(dir, kDBFilename+suffix)); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return err
+		}
+	}
+	return os.Remove(dir)
 }
 
 func isInMemoryURL(urlStr string) bool {
