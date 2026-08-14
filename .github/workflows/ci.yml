@@ -22,10 +22,12 @@ on:
       - 'release/*'
 
 env:
-  ACTIONS_CHECKOUT_VERSION: &actions_checkout_version actions/checkout@v6
-  ACTIONS_SETUP_GO_VERSION: &actions_setup_go_version actions/setup-go@v6
-  GO_VERSION: &go_version 1.26.4
-  GO_TEST_ANNOTATIONS_VERSION: &go_test_annotations_version guyarb/golang-test-annotations@v0.9.0
+  # Pinned action versions, referenced by the steps below through their YAML anchors.
+  ACTIONS_CHECKOUT_VERSION: &actions_checkout_version actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+  ACTIONS_SETUP_GO_VERSION: &actions_setup_go_version actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+  ACTIONS_GOLANGCI_LINT_VERSION: &actions_golangci_lint_version golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
+  ACTIONS_GO_TEST_ANNOTATIONS_VERSION: &actions_go_test_annotations_version guyarb/golang-test-annotations@96fc379b171c49932041d6c789e73331a7bdeec1 # v0.9.0
+  GO_VERSION: &go_version 1.26.6
 
 jobs:
   addlicense:
@@ -57,7 +59,7 @@ jobs:
         shell: bash
       - name: Annotate Failures
         if: always()
-        uses: *go_test_annotations_version
+        uses: *actions_go_test_annotations_version
         with:
           test-results: test.json
 
@@ -70,7 +72,7 @@ jobs:
         with:
           go-version: *go_version
       - name: golangci-lint
-        uses: golangci/golangci-lint-action@v9
+        uses: *actions_golangci_lint_version
         with:
           version: v2.12.2
 
@@ -90,6 +92,6 @@ jobs:
         shell: bash
       - name: Annotate Failures
         if: always()
-        uses: *go_test_annotations_version
+        uses: *actions_go_test_annotations_version
         with:
           test-results: test.json
