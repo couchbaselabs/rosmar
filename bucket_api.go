@@ -259,14 +259,24 @@ func (bucket *Bucket) getOrCreateCollection(name sgbucket.DataStoreNameImpl, orC
 	bucket.mutex.Lock()
 	defer bucket.mutex.Unlock()
 
-	if collection, ok := bucket.collections[name]; ok {
-		return collection, nil
-	}
-
 	id, err := bucket._getCollectionID(name.Scope, name.Collection)
 	if err == nil {
+		// A cached collection is only usable while it still refers to the same row: another copy of this bucket
+		// may have dropped and re-created the collection, and ids are never reused, so a handle on the dropped
+		// row fails every write with a foreign-key error.
+		if collection, ok := bucket.collections[name]; ok {
+			if collection.id == id {
+				return collection, nil
+			}
+			collection.close()
+		}
 		return bucket._initCollection(name, id), nil
 	} else if err == sql.ErrNoRows {
+		if collection, ok := bucket.collections[name]; ok {
+			// The collection was dropped by another copy of the bucket; let go of it.
+			collection.close()
+			delete(bucket.collections, name)
+		}
 		if orCreate {
 			return bucket._createCollection(name)
 		} else {
