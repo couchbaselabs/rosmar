@@ -96,11 +96,6 @@ func (c *Collection) PutDDoc(_ context.Context, designDoc string, ddoc *sgbucket
 			}
 		}
 		// Remove in-memory view objects for the affected views:
-		for name := range c.viewCache {
-			if name.designDoc == designDoc {
-				delete(c.viewCache, name)
-			}
-		}
 		c.forgetCachedViews(designDoc)
 		return nil
 	})
