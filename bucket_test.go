@@ -40,10 +40,7 @@ func makeTestBucket(t *testing.T) *Bucket {
 }
 
 func makeTestBucketWithName(t *testing.T, name string) *Bucket {
-	LoggingCallback = func(level LogLevel, fmt string, args ...any) {
-		t.Helper()
-		t.Logf(logLevelNamesPrint[level]+fmt, args...)
-	}
+	logToTest(t)
 	bucket, err := OpenBucket(uriFromPath(testBucketPath(t)), name, CreateNew)
 	require.NoError(t, err)
 	t.Cleanup(func() {
@@ -51,6 +48,19 @@ func makeTestBucketWithName(t *testing.T, name string) *Bucket {
 	})
 
 	return bucket
+}
+
+// logToTest routes rosmar's logging to t.Logf for the duration of the test.  LoggingCallback is a package
+// global, so the previous callback has to be put back afterwards: left bound to a finished test's t, the next
+// log - from a later test, or from a feed or expiry goroutine - panics with "Log in goroutine after ... has
+// completed".  Registered before the bucket's cleanup so that it is restored after the bucket has closed.
+func logToTest(t *testing.T) {
+	previous := LoggingCallback
+	t.Cleanup(func() { LoggingCallback = previous })
+	LoggingCallback = func(level LogLevel, fmt string, args ...any) {
+		t.Helper()
+		t.Logf(logLevelNamesPrint[level]+fmt, args...)
+	}
 }
 
 func dsName(scope string, coll string) sgbucket.DataStoreName {
@@ -498,4 +508,28 @@ func TestUriFromPathNonWindows(t *testing.T) {
 			require.Equal(t, testCase.output, uriFromPath(testCase.input))
 		})
 	}
+}
+
+// TestTestLoggingIsRestored verifies that a test's logging callback is unbound once it finishes.  Left bound to
+// a finished test, rosmar logging from a later test panics with "Log in goroutine after ... has completed",
+// which is why the package could not be run with -count 2.
+func TestTestLoggingIsRestored(t *testing.T) {
+	previousLevel := GetLogLevel()
+	SetLogLevel(LevelInfo)
+	previousCallback := LoggingCallback
+	t.Cleanup(func() {
+		LoggingCallback = previousCallback
+		SetLogLevel(previousLevel)
+	})
+
+	var logged int
+	LoggingCallback = func(LogLevel, string, ...any) { logged++ }
+
+	t.Run("makes a bucket", func(t *testing.T) {
+		makeTestBucket(t) // binds LoggingCallback to this subtest
+	})
+
+	// The subtest has finished, so logging must have come back to this test's callback:
+	info("logging after the subtest finished")
+	require.NotZero(t, logged, "makeTestBucket left LoggingCallback bound to a finished test")
 }
