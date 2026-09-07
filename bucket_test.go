@@ -499,3 +499,46 @@ func TestUriFromPathNonWindows(t *testing.T) {
 		})
 	}
 }
+
+// TestDropDataStoreThenReCreateFromAnotherCopy verifies that a copy of a bucket which had a collection open
+// before another copy dropped it resolves the re-created collection on the next lookup.  Its cached handle
+// refers to the dropped row, and since collection ids are never reused, every write through it fails a
+// foreign-key constraint.
+func TestDropDataStoreThenReCreateFromAnotherCopy(t *testing.T) {
+	ctx := t.Context()
+	ensureNoLeakedFeeds(t)
+	bucket := makeTestBucket(t)
+
+	name := dsName("scope1", "collection1")
+	_, err := bucket.NamedDataStore(ctx, name)
+	require.NoError(t, err)
+
+	// A 2nd copy opens the collection, so it holds a handle on it:
+	bucket2, err := OpenBucket(bucket.url, strings.ToLower(t.Name()), ReOpenExisting)
+	require.NoError(t, err)
+	t.Cleanup(func() { bucket2.Close(ctx) })
+	staleColl, err := bucket2.NamedDataStore(ctx, name)
+	require.NoError(t, err)
+	addToCollection(t, staleColl, "able", 0, "A")
+
+	// Drop and re-create the collection through the 1st copy:
+	require.NoError(t, bucket.DropDataStore(ctx, name))
+	newColl, err := bucket.NamedDataStore(ctx, name)
+	require.NoError(t, err)
+
+	// The 2nd copy must resolve the re-created collection, not its handle on the dropped one:
+	coll2, err := bucket2.NamedDataStore(ctx, name)
+	require.NoError(t, err)
+	require.Equal(t, newColl.GetCollectionID(), coll2.GetCollectionID(),
+		"2nd copy kept its handle on the dropped collection")
+
+	addToCollection(t, coll2, "baker", 0, "B")
+	var value string
+	_, err = newColl.Get(ctx, "baker", &value)
+	require.NoError(t, err)
+	require.Equal(t, "B", value)
+
+	// The dropped collection's documents are gone with it:
+	_, err = newColl.Get(ctx, "able", &value)
+	require.Error(t, err)
+}
