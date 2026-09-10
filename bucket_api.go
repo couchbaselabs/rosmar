@@ -59,7 +59,7 @@ func (bucket *Bucket) Close(_ context.Context) {
 	bucket.mutex.Lock()
 	defer bucket.mutex.Unlock()
 
-	bucket.closed = true
+	bucket._closed = true
 }
 
 // _closeSqliteDB closes the underlying sqlite database and shuts down dcpFeeds. Must have a lock to call this function.
@@ -88,7 +88,7 @@ func (bucket *Bucket) CloseAndDelete(ctx context.Context) error {
 func (bucket *Bucket) close() error {
 	bucket.mutex.Lock()
 	defer bucket.mutex.Unlock()
-	defer func() { bucket.closed = true }()
+	defer func() { bucket._closed = true }()
 	return bucket._closeSqliteDB()
 }
 
@@ -403,4 +403,5 @@ var (
 	_ sgbucket.BucketStore            = &Bucket{}
 	_ sgbucket.DynamicDataStoreBucket = &Bucket{}
 	_ sgbucket.DeleteableStore        = &Bucket{}
+	_ sgbucket.MutationFeedStore      = &Bucket{}
 )

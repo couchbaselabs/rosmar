@@ -27,7 +27,12 @@ func (bucket *Bucket) StartDCPFeed(ctx context.Context, args sgbucket.FeedArgume
 	traceEnter("StartDCPFeed", "bucket=%s, args=%+v", bucket.GetName(), args)
 	// If no scopes are specified, return feed for the default collection, if it exists
 	if len(args.Scopes) == 0 {
-		return bucket.DefaultDataStore(ctx).(*Collection).StartDCPFeed(ctx, args, callback, dbStats)
+		collection, err := bucket.getCollection(defaultDataStoreName)
+		if err != nil {
+			return err
+		}
+		_, err = collection.startDCPFeed(ctx, args, callback, dbStats)
+		return err
 	}
 
 	// Validate requested collections exist before starting feeds
@@ -36,7 +41,7 @@ func (bucket *Bucket) StartDCPFeed(ctx context.Context, args sgbucket.FeedArgume
 		for _, collectionName := range collections {
 			collection, err := bucket.getCollection(sgbucket.DataStoreNameImpl{Scope: scopeName, Collection: collectionName})
 			if err != nil {
-				return fmt.Errorf("DCPFeed args specified unknown collection: %s:%s", scopeName, collectionName)
+				return fmt.Errorf("couldn't open collection %s:%s for DCP feed: %w", scopeName, collectionName, err)
 			}
 			requestedCollections = append(requestedCollections, collection)
 		}
@@ -44,9 +49,10 @@ func (bucket *Bucket) StartDCPFeed(ctx context.Context, args sgbucket.FeedArgume
 
 	doneChan := args.DoneChan
 	doneChans := map[*Collection]chan struct{}{}
+	startedFeeds := make([]*dcpFeed, 0, len(requestedCollections))
 	for _, collection := range requestedCollections {
 		// Not bothering to remove scopes from args for the single collection feeds
-		// here because it's ignored by Collection.StartDCPFeed
+		// here because it's ignored by Collection.startDCPFeed
 		collectionID := collection.GetCollectionID()
 		collectionAwareCallback := func(event sgbucket.FeedEvent) bool {
 			event.CollectionID = collectionID
@@ -58,7 +64,15 @@ func (bucket *Bucket) StartDCPFeed(ctx context.Context, args sgbucket.FeedArgume
 		argsCopy := args
 		argsCopy.DoneChan = doneChans[collection]
 
-		_ = collection.StartDCPFeed(ctx, argsCopy, collectionAwareCallback, dbStats)
+		feed, err := collection.startDCPFeed(ctx, argsCopy, collectionAwareCallback, dbStats)
+		if err != nil {
+			// Stop the feeds that did start: no doneChan of theirs is coalesced into the caller's now.
+			for _, started := range startedFeeds {
+				started.stop()
+			}
+			return fmt.Errorf("couldn't start DCP feed on %s: %w", collection.DataStoreNameImpl, err)
+		}
+		startedFeeds = append(startedFeeds, feed)
 	}
 
 	// coalesce doneChans
@@ -76,8 +90,14 @@ func (bucket *Bucket) StartDCPFeed(ctx context.Context, args sgbucket.FeedArgume
 
 //////// COLLECTION API:
 
-func (c *Collection) StartDCPFeed(ctx context.Context, args sgbucket.FeedArguments, callback sgbucket.FeedEventCallbackFunc, dbStats *expvar.Map) error {
-	traceEnter("StartDCPFeed", "collection=%s, args=%+v", c, args)
+// startDCPFeed starts a feed and returns it, so that a caller starting feeds on several collections can stop
+// the ones it already started.
+func (c *Collection) startDCPFeed(ctx context.Context, args sgbucket.FeedArguments, callback sgbucket.FeedEventCallbackFunc, dbStats *expvar.Map) (*dcpFeed, error) {
+	traceEnter("startDCPFeed", "collection=%s, args=%+v", c, args)
+	// Refuse up front on a closed bucket, so no backfill work is done for a feed that can't be registered:
+	if c.bucket.isClosed() {
+		return nil, ErrBucketClosed
+	}
 	feed := &dcpFeed{
 		ctx:           ctx,
 		collection:    c,
@@ -91,10 +111,10 @@ func (c *Collection) StartDCPFeed(ctx context.Context, args sgbucket.FeedArgumen
 		startCas := args.Backfill
 		if args.Backfill == sgbucket.FeedResume {
 			if args.CheckpointPrefix == "" {
-				return fmt.Errorf("feed's Backfill is FeedResume but no CheckpointPrefix given")
+				return nil, fmt.Errorf("feed's Backfill is FeedResume but no CheckpointPrefix given")
 			}
 			if err := feed.readCheckpoint(); err != nil {
-				return fmt.Errorf("couldn't read DCP feed checkpoint: %w", err)
+				return nil, fmt.Errorf("couldn't read DCP feed checkpoint: %w", err)
 			}
 			startCas = feed.lastCas + 1
 		}
@@ -103,7 +123,7 @@ func (c *Collection) StartDCPFeed(ctx context.Context, args sgbucket.FeedArgumen
 		feed.events.push(&event{opcode: sgbucket.FeedOpBeginBackfill})
 		err := c.enqueueBackfillEvents(startCas, args.FeedContent, &feed.events)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		debug("%s ended backfill", feed)
 		feed.events.push(&event{opcode: sgbucket.FeedOpEndBackfill})
@@ -112,13 +132,18 @@ func (c *Collection) StartDCPFeed(ctx context.Context, args sgbucket.FeedArgumen
 	if args.Dump {
 		feed.events.push(nil) // push an eof
 	} else {
-		// Register the feed with the collection for future notifications:
+		// Register the feed with the collection for future notifications.  Registering on a closed copy of the
+		// bucket would leave a feed nothing can stop: Close only stops the feeds the copy holds when it closes.
 		c.bucket.mutex.Lock()
+		if c.bucket._closed {
+			c.bucket.mutex.Unlock()
+			return nil, ErrBucketClosed
+		}
 		c.bucket.collectionFeeds[c.DataStoreNameImpl] = append(c.bucket.collectionFeeds[c.DataStoreNameImpl], feed)
 		c.bucket.mutex.Unlock()
 	}
 	go feed.run()
-	return nil
+	return feed, nil
 }
 
 func (c *Collection) enqueueBackfillEvents(startCas uint64, feedContent sgbucket.FeedContent, q *eventQueue) error {
@@ -172,7 +197,7 @@ func (c *Collection) _stopFeeds() {
 	for _, feed := range c.bucket.collectionFeeds[c.DataStoreNameImpl] {
 		feed.close()
 	}
-	c.bucket.collectionFeeds = nil
+	delete(c.bucket.collectionFeeds, c.DataStoreNameImpl)
 }
 
 //////// DCPFEED:
@@ -308,6 +333,29 @@ func (feed *dcpFeed) run() {
 
 func (feed *dcpFeed) close() {
 	feed.events.close()
+}
+
+// stop closes the feed and removes it from its collection's registered feeds, so that nothing keeps pushing
+// events to it.  Must not be called with the bucket's lock held.
+func (feed *dcpFeed) stop() {
+	feed.close()
+
+	c := feed.collection
+	c.bucket.mutex.Lock()
+	defer c.bucket.mutex.Unlock()
+	feeds := c.bucket.collectionFeeds[c.DataStoreNameImpl]
+	// A new slice, rather than deleting in place: postEvent iterates the old one without the lock.
+	remaining := make([]*dcpFeed, 0, len(feeds))
+	for _, f := range feeds {
+		if f != feed {
+			remaining = append(remaining, f)
+		}
+	}
+	if len(remaining) == 0 {
+		delete(c.bucket.collectionFeeds, c.DataStoreNameImpl)
+	} else {
+		c.bucket.collectionFeeds[c.DataStoreNameImpl] = remaining
+	}
 }
 
 //////// EVENTS

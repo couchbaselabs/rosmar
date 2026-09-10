@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -856,4 +857,220 @@ func TestFeedContent(t *testing.T) {
 			close(terminator)
 		})
 	}
+}
+
+// TestStartFeedOnClosedBucket verifies that a feed cannot be started on a closed copy of a bucket.  Such a feed
+// would be registered in the shared feed list with nothing left to stop it: Bucket.Close only stops the feeds
+// the copy had when it closed, so it would run until the database itself closes -- never, for an in-memory
+// bucket that is closed rather than deleted.
+func TestStartFeedOnClosedBucket(t *testing.T) {
+	ctx := t.Context()
+	ensureNoLeakedFeeds(t)
+	bucket := makeTestBucket(t)
+	c := bucket.DefaultDataStore(ctx).(*Collection)
+
+	// A 2nd copy keeps the database open, so only this copy of the bucket is closed:
+	bucket2, err := OpenBucket(bucket.url, strings.ToLower(t.Name()), ReOpenExisting)
+	require.NoError(t, err)
+	t.Cleanup(func() { bucket2.Close(ctx) })
+
+	bucket.Close(ctx)
+
+	callback := func(sgbucket.FeedEvent) bool { return true }
+	args := sgbucket.FeedArguments{Backfill: sgbucket.FeedNoBackfill, DoneChan: make(chan struct{})}
+
+	require.ErrorIs(t, bucket.StartDCPFeed(ctx, args, callback, nil), ErrBucketClosed)
+	_, err = c.startDCPFeed(ctx, args, callback, nil)
+	require.ErrorIs(t, err, ErrBucketClosed)
+
+	requireNoRegisteredFeeds(t, bucket)
+
+	// The still-open copy can start a feed on the same collection:
+	c2 := bucket2.DefaultDataStore(ctx).(*Collection)
+	events2, _ := startFeed(t, bucket2)
+	addToCollection(t, c2, "able", 0, "A")
+	e := <-events2
+	require.Equal(t, "able", string(e.Key))
+}
+
+// TestStartDCPFeedUnknownCollection verifies that a bucket-level feed on a collection that does not exist
+// fails without creating the collection and without starting a feed on the collections that do exist.
+func TestStartDCPFeedUnknownCollection(t *testing.T) {
+	ctx := t.Context()
+	ensureNoLeakedFeeds(t)
+	bucket := makeTestBucket(t)
+
+	_, err := bucket.NamedDataStore(ctx, dsName("scope1", "collection1"))
+	require.NoError(t, err)
+
+	callback := func(sgbucket.FeedEvent) bool { return true }
+	args := sgbucket.FeedArguments{
+		Backfill: sgbucket.FeedNoBackfill,
+		Scopes:   map[string][]string{"scope1": {"collection1", "collection2"}},
+		DoneChan: make(chan struct{}),
+	}
+	err = bucket.StartDCPFeed(ctx, args, callback, nil)
+	require.ErrorContains(t, err, "scope1:collection2")
+	var missing sgbucket.MissingError
+	require.ErrorAs(t, err, &missing)
+
+	stores, err := bucket.ListDataStores(ctx)
+	require.NoError(t, err)
+	require.NotContains(t, stores, dsName("scope1", "collection2"), "the feed created the collection")
+
+	requireNoRegisteredFeeds(t, bucket)
+}
+
+// TestStartDCPFeedMissingDefaultCollection verifies that a bucket-level feed with no scopes fails when the
+// default collection does not exist, instead of creating it.
+func TestStartDCPFeedMissingDefaultCollection(t *testing.T) {
+	ctx := t.Context()
+	ensureNoLeakedFeeds(t)
+	bucket := makeTestBucket(t)
+
+	_, err := bucket.db().Exec(`DELETE FROM collections WHERE scope=?1 AND name=?2`,
+		defaultDataStoreName.Scope, defaultDataStoreName.Collection)
+	require.NoError(t, err)
+
+	callback := func(sgbucket.FeedEvent) bool { return true }
+	args := sgbucket.FeedArguments{Backfill: sgbucket.FeedNoBackfill, DoneChan: make(chan struct{})}
+	require.Error(t, bucket.StartDCPFeed(ctx, args, callback, nil))
+
+	stores, err := bucket.ListDataStores(ctx)
+	require.NoError(t, err)
+	require.Empty(t, stores, "the feed created the default collection")
+}
+
+// TestStartDCPFeedCollectionFailure verifies that a bucket-level feed reports a collection feed that cannot
+// start.  Ignoring the failure returns success for a feed that never runs, and leaves the caller's DoneChan
+// waiting on a collection feed that will never close it.
+func TestStartDCPFeedCollectionFailure(t *testing.T) {
+	ctx := t.Context()
+	ensureNoLeakedFeeds(t)
+	bucket := makeTestBucket(t)
+
+	for _, name := range []string{"collection1", "collection2"} {
+		_, err := bucket.NamedDataStore(ctx, dsName("scope1", name))
+		require.NoError(t, err)
+	}
+
+	callback := func(sgbucket.FeedEvent) bool { return true }
+	// FeedResume without a CheckpointPrefix cannot start:
+	args := sgbucket.FeedArguments{
+		Backfill: sgbucket.FeedResume,
+		Scopes:   map[string][]string{"scope1": {"collection1", "collection2"}},
+		DoneChan: make(chan struct{}),
+	}
+	require.ErrorContains(t, bucket.StartDCPFeed(ctx, args, callback, nil), "CheckpointPrefix")
+	requireNoRegisteredFeeds(t, bucket)
+}
+
+// requireNoRegisteredFeeds asserts that none of the bucket's collections has a registered feed.
+func requireNoRegisteredFeeds(t *testing.T, bucket *Bucket) {
+	bucket.mutex.Lock()
+	defer bucket.mutex.Unlock()
+	require.Empty(t, bucket.collectionFeeds, "a feed is registered on the bucket")
+}
+
+// TestDropCollectionStopsOnlyItsFeeds verifies that dropping a collection leaves the feeds on the other
+// collections registered and running.  Clearing every collection's feeds would leave those feeds
+// unreachable: nothing posts events to them, and nothing is left to stop them.
+func TestDropCollectionStopsOnlyItsFeeds(t *testing.T) {
+	ctx := t.Context()
+	ensureNoLeakedFeeds(t)
+	bucket := makeTestBucket(t)
+
+	collection1, err := bucket.NamedDataStore(ctx, dsName("scope1", "collection1"))
+	require.NoError(t, err)
+	_, err = bucket.NamedDataStore(ctx, dsName("scope1", "collection2"))
+	require.NoError(t, err)
+
+	args := sgbucket.FeedArguments{
+		Backfill:   sgbucket.FeedNoBackfill,
+		Scopes:     map[string][]string{"scope1": {"collection1"}},
+		Terminator: make(chan bool),
+	}
+	events, _ := startFeedWithArgs(t, bucket, args)
+	defer close(args.Terminator)
+
+	require.NoError(t, bucket.DropDataStore(ctx, dsName("scope1", "collection2")))
+
+	addToCollection(t, collection1, "able", 0, "A")
+	select {
+	case e := <-events:
+		require.Equal(t, "able", string(e.Key))
+	case <-time.After(5 * time.Second):
+		require.Fail(t, "collection1's feed got no event after collection2 was dropped")
+	}
+}
+
+// TestStartDCPFeedCollectionFailureDeregisters verifies that a bucket-level feed that fails partway through
+// leaves no feed registered.  A stopped feed left in the collection's feed list keeps getting events pushed
+// to it for the life of the bucket, and every retry adds another one.
+func TestStartDCPFeedCollectionFailureDeregisters(t *testing.T) {
+	ctx := t.Context()
+	ensureNoLeakedFeeds(t)
+	bucket := makeTestBucket(t)
+
+	for _, name := range []string{"collection1", "collection2"} {
+		_, err := bucket.NamedDataStore(ctx, dsName("scope1", name))
+		require.NoError(t, err)
+	}
+
+	// Fail the 2nd collection's checkpoint read, so the 1st collection's feed has already started:
+	metadataStore := &failingGetDataStore{DataStore: bucket.DefaultDataStore(ctx)}
+	metadataStore.succeedingGets.Store(1)
+
+	callback := func(sgbucket.FeedEvent) bool { return true }
+	args := sgbucket.FeedArguments{
+		Backfill:         sgbucket.FeedResume,
+		CheckpointPrefix: "Checkpoint",
+		MetadataStore:    metadataStore,
+		Scopes:           map[string][]string{"scope1": {"collection1", "collection2"}},
+		DoneChan:         make(chan struct{}),
+	}
+	require.ErrorIs(t, bucket.StartDCPFeed(ctx, args, callback, nil), errInjectedGet)
+	requireNoRegisteredFeeds(t, bucket)
+}
+
+// TestStartDCPFeedClosedBucketError verifies that a bucket-level feed on a closed bucket reports the closed
+// bucket, rather than blaming the collection the caller asked for.
+func TestStartDCPFeedClosedBucketError(t *testing.T) {
+	ctx := t.Context()
+	ensureNoLeakedFeeds(t)
+	bucket := makeTestBucket(t)
+
+	// A 2nd copy creates the collection and keeps the database open, so this copy has never opened it:
+	bucket2, err := OpenBucket(bucket.url, strings.ToLower(t.Name()), ReOpenExisting)
+	require.NoError(t, err)
+	t.Cleanup(func() { bucket2.Close(ctx) })
+	_, err = bucket2.NamedDataStore(ctx, dsName("scope1", "collection1"))
+	require.NoError(t, err)
+
+	bucket.Close(ctx)
+
+	callback := func(sgbucket.FeedEvent) bool { return true }
+	args := sgbucket.FeedArguments{
+		Backfill: sgbucket.FeedNoBackfill,
+		Scopes:   map[string][]string{"scope1": {"collection1"}},
+		DoneChan: make(chan struct{}),
+	}
+	err = bucket.StartDCPFeed(ctx, args, callback, nil)
+	require.ErrorIs(t, err, ErrBucketClosed)
+	require.NotContains(t, err.Error(), "unknown collection")
+}
+
+var errInjectedGet = fmt.Errorf("injected metadata store failure")
+
+// failingGetDataStore is a metadata store whose Get fails once succeedingGets of them have succeeded.
+type failingGetDataStore struct {
+	sgbucket.DataStore
+	succeedingGets atomic.Int32
+}
+
+func (ds *failingGetDataStore) Get(ctx context.Context, key string, rv any) (uint64, error) {
+	if ds.succeedingGets.Add(-1) < 0 {
+		return 0, errInjectedGet
+	}
+	return ds.DataStore.Get(ctx, key, rv)
 }

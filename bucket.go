@@ -38,7 +38,7 @@ func SetClockForTest(getTime func() uint64) {
 }
 
 // Rosmar implementation of a collection-aware bucket.
-// Implements sgbucket interfaces BucketStore, DynamicDataStoreBucket, DeletableStore, MutationFeedStore2.
+// Implements sgbucket interfaces BucketStore, DynamicDataStoreBucket, DeletableStore, MutationFeedStore.
 type Bucket struct {
 	url             string         // Filesystem path or other URL
 	name            string         // Bucket name
@@ -49,7 +49,7 @@ type Bucket struct {
 	expManager      *expiryManager // expiration manager for bucket
 	serial          uint32         // Serial number for logging
 	inMemory        bool           // True if it's an in-memory database
-	closed          bool           // represents state when it is closed
+	_closed         bool           // represents state when it is closed; guarded by mutex
 }
 
 type collectionsMap = map[sgbucket.DataStoreNameImpl]*Collection
@@ -319,6 +319,13 @@ func (bucket *Bucket) initializeSchema(bucketName string) (err error) {
 	return
 }
 
+// isClosed returns true if this copy of the bucket has been closed.
+func (bucket *Bucket) isClosed() bool {
+	bucket.mutex.Lock()
+	defer bucket.mutex.Unlock()
+	return bucket._closed
+}
+
 // db returns the database handle as a `queryable` interface value.
 // If the bucket has been closed, it returns a special `closedDB` value that will return
 // ErrBucketClosed from any call.
@@ -330,7 +337,7 @@ func (bucket *Bucket) db() queryable {
 
 // db returns the database handle as a `queryable` interface value. This is the same as `db()` without locking. This is not safe to call without bucket.mutex being locked the caller.
 func (bucket *Bucket) _db() queryable {
-	if bucket.closed {
+	if bucket._closed {
 		return closedDB{}
 	}
 	return bucket.sqliteDB
@@ -345,7 +352,7 @@ func (bucket *Bucket) inTransaction(fn func(txn *sql.Tx) error) error {
 	bucket.mutex.Lock()
 	defer bucket.mutex.Unlock()
 
-	if bucket.closed {
+	if bucket._closed {
 		return ErrBucketClosed
 	}
 

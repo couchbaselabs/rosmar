@@ -25,19 +25,19 @@ func TestReuseInMemoryBucket(t *testing.T) {
 	key := "foo"
 	body := []byte("bar")
 	require.NoError(t, bucket1.DefaultDataStore(ctx).Set(ctx, "foo", 0, nil, body))
-	require.False(t, bucket1.closed)
+	require.False(t, bucket1.isClosed())
 	bucket1.Close(ctx)
 	defer func() {
 		assert.NoError(t, bucket1.CloseAndDelete(ctx))
 		assert.Len(t, GetBucketNames(), 0)
 	}()
 
-	require.True(t, bucket1.closed)
+	require.True(t, bucket1.isClosed())
 	require.Equal(t, []string{bucketName}, GetBucketNames())
 
 	bucket2, err := OpenBucket(InMemoryURL, bucketName, CreateOrOpen)
 	require.NoError(t, err)
-	require.False(t, bucket2.closed)
+	require.False(t, bucket2.isClosed())
 	require.Equal(t, []string{bucketName}, GetBucketNames())
 	var bucket2Body []byte
 	_, err = bucket2.DefaultDataStore(ctx).Get(ctx, key, &bucket2Body)
