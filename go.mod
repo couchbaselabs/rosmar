@@ -5,7 +5,7 @@ go 1.25.0
 require (
 	github.com/couchbase/sg-bucket v0.0.0-20260714130240-329df715dd61
 	github.com/google/uuid v1.6.0
-	github.com/mattn/go-sqlite3 v1.14.50
+	github.com/mattn/go-sqlite3 v1.14.52
 	github.com/stretchr/testify v1.12.1
 )
 
