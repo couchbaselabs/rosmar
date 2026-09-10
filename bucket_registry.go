@@ -20,7 +20,7 @@ import (
 // * In Memory bucket: bucket is not deleted until any Bucket's CloseAndDelete is closed.
 // * On disk bucket: bucket is deleted from registry when all there are no open copies of the bucket in memory. Unlike in memory bucket, the bucket will stay persisted on disk to be reopened.
 //
-// Any Buckets returned by OpenBucket will be a copy of the canonical bucket object, which shares pointers to all mutable objects and copies of immutable objects. The difference between the canonical copy of the bucket is the `_closed` state, representing when the bucket is no longer writeable. Sharing the data structures allows a single DCP prodcuer and expiry framework.
+// Any Buckets returned by OpenBucket will be a copy of the canonical bucket object, which shares pointers to all mutable objects and copies of immutable objects. The difference between the canonical copy of the bucket is the `_closed` state, representing when the bucket is no longer writable. Sharing the data structures allows a single DCP producer and expiry framework.
 
 // bucketRegistry tracks all open buckets
 type bucketRegistry struct {
