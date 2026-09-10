@@ -11,11 +11,11 @@ package rosmar
 import (
 	"errors"
 	"fmt"
-	"log"
 	"os"
 	"runtime"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	sgbucket "github.com/couchbase/sg-bucket"
@@ -358,75 +358,75 @@ func TestGetPersistentMultiCollectionBucket(t *testing.T) {
 }
 
 func TestExpiration(t *testing.T) {
-	ctx := t.Context()
-	ensureNoLeaks(t)
-	bucket := makeTestBucket(t)
-	c := bucket.DefaultDataStore(ctx)
+	synctest.Test(t, func(t *testing.T) {
+		ctx := t.Context()
+		ensureNoLeaks(t)
+		bucket := makeTestBucket(t)
+		c := bucket.DefaultDataStore(ctx)
 
-	exp, err := bucket.nextExpiration()
-	require.NoError(t, err)
-	require.Equal(t, Exp(0), exp)
+		exp, err := bucket.nextExpiration()
+		require.NoError(t, err)
+		require.Equal(t, Exp(0), exp)
 
-	exp2 := Exp(time.Now().Add(-5 * time.Second).Unix())
-	exp4 := Exp(time.Now().Add(2 * time.Second).Unix())
+		pastExp := Exp(time.Now().Add(-5 * time.Second).Unix())
+		futureExp := Exp(time.Now().Add(2 * time.Second).Unix())
 
-	requireAddRaw(t, c, "k1", 0, []byte("v1"))
-	requireAddRaw(t, c, "k2", exp2, []byte("v2"))
-	requireAddRaw(t, c, "k3", 0, []byte("v3"))
-	requireAddRaw(t, c, "k4", exp4, []byte("v4"))
+		requireAddRaw(t, c, "k1", 0, []byte("v1"))
+		requireAddRaw(t, c, "k3", 0, []byte("v3"))
+		requireAddRaw(t, c, "k4", futureExp, []byte("v4"))
 
-	exp, err = bucket.nextExpiration()
-	require.NoError(t, err)
-	// Usually this will return exp2, but if this is slow enough that the expiration goroutine runs to expire document k2, it can return exp4.
-	require.Contains(t, []Exp{exp2, exp4}, exp)
+		exp, err = bucket.nextExpiration()
+		require.NoError(t, err)
+		require.Equal(t, int(futureExp), int(exp))
 
-	log.Printf("... waiting 1 sec ...")
-	time.Sleep(1 * time.Second)
+		// k2 is already expired, so wait for the expiration goroutine to remove it
+		requireAddRaw(t, c, "k2", pastExp, []byte("v2"))
+		synctest.Wait()
 
-	exp, err = bucket.nextExpiration()
-	require.NoError(t, err)
-	require.Equal(t, int(exp4), int(exp))
+		exp, err = bucket.nextExpiration()
+		require.NoError(t, err)
+		require.Equal(t, int(futureExp), int(exp))
 
-	_, _, err = c.GetRaw(ctx, "k1")
-	assert.NoError(t, err)
-	_, _, err = c.GetRaw(ctx, "k2")
-	assert.Error(t, err) // k2 is gone
-	_, _, err = c.GetRaw(ctx, "k3")
-	assert.NoError(t, err)
-	_, _, err = c.GetRaw(ctx, "k4")
-	assert.NoError(t, err)
+		_, _, err = c.GetRaw(ctx, "k1")
+		assert.NoError(t, err)
+		_, _, err = c.GetRaw(ctx, "k2")
+		assert.Error(t, err) // k2 is gone
+		_, _, err = c.GetRaw(ctx, "k3")
+		assert.NoError(t, err)
+		_, _, err = c.GetRaw(ctx, "k4")
+		assert.NoError(t, err)
 
-	log.Printf("... waiting 2 secs ...")
-	time.Sleep(2 * time.Second)
+		time.Sleep(3 * time.Second)
+		synctest.Wait()
 
-	exp, err = bucket.nextExpiration()
-	require.NoError(t, err)
-	assert.Equal(t, uint32(0), exp)
+		exp, err = bucket.nextExpiration()
+		require.NoError(t, err)
+		assert.Equal(t, uint32(0), exp)
 
-	_, _, err = c.GetRaw(ctx, "k4")
-	assert.Error(t, err)
+		_, _, err = c.GetRaw(ctx, "k4")
+		assert.Error(t, err)
 
-	n, err := bucket.PurgeTombstones()
-	assert.NoError(t, err)
-	assert.Equal(t, int64(2), n)
+		n, err := bucket.PurgeTombstones()
+		assert.NoError(t, err)
+		assert.Equal(t, int64(2), n)
+	})
 }
 
 func TestExpirationAfterClose(t *testing.T) {
-	ctx := t.Context()
-	t.Skip("Slow test useful for debugging issues with expiration")
-	bucket, err := OpenBucket(InMemoryURL, strings.ToLower(t.Name()), CreateNew)
-	defer func() {
-		assert.NoError(t, bucket.CloseAndDelete(ctx))
-	}()
-	require.NoError(t, err)
-	c := bucket.DefaultDataStore(ctx)
+	synctest.Test(t, func(t *testing.T) {
+		ctx := t.Context()
+		ensureNoLeaks(t)
+		// a file-based bucket is required: Close leaves the sqlite database open for an in-memory bucket
+		bucket := makeTestBucket(t)
+		c := bucket.DefaultDataStore(ctx)
 
-	// set expiry long enough that Close will happen first
-	exp := Exp(time.Now().Add(1 * time.Second).Unix())
-	requireAddRaw(t, c, "docID", exp, []byte("v1"))
-	bucket.Close(ctx)
-	// sleep to ensure we won't panic
-	time.Sleep(2 * time.Second)
+		// set expiry long enough that Close will happen first
+		exp := Exp(time.Now().Add(1 * time.Second).Unix())
+		requireAddRaw(t, c, "docID", exp, []byte("v1"))
+		bucket.Close(ctx)
+		// pass the expiry time: an expiration left running would panic on the closed database
+		time.Sleep(2 * time.Second)
+	})
 }
 
 func TestUriFromPathWindows(t *testing.T) {
