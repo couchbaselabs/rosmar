@@ -128,7 +128,9 @@ func (c *Collection) findView(ctx context.Context, q queryable, designDoc string
 	if err != nil {
 		if err == sql.ErrNoRows {
 			err = sgbucket.MissingError{Key: key.String()}
+			c.mutex.Lock()
 			delete(c.viewCache, key) // Remove any cached copy
+			c.mutex.Unlock()
 		}
 		return
 	}
@@ -154,8 +156,11 @@ func (c *Collection) findView(ctx context.Context, q queryable, designDoc string
 	return
 }
 
-// Remove in-memory view objects for a design doc: [Collection must be locked]
+// Remove in-memory view objects for a design doc.  Takes the collection's lock, which guards viewCache; the
+// callers hold the bucket's lock, and the bucket's lock is always taken before the collection's.
 func (c *Collection) forgetCachedViews(designDoc string) {
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
 	for name := range c.viewCache {
 		if name.designDoc == designDoc {
 			delete(c.viewCache, name)
