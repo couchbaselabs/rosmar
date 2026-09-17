@@ -324,11 +324,32 @@ func (feed *dcpFeed) run() {
 	}
 	debug("%s stopping", feed)
 
+	// A dump feed that reached its end-of-feed marker streamed everything, so its checkpoint is spent.
+	// A terminated feed keeps its checkpoint so the next run can resume.
+	if feed.args.Dump && !feed.events.closed() {
+		if err := feed.deleteCheckpoint(); err != nil {
+			logError("Error deleting %s checkpoint: %v", feed, err)
+		}
+		return
+	}
+
 	if feed.lastCasChanged {
 		if err := feed.writeCheckpoint(); err != nil {
 			logError("Error saving %s checkpoint: %v", feed, err)
 		}
 	}
+}
+
+// Deletes the feed's checkpoint document, if there is one.
+func (feed *dcpFeed) deleteCheckpoint() error {
+	if feed.args.CheckpointPrefix == "" {
+		return nil
+	}
+	err := feed.metadataStore.Delete(feed.ctx, feed.checkpointKey())
+	if _, ok := err.(sgbucket.MissingError); ok {
+		return nil
+	}
+	return err
 }
 
 func (feed *dcpFeed) close() {

@@ -56,6 +56,13 @@ func (q *queue[T]) pull() (result T) {
 	return
 }
 
+// closed returns true if the queue was closed, rather than drained to its end-of-feed marker.
+func (q *queue[T]) closed() bool {
+	q.cond.L.Lock()
+	defer q.cond.L.Unlock()
+	return q.list == nil
+}
+
 func (q *queue[T]) close() {
 	q.cond.L.Lock()
 	if q.list != nil {
