@@ -11,6 +11,7 @@ package rosmar
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"expvar"
 	"fmt"
 	"sync/atomic"
@@ -359,7 +360,7 @@ func (feed *dcpFeed) deleteCheckpoint() error {
 		return nil
 	}
 	err := feed.metadataStore.Delete(feed.ctx, feed.checkpointKey())
-	if _, ok := err.(sgbucket.MissingError); ok {
+	if _, ok := errors.AsType[sgbucket.MissingError](err); ok {
 		return nil
 	}
 	return err
