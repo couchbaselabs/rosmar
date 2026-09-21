@@ -207,11 +207,128 @@ func TestDumpDeletesCheckpoint(t *testing.T) {
 	event = <-events
 	assert.Equal(t, sgbucket.FeedOpBeginBackfill, event.Opcode)
 	readExpectedEventsABC(t, events)
+
+	// the first feed wrote a checkpoint before the feed deleted it, so its tombstone is in the backfill
+	e := <-events
+	assert.Equal(t, sgbucket.FeedOpDeletion, e.Opcode)
+	assert.Equal(t, prefix, string(e.Key))
+
 	event = <-events
 	assert.Equal(t, sgbucket.FeedOpEndBackfill, event.Opcode)
 
 	_, ok = <-doneChan
 	assert.False(t, ok)
+}
+
+// TestDumpWithoutMetadataStore verifies that a dump feed given a checkpoint prefix but no metadata
+// store finishes without panicking. Such a feed never wrote a checkpoint, so there is none to delete.
+func TestDumpWithoutMetadataStore(t *testing.T) {
+	ensureNoLeakedFeeds(t)
+	bucket := makeTestBucket(t)
+	ctx := t.Context()
+
+	doneChan := make(chan struct{})
+	args := sgbucket.FeedArguments{
+		ID:               "myID",
+		Backfill:         0,
+		Dump:             true,
+		CheckpointPrefix: "NoMetadataStoreCheckpoint",
+		DoneChan:         doneChan,
+	}
+	require.NoError(t, bucket.StartDCPFeed(ctx, args, func(sgbucket.FeedEvent) bool { return true }, nil))
+	<-doneChan
+}
+
+// TestDumpAcrossCollectionsDeletesCheckpointOnlyWhenAllComplete verifies that the checkpoint shared by
+// a multi-collection feed survives while any collection is still using it. The feed runs one goroutine
+// per collection, so one collection finishing must not drop the document the others depend on.
+func TestDumpAcrossCollectionsDeletesCheckpointOnlyWhenAllComplete(t *testing.T) {
+	const prefix = "MultiCollectionDumpCheckpoint"
+	scopes := map[string][]string{"scope1": {"collection1", "collection2"}}
+
+	newArgs := func(terminator chan bool) sgbucket.FeedArguments {
+		return sgbucket.FeedArguments{
+			ID:               "myID",
+			Backfill:         sgbucket.FeedResume,
+			Dump:             true,
+			Terminator:       terminator,
+			CheckpointPrefix: prefix,
+			Scopes:           scopes,
+		}
+	}
+
+	seed := func(t *testing.T, bucket *Bucket) (*Collection, uint32) {
+		ctx := t.Context()
+		c1, err := bucket.NamedDataStore(ctx, dsName("scope1", "collection1"))
+		require.NoError(t, err)
+		c2, err := bucket.NamedDataStore(ctx, dsName("scope1", "collection2"))
+		require.NoError(t, err)
+		for i := range 500 {
+			_, err := c1.Add(ctx, fmt.Sprintf("c1-doc%d", i), 0, "V")
+			require.NoError(t, err)
+			_, err = c2.Add(ctx, fmt.Sprintf("c2-doc%d", i), 0, "V")
+			require.NoError(t, err)
+		}
+		return bucket.DefaultDataStore(ctx).(*Collection), c2.GetCollectionID()
+	}
+
+	t.Run("all collections complete", func(t *testing.T) {
+		ensureNoLeakedFeeds(t)
+		bucket := makeTestBucket(t)
+		ctx := t.Context()
+		metadataStore, _ := seed(t, bucket)
+
+		args := newArgs(nil)
+		args.MetadataStore = metadataStore
+		doneChan := make(chan struct{})
+		args.DoneChan = doneChan
+		require.NoError(t, bucket.StartDCPFeed(ctx, args, func(sgbucket.FeedEvent) bool { return true }, nil))
+		<-doneChan
+
+		var checkpt checkpoint
+		_, err := metadataStore.Get(ctx, prefix, &checkpt)
+		require.Error(t, err)
+		require.IsType(t, sgbucket.MissingError{}, err)
+	})
+
+	t.Run("one collection terminated", func(t *testing.T) {
+		ensureNoLeakedFeeds(t)
+		bucket := makeTestBucket(t)
+		ctx := t.Context()
+		metadataStore, c2ID := seed(t, bucket)
+
+		terminator := make(chan bool)
+		doneChan := make(chan struct{})
+		args := newArgs(terminator)
+		args.MetadataStore = metadataStore
+		args.DoneChan = doneChan
+
+		firstC2 := make(chan struct{})
+		release := make(chan struct{})
+		var once sync.Once
+		callback := func(event sgbucket.FeedEvent) bool {
+			// hold collection2 inside its own goroutine so it is still running when the feed is stopped
+			if event.CollectionID == c2ID && event.Opcode == sgbucket.FeedOpMutation {
+				once.Do(func() {
+					close(firstC2)
+					<-release
+				})
+			}
+			return true
+		}
+		require.NoError(t, bucket.StartDCPFeed(ctx, args, callback, nil))
+
+		<-firstC2
+		close(terminator)
+		close(release)
+		<-doneChan
+
+		// collection2 was cut short, so the shared checkpoint is still needed
+		var checkpt checkpoint
+		_, err := metadataStore.Get(ctx, prefix, &checkpt)
+		require.NoError(t, err)
+		assert.NotEmpty(t, checkpt.LastCas)
+	})
 }
 
 // TestDumpKeepsCheckpointWhenTerminated verifies that a dump feed stopped before it streams

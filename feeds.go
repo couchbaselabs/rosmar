@@ -25,18 +25,16 @@ var activeFeedCount int32 // for tests
 
 func (bucket *Bucket) StartDCPFeed(ctx context.Context, args sgbucket.FeedArguments, callback sgbucket.FeedEventCallbackFunc, dbStats *expvar.Map) error {
 	traceEnter("StartDCPFeed", "bucket=%s, args=%+v", bucket.GetName(), args)
-	// If no scopes are specified, return feed for the default collection, if it exists
+	// Validate requested collections exist before starting feeds. No scopes means the default
+	// collection, if it exists.
+	requestedCollections := make([]*Collection, 0)
 	if len(args.Scopes) == 0 {
 		collection, err := bucket.getCollection(defaultDataStoreName)
 		if err != nil {
 			return err
 		}
-		_, err = collection.startDCPFeed(ctx, args, callback, dbStats)
-		return err
+		requestedCollections = append(requestedCollections, collection)
 	}
-
-	// Validate requested collections exist before starting feeds
-	requestedCollections := make([]*Collection, 0)
 	for scopeName, collections := range args.Scopes {
 		for _, collectionName := range collections {
 			collection, err := bucket.getCollection(sgbucket.DataStoreNameImpl{Scope: scopeName, Collection: collectionName})
@@ -79,6 +77,13 @@ func (bucket *Bucket) StartDCPFeed(ctx context.Context, args sgbucket.FeedArgume
 	go func() {
 		for _, collection := range requestedCollections {
 			<-doneChans[collection]
+		}
+		// The checkpoint is shared by every collection in the feed, so drop it only once they have all
+		// streamed to the end. A single terminated collection means it is still needed to resume.
+		if args.Dump && allFeedsCompleted(startedFeeds) {
+			if err := startedFeeds[0].deleteCheckpoint(); err != nil {
+				logError("Error deleting checkpoint %q: %v", args.CheckpointPrefix, err)
+			}
 		}
 		if doneChan != nil {
 			close(doneChan)
@@ -217,6 +222,8 @@ type dcpFeed struct {
 	events         eventQueue
 	lastCas        CAS
 	lastCasChanged bool
+	// completed reports that the feed drained to its end-of-feed marker, rather than being terminated.
+	completed atomic.Bool
 }
 
 func (feed *dcpFeed) String() string {
@@ -324,14 +331,9 @@ func (feed *dcpFeed) run() {
 	}
 	debug("%s stopping", feed)
 
-	// A dump feed that reached its end-of-feed marker streamed everything, so its checkpoint is spent.
-	// A terminated feed keeps its checkpoint so the next run can resume.
-	if feed.args.Dump && !feed.events.closed() {
-		if err := feed.deleteCheckpoint(); err != nil {
-			logError("Error deleting %s checkpoint: %v", feed, err)
-		}
-		return
-	}
+	// Recorded before the deferred close of DoneChan, so a waiter sees a settled value. The checkpoint
+	// is shared by every collection in the feed, so only StartDCPFeed can decide to delete it.
+	feed.completed.Store(!feed.events.closed())
 
 	if feed.lastCasChanged {
 		if err := feed.writeCheckpoint(); err != nil {
@@ -340,9 +342,20 @@ func (feed *dcpFeed) run() {
 	}
 }
 
-// Deletes the feed's checkpoint document, if there is one.
+// allFeedsCompleted reports whether every feed drained to its end-of-feed marker.
+func allFeedsCompleted(feeds []*dcpFeed) bool {
+	for _, feed := range feeds {
+		if !feed.completed.Load() {
+			return false
+		}
+	}
+	return len(feeds) > 0
+}
+
+// Deletes the feed's checkpoint document, if there is one. A feed given no metadata store never wrote
+// one, so there is nothing to delete.
 func (feed *dcpFeed) deleteCheckpoint() error {
-	if feed.args.CheckpointPrefix == "" {
+	if feed.args.CheckpointPrefix == "" || feed.metadataStore == nil {
 		return nil
 	}
 	err := feed.metadataStore.Delete(feed.ctx, feed.checkpointKey())
