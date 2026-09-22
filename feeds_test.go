@@ -303,25 +303,27 @@ func TestDumpAcrossCollectionsDeletesCheckpointOnlyWhenAllComplete(t *testing.T)
 		args.MetadataStore = metadataStore
 		args.DoneChan = doneChan
 
-		firstC2 := make(chan struct{})
-		release := make(chan struct{})
-		var once sync.Once
+		// step collection2 one event at a time, so it is still running when the feed is stopped
+		step := make(chan struct{})
 		callback := func(event sgbucket.FeedEvent) bool {
-			// hold collection2 inside its own goroutine so it is still running when the feed is stopped
 			if event.CollectionID == c2ID && event.Opcode == sgbucket.FeedOpMutation {
-				once.Do(func() {
-					close(firstC2)
-					<-release
-				})
+				<-step
 			}
 			return true
 		}
 		require.NoError(t, bucket.StartDCPFeed(ctx, args, callback, nil))
 
-		<-firstC2
+		for range 3 {
+			step <- struct{}{}
+		}
 		close(terminator)
-		close(release)
-		<-doneChan
+		for done := false; !done; {
+			select {
+			case <-doneChan:
+				done = true
+			case step <- struct{}{}:
+			}
+		}
 
 		// collection2 was cut short, so the shared checkpoint is still needed
 		var checkpt checkpoint
@@ -339,7 +341,6 @@ func TestDumpKeepsCheckpointWhenTerminated(t *testing.T) {
 	ctx := t.Context()
 	c := bucket.DefaultDataStore(ctx)
 
-	// enough documents that the feed is still draining when the terminator closes
 	const numDocs = 1000
 	for i := range numDocs {
 		addToCollection(t, c, fmt.Sprintf("doc%d", i), 0, "V")
@@ -348,21 +349,16 @@ func TestDumpKeepsCheckpointWhenTerminated(t *testing.T) {
 	const prefix = "TerminatedDumpCheckpoint"
 	terminator := make(chan bool)
 	doneChan := make(chan struct{})
-	firstMutation := make(chan struct{})
-	release := make(chan struct{})
 
+	// Advance the feed one event at a time. Blocking between events gives the terminator a scheduling
+	// point to close the queue, which a free-running feed can otherwise outrun.
+	step := make(chan struct{})
 	var processed atomic.Int64
-	var once sync.Once
 	callback := func(event sgbucket.FeedEvent) bool {
-		if event.Opcode != sgbucket.FeedOpMutation {
-			return true
+		if event.Opcode == sgbucket.FeedOpMutation {
+			processed.Add(1)
+			<-step
 		}
-		processed.Add(1)
-		// hold the feed inside its own goroutine while the test terminates it
-		once.Do(func() {
-			close(firstMutation)
-			<-release
-		})
 		return true
 	}
 
@@ -377,10 +373,19 @@ func TestDumpKeepsCheckpointWhenTerminated(t *testing.T) {
 	}
 	require.NoError(t, bucket.StartDCPFeed(ctx, args, callback, nil))
 
-	<-firstMutation
+	// let a few documents through, so the feed has progress worth checkpointing
+	for range 3 {
+		step <- struct{}{}
+	}
+
 	close(terminator)
-	close(release)
-	<-doneChan
+	for done := false; !done; {
+		select {
+		case <-doneChan:
+			done = true
+		case step <- struct{}{}:
+		}
+	}
 
 	// the feed was cut short, so it never reached its end-of-feed marker
 	assert.Less(t, processed.Load(), int64(numDocs))

@@ -27,7 +27,7 @@ env:
   ACTIONS_SETUP_GO_VERSION: &actions_setup_go_version actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
   ACTIONS_GOLANGCI_LINT_VERSION: &actions_golangci_lint_version golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
   ACTIONS_GO_TEST_ANNOTATIONS_VERSION: &actions_go_test_annotations_version guyarb/golang-test-annotations@96fc379b171c49932041d6c789e73331a7bdeec1 # v0.9.0
-  GO_VERSION: &go_version 1.27.1
+  GO_VERSION: &go_version 1.26.6
 
 jobs:
   addlicense:
