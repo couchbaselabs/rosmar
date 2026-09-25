@@ -811,6 +811,8 @@ func (c *Collection) writeWithXattrs(
 		if exp != nil {
 			e.exp = absoluteExpiry(*exp)
 		}
+		// An xattr-only write to a tombstone leaves it a tombstone.
+		e.isDeletion = e.value == nil
 
 		err = c.storeDocument(txn, e)
 		if err != nil {

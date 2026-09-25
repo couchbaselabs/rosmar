@@ -1369,3 +1369,67 @@ func TestWriteCasNilSetsTombstone(t *testing.T) {
 		})
 	}
 }
+
+// TestTombstoneFlagMatchesBody checks that writes over a tombstone keep the tombstone flag in step with the body.
+func TestTombstoneFlagMatchesBody(t *testing.T) {
+	testCases := []struct {
+		name    string
+		writeFn func(t *testing.T, c *Collection, key string, cas CAS)
+	}{
+		{
+			name: "Add",
+			writeFn: func(t *testing.T, c *Collection, key string, _ CAS) {
+				added, err := c.Add(t.Context(), key, 0, map[string]any{"new": true})
+				require.NoError(t, err)
+				require.True(t, added)
+			},
+		},
+		{
+			name: "Set",
+			writeFn: func(t *testing.T, c *Collection, key string, _ CAS) {
+				require.NoError(t, c.Set(t.Context(), key, 0, nil, map[string]any{"new": true}))
+			},
+		},
+		{
+			name: "SetXattrs",
+			writeFn: func(t *testing.T, c *Collection, key string, _ CAS) {
+				_, err := c.SetXattrs(t.Context(), key, map[string][]byte{"_sync": []byte(`{"rev":"2-a"}`)})
+				require.NoError(t, err)
+			},
+		},
+		{
+			name: "UpdateXattrs",
+			writeFn: func(t *testing.T, c *Collection, key string, cas CAS) {
+				_, err := c.UpdateXattrs(t.Context(), key, 0, cas, map[string][]byte{"_sync": []byte(`{"rev":"2-a"}`)}, nil)
+				require.NoError(t, err)
+			},
+		},
+		{
+			name: "WriteWithXattrsNilBody",
+			writeFn: func(t *testing.T, c *Collection, key string, cas CAS) {
+				_, err := c.WriteWithXattrs(t.Context(), key, 0, cas, nil, map[string][]byte{"_sync": []byte(`{"rev":"2-a"}`)}, nil, nil)
+				require.NoError(t, err)
+			},
+		},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := t.Context()
+			col := makeTestBucket(t).DefaultDataStore(ctx).(*Collection)
+			docID := t.Name()
+
+			_, err := col.WriteWithXattrs(ctx, docID, 0, 0, []byte(`{"foo":"bar"}`),
+				map[string][]byte{"_sync": []byte(`{"rev":"1-a"}`)}, nil, nil)
+			require.NoError(t, err)
+			require.NoError(t, col.Delete(ctx, docID))
+			before := getDocRow(t, col, docID)
+
+			tc.writeFn(t, col, docID, before.cas)
+
+			after := getDocRow(t, col, docID)
+			t.Logf("row: %+v", after)
+			assert.Equal(t, !after.hasValue, after.tombstone, "tombstone flag does not match body")
+			assert.Greater(t, after.revSeqNo, before.revSeqNo)
+		})
+	}
+}
