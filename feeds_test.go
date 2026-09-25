@@ -368,15 +368,21 @@ func TestCrossBucketEvents(t *testing.T) {
 	addToCollection(t, c, "delta", 0, "D")
 	addToCollection(t, c, "eskimo", 0, "E")
 
-	go func() {
+	var writer sync.WaitGroup
+	writer.Go(func() {
 		addToCollection(t, c, "fahrvergnügen", 0, "F")
-		err = c.Delete(ctx, "eskimo")
-		require.NoError(t, err)
-	}()
+		assert.NoError(t, c.Delete(ctx, "eskimo"))
+	})
 
 	readExpectedEventsDEF(t, events)
 	readExpectedEventsDEF(t, events2)
+	for _, feedEvents := range []chan sgbucket.FeedEvent{events, events2} {
+		e := <-feedEvents
+		assert.Equal(t, sgbucket.FeedOpDeletion, e.Opcode)
+		assert.Equal(t, "eskimo", string(e.Key))
+	}
 
+	writer.Wait()
 	bucket.Close(ctx)
 	require.NoError(t, bucket2.CloseAndDelete(ctx))
 
