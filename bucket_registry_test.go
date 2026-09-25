@@ -9,8 +9,13 @@
 package rosmar
 
 import (
+	"context"
+	"io/fs"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -81,4 +86,117 @@ func TestDuplicateBucketNamesDifferentPath(t *testing.T) {
 	defer bucket2.Close(ctx)
 	require.Equal(t, []string{bucketName}, GetBucketNames())
 
+}
+
+// TestConcurrentOpenBucket opens an existing bucket from many goroutines at once. Only one call opens the database, and
+// the others share it.
+func TestConcurrentOpenBucket(t *testing.T) {
+	ctx := t.Context()
+	ensureNoLeaks(t)
+	logToTest(t)
+	bucketName := strings.ToLower(t.Name())
+	url := uriFromPath(testBucketPath(t))
+	bucket, err := OpenBucket(url, bucketName, CreateNew)
+	require.NoError(t, err)
+	// a doc with an expiry makes OpenBucket schedule expiration
+	requireAddRaw(t, bucket.DefaultDataStore(ctx), "docID", Exp(time.Now().Add(time.Hour).Unix()), []byte("v1"))
+	bucket.Close(ctx)
+	require.Empty(t, GetBucketNames())
+
+	const numBuckets = 10
+	startSerial := atomic.LoadUint32(&lastSerial)
+	buckets := make([]*Bucket, numBuckets)
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := range numBuckets {
+		wg.Go(func() {
+			<-start
+			b, err := OpenBucket(url, bucketName, ReOpenExisting)
+			if assert.NoError(t, err) {
+				buckets[i] = b
+			}
+		})
+	}
+	close(start)
+	wg.Wait()
+	require.NotContains(t, buckets, (*Bucket)(nil))
+	require.Equal(t, uint32(1), atomic.LoadUint32(&lastSerial)-startSerial)
+	require.Equal(t, uint(numBuckets), bucketCount(bucketName))
+
+	for _, b := range buckets[:numBuckets-1] {
+		b.Close(ctx)
+	}
+	_, _, err = buckets[numBuckets-1].DefaultDataStore(ctx).GetRaw(ctx, "docID")
+	require.NoError(t, err)
+	buckets[numBuckets-1].Close(ctx)
+	require.Empty(t, GetBucketNames())
+}
+
+// TestConcurrentCreateNewBucket creates the same bucket from many goroutines at once. Only one call succeeds.
+func TestConcurrentCreateNewBucket(t *testing.T) {
+	ensureNoLeaks(t)
+	logToTest(t)
+	bucketName := strings.ToLower(t.Name())
+	url := uriFromPath(testBucketPath(t))
+
+	const numBuckets = 10
+	var created atomic.Pointer[Bucket]
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for range numBuckets {
+		wg.Go(func() {
+			<-start
+			b, err := OpenBucket(url, bucketName, CreateNew)
+			if err != nil {
+				assert.ErrorIs(t, err, fs.ErrExist)
+				return
+			}
+			assert.True(t, created.CompareAndSwap(nil, b), "more than one CreateNew call succeeded")
+		})
+	}
+	close(start)
+	wg.Wait()
+	require.NotNil(t, created.Load())
+	require.Equal(t, uint(1), bucketCount(bucketName))
+	require.NoError(t, created.Load().CloseAndDelete(t.Context()))
+}
+
+// TestCloseDuringExpiration closes a bucket while an expiration runs. Close waits for the expiration to finish.
+func TestCloseDuringExpiration(t *testing.T) {
+	ctx := t.Context()
+	ensureNoLeaks(t)
+	logToTest(t)
+	bucketName := strings.ToLower(t.Name())
+	bucket, err := OpenBucket(uriFromPath(testBucketPath(t)), bucketName, CreateNew)
+	require.NoError(t, err)
+
+	cluster.lock.Lock()
+	registered := cluster.buckets[bucketName]
+	cluster.lock.Unlock()
+	started := make(chan struct{})
+	release := make(chan struct{})
+	bucket.expManager.expirationFunc = func(ctx context.Context) {
+		close(started)
+		<-release
+		registered.doExpiration(ctx)
+	}
+	requireAddRaw(t, bucket.DefaultDataStore(ctx), "docID", Exp(time.Now().Add(-time.Second).Unix()), []byte("v1"))
+	<-started
+
+	closed := make(chan struct{})
+	go func() {
+		bucket.Close(ctx)
+		close(closed)
+	}()
+	select {
+	case <-closed:
+		require.FailNow(t, "Close returned while expiration was running")
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(release)
+	select {
+	case <-closed:
+	case <-time.After(10 * time.Second):
+		require.FailNow(t, "Close did not return after expiration finished")
+	}
 }

@@ -12,7 +12,6 @@ import (
 	"context"
 	"fmt"
 	"io/fs"
-	"sync"
 )
 
 // The bucket registry tracks all open Buckets and refcounts them. This represents a cluster of buckets, one per bucket name. When OpenBucket is called, a Bucket instance is added to bucketRegistry, representing the canonical bucket object. This object will not be removed from the bucket registry until:
@@ -26,7 +25,8 @@ import (
 type bucketRegistry struct {
 	bucketCount map[string]uint    // stores a reference count of open buckets
 	buckets     map[string]*Bucket // stores a reference to each open bucket
-	lock        sync.Mutex
+	lock        mutex
+	openLock    mutex // held by OpenBucket from the cache lookup until registration, so only one call opens a bucket
 }
 
 var cluster *bucketRegistry // global cluster registry
@@ -37,19 +37,16 @@ func init() {
 	}
 }
 
-// registerBucket adds a newly opened Bucket to the registry. Returns true if the bucket already exists, and a copy of the bucket to use.
-func (r *bucketRegistry) registerBucket(bucket *Bucket) (bool, *Bucket) {
+// registerBucket adds a newly opened Bucket to the registry and returns a copy of the bucket to use. Requires openLock.
+func (r *bucketRegistry) registerBucket(bucket *Bucket) *Bucket {
 	name := bucket.GetName()
 	debug("_registerBucket %v %s at %s", bucket, name, bucket.url)
 	r.lock.Lock()
 	defer r.lock.Unlock()
 
-	_, ok := r.buckets[name]
-	if !ok {
-		r.buckets[name] = bucket
-	}
+	r.buckets[name] = bucket
 	r.bucketCount[name] += 1
-	return ok, r.buckets[name].copy()
+	return bucket.copy()
 }
 
 // getCachedBucket returns a bucket from the registry if it exists.
@@ -128,8 +125,8 @@ func getCachedBucket(name, url string, mode OpenMode) (*Bucket, error) {
 	return cluster.getCachedBucket(name, url, mode)
 }
 
-// registryBucket adds a copy of a Bucket to the registry. Returns true if the bucket already exists.
-func registerBucket(bucket *Bucket) (bool, *Bucket) {
+// registerBucket adds a Bucket to the registry and returns a copy of it. Requires openLock.
+func registerBucket(bucket *Bucket) *Bucket {
 	return cluster.registerBucket(bucket)
 }
 

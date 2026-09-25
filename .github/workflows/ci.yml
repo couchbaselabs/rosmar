@@ -95,3 +95,22 @@ jobs:
         uses: *actions_go_test_annotations_version
         with:
           test-results: test.json
+
+  test-deadlock:
+    runs-on: ubuntu-latest
+    # fails on lock order inversions, even when the goroutines do not interleave to deadlock
+    permissions:
+      contents: read
+    steps:
+      - uses: *actions_checkout_version
+      - uses: *actions_setup_go_version
+        with:
+          go-version: *go_version
+      - name: Run Tests
+        run: go test -tags deadlock -timeout=30m -count=1 -json -v "./..." | tee test.json | jq -s -jr 'sort_by(.Package,.Time) | .[].Output | select (. != null )'
+        shell: bash
+      - name: Annotate Failures
+        if: always()
+        uses: *actions_go_test_annotations_version
+        with:
+          test-results: test.json
