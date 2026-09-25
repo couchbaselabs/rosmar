@@ -18,6 +18,8 @@ import (
 type expiryManager struct {
 	ctx            context.Context       // ctx passed to expirationFunc when the timer fires
 	mutex          *sync.Mutex           // mutex for synchronized access to expiryManager
+	runMutex       sync.Mutex            // held while expirationFunc runs, so that stop can wait for it
+	stopped        bool                  // true after stop, so that no more expirations run
 	timer          *time.Timer           // Schedules expiration of docs
 	nextExp        *uint32               // Timestamp when expTimer will run (0 if never)
 	expirationFunc func(context.Context) // Function to call when timer expires
@@ -33,13 +35,23 @@ func newExpirationManager(ctx context.Context, expirationFunc func(context.Conte
 	}
 }
 
-// stop stops existing timers and waits for any expiration processes to complete
+// stop stops existing timers and waits for any expiration processes to complete. The caller must not hold the bucket mutex, since expirationFunc locks it.
 func (e *expiryManager) stop() {
 	e.mutex.Lock()
-	defer e.mutex.Unlock()
+	e.stopped = true
 	if e.timer != nil {
 		e.timer.Stop()
 	}
+	e.mutex.Unlock()
+	e.runMutex.Lock()
+	defer e.runMutex.Unlock()
+}
+
+// isStopped returns true if stop has been called.
+func (e *expiryManager) isStopped() bool {
+	e.mutex.Lock()
+	defer e.mutex.Unlock()
+	return e.stopped
 }
 
 // _getNext returns the next expiration time, 0 if there is no scheduled expiration.
@@ -54,8 +66,10 @@ func (e *expiryManager) setNext(exp uint32) {
 	e._setNext(exp)
 }
 
-// _clearNext clears the next expiration time.
-func (e *expiryManager) _clearNext() {
+// clearNext clears the next expiration time.
+func (e *expiryManager) clearNext() {
+	e.mutex.Lock()
+	defer e.mutex.Unlock()
 	var exp uint32
 	e.nextExp = &exp
 }
@@ -63,6 +77,9 @@ func (e *expiryManager) _clearNext() {
 // setNext sets the next expiration time and schedules an expiration to occur after that time. Requires caller to have acquired mutex.
 func (e *expiryManager) _setNext(exp uint32) {
 	debug("_setNext(%d)", exp)
+	if e.stopped {
+		return
+	}
 	e.nextExp = &exp
 	if exp == 0 {
 		e.timer = nil
@@ -104,7 +121,12 @@ func (e *expiryManager) _scheduleExpirationAtOrBefore(exp uint32) {
 
 // runExpiry is called when the timer expires. It calls the expirationFunc and then reschedules the timer if necessary.
 func (e *expiryManager) runExpiry() {
-	e.mutex.Lock()
-	defer e.mutex.Unlock()
+	// hold runMutex, not mutex, since expirationFunc locks the bucket and schedules the next expiration
+	e.runMutex.Lock()
+	defer e.runMutex.Unlock()
+	// the timer can fire just before stop
+	if e.isStopped() {
+		return
+	}
 	e.expirationFunc(e.ctx)
 }
