@@ -12,7 +12,6 @@ import (
 	"context"
 	"fmt"
 	"io/fs"
-	"sync"
 )
 
 // The bucket registry tracks all open Buckets and refcounts them. This represents a cluster of buckets, one per bucket name. When OpenBucket is called, a Bucket instance is added to bucketRegistry, representing the canonical bucket object. This object will not be removed from the bucket registry until:
@@ -26,8 +25,8 @@ import (
 type bucketRegistry struct {
 	bucketCount map[string]uint    // stores a reference count of open buckets
 	buckets     map[string]*Bucket // stores a reference to each open bucket
-	lock        sync.Mutex
-	openLock    sync.Mutex // held by OpenBucket from the cache lookup until registration, so only one call opens a bucket
+	lock        mutex
+	openLock    mutex // held by OpenBucket from the cache lookup until registration, so only one call opens a bucket
 }
 
 var cluster *bucketRegistry // global cluster registry

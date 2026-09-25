@@ -22,7 +22,7 @@ type queue[T any] struct {
 // Initializes a queue struct
 func (q *queue[T]) init() {
 	q.list = list.New()
-	q.cond = sync.NewCond(&sync.Mutex{})
+	q.cond = sync.NewCond(&mutex{})
 }
 
 // Pushes a value into the queue. (Never blocks: the queue has no size limit.)

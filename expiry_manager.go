@@ -10,15 +10,14 @@ package rosmar
 
 import (
 	"context"
-	"sync"
 	"time"
 )
 
 // expiryManager handles expiration for a given bucket. It stores a timer which will call expirationFunc to delete documents. The value of when the timer
 type expiryManager struct {
 	ctx            context.Context       // ctx passed to expirationFunc when the timer fires
-	mutex          *sync.Mutex           // mutex for synchronized access to expiryManager
-	runMutex       sync.Mutex            // held while expirationFunc runs, so that stop can wait for it
+	mutex          *mutex                // mutex for synchronized access to expiryManager
+	runMutex       mutex                 // held while expirationFunc runs, so that stop can wait for it
 	stopped        bool                  // true after stop, so that no more expirations run
 	timer          *time.Timer           // Schedules expiration of docs
 	nextExp        *uint32               // Timestamp when expTimer will run (0 if never)
@@ -29,7 +28,7 @@ func newExpirationManager(ctx context.Context, expirationFunc func(context.Conte
 	var nextExp uint32
 	return &expiryManager{
 		ctx:            ctx,
-		mutex:          &sync.Mutex{},
+		mutex:          &mutex{},
 		nextExp:        &nextExp,
 		expirationFunc: expirationFunc,
 	}
