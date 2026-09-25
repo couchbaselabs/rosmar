@@ -169,19 +169,21 @@ func (c *Collection) add(key string, exp Exp, val []byte, isJSON bool) (added bo
 	var casOut CAS
 	err = c.withNewCas(func(txn *sql.Tx, newCas CAS) (e *event, err error) {
 		exp = absoluteExpiry(exp)
-		var revSeqNo uint64 = 1
-		result, err := txn.Exec(
-			`INSERT INTO documents (collection,key,value,cas,exp,isJSON, revSeqNo) VALUES (?1,?2,?3,?4,?5,?6,?7)
+		var revSeqNo uint64
+		err = txn.QueryRow(
+			`INSERT INTO documents (collection,key,value,cas,exp,isJSON,revSeqNo,tombstone) VALUES (?1,?2,?3,?4,?5,?6,1,(?3 IS NULL))
 				ON CONFLICT(collection,key) DO
-					UPDATE SET value=?3, xattrs=null, cas=?4, exp=?5, isJSON=?6
-					WHERE tombstone != 0`,
-			c.id, key, val, newCas, exp, isJSON, 1, revSeqNo)
-		if err != nil {
+					UPDATE SET value=?3, xattrs=null, cas=?4, exp=?5, isJSON=?6, revSeqNo=revSeqNo+1, tombstone=(?3 IS NULL)
+					WHERE tombstone != 0
+				RETURNING revSeqNo`,
+			c.id, key, val, newCas, exp, isJSON).Scan(&revSeqNo)
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		} else if err != nil {
 			return
 		}
 		casOut = newCas
-		n, _ := result.RowsAffected()
-		added = (n > 0)
+		added = true
 
 		e = &event{
 			key:      key,
@@ -254,11 +256,11 @@ func (c *Collection) _set(txn *sql.Tx, key string, exp Exp, opts *sgbucket.Upser
 		if opts != nil && opts.PreserveExpiry {
 			exp = oldExp
 		}
-		stmt = `UPDATE documents SET value=?3, xattrs=?4, cas=?5, exp=?6, isJSON=?7, revSeqNo=?8
+		stmt = `UPDATE documents SET value=?3, xattrs=?4, cas=?5, exp=?6, isJSON=?7, revSeqNo=?8, tombstone=(?3 IS NULL)
 				WHERE collection=?1 AND key=?2`
 	} else {
-		stmt = `INSERT INTO documents (collection,key,value,xattrs,cas,exp,isJSON,revSeqNo)
-				VALUES (?1,?2,?3,?4,?5,?6,?7,?8)`
+		stmt = `INSERT INTO documents (collection,key,value,xattrs,cas,exp,isJSON,revSeqNo,tombstone)
+				VALUES (?1,?2,?3,?4,?5,?6,?7,?8,(?3 IS NULL))`
 	}
 	_, err = txn.Exec(stmt, c.id, key, val, xattrs, newCas, exp, isJSON, revSeqNo)
 	return
@@ -349,21 +351,24 @@ func (c *Collection) WriteCas(_ context.Context, key string, exp Exp, cas CAS, v
 		if (opt & sgbucket.Append) != 0 {
 			// Append:
 			sql = `UPDATE documents SET value=value || ?1, cas=?2, exp=?6, isJSON=?7,revSeqNo=?8,
-						xattrs=iif(tombstone != 0, null, xattrs)
+						tombstone=((value || ?1) IS NULL),
+						xattrs=iif(tombstone != 0 AND (value || ?1) IS NOT NULL, null, xattrs)
 				   WHERE collection=?3 AND key=?4 AND cas=?5`
 		} else if (opt&sgbucket.AddOnly) != 0 || cas == 0 {
 			// Insert, but fall back to Update if the doc is a tombstone
-			sql = `INSERT INTO documents (collection, key, value, cas, exp, isJSON,revSeqNo) VALUES(?3,?4,?1,?2,?6,?7,?8)
+			sql = `INSERT INTO documents (collection, key, value, cas, exp, isJSON, revSeqNo, tombstone)
+					VALUES(?3,?4,?1,?2,?6,?7,?8,(?1 IS NULL))
 					ON CONFLICT(collection,key) DO
-						UPDATE SET value=?1, xattrs=null, cas=?2, exp=?6, isJSON=?7, tombstone=0, revSeqNo=?8
+						UPDATE SET value=?1, xattrs=iif(?1 IS NULL, xattrs, null), cas=?2, exp=?6, isJSON=?7,
+							tombstone=(?1 IS NULL), revSeqNo=?8
 						WHERE tombstone == 1`
 			if !wasTombstone && cas != 0 {
 				sql += ` AND cas=?5`
 			}
 		} else {
 			// Regular write:
-			sql = `UPDATE documents SET value=?1, cas=?2, exp=?6, isJSON=?7, revSeqNo=?8,
-						xattrs=iif(tombstone != 0, null, xattrs)
+			sql = `UPDATE documents SET value=?1, cas=?2, exp=?6, isJSON=?7, revSeqNo=?8, tombstone=(?1 IS NULL),
+						xattrs=iif(tombstone != 0 AND ?1 IS NOT NULL, null, xattrs)
 				   WHERE collection=?3 AND key=?4 AND cas=?5`
 		}
 		result, err := txn.Exec(sql, raw, newCas, c.id, key, cas, exp, isJSON, revSeqNo)
@@ -387,6 +392,12 @@ func (c *Collection) WriteCas(_ context.Context, key string, exp Exp, cas CAS, v
 		xattrs, err := c.getRawXattrs(txn, key) // needed for the DCP event
 		if err != nil {
 			return nil, err
+		}
+		if raw == nil {
+			xattrs = processXattrs(xattrs, removeUserXattrs)
+			if _, err := txn.Exec(`UPDATE documents SET xattrs=?1 WHERE collection=?2 AND key=?3`, xattrs, c.id, key); err != nil {
+				return nil, err
+			}
 		}
 		casOut = newCas
 		return &event{
@@ -437,20 +448,7 @@ func (c *Collection) remove(key string, ifCas *CAS) (casOut CAS, err error) {
 		revSeqNo++
 
 		// Deleting a doc removes user xattrs but not system ones:
-		if len(rawXattrs) > 0 {
-			var xattrs map[string]json.RawMessage
-			_ = json.Unmarshal(rawXattrs, &xattrs)
-			for k := range xattrs {
-				if k == "" || k[0] != '_' {
-					delete(xattrs, k)
-				}
-			}
-			if len(xattrs) > 0 {
-				rawXattrs, _ = json.Marshal(xattrs)
-			} else {
-				rawXattrs = nil
-			}
-		}
+		rawXattrs = processXattrs(rawXattrs, removeUserXattrs)
 		// Now update, setting value=null, isJSON=false, and updating the xattrs:
 		_, err = txn.Exec(
 			`UPDATE documents SET value=null, cas=?1, exp=0, isJSON=0, xattrs=?2, tombstone=1, revSeqNo=?3
@@ -569,7 +567,7 @@ func (c *Collection) expireDocuments(ctx context.Context) (count int64, err erro
 	// First find all the expired docs and collect their keys:
 	exp := nowAsExpiry()
 	rows, err := c.db().Query(`SELECT key FROM documents
-								WHERE collection = ?1 AND exp > 0 AND exp <= ?2`, c.id, exp)
+								WHERE collection = ?1 AND tombstone = 0 AND exp > 0 AND exp <= ?2`, c.id, exp)
 	if err != nil {
 		return
 	}
