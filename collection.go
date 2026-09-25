@@ -15,7 +15,6 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
-	"sync"
 
 	sgbucket "github.com/couchbase/sg-bucket"
 )
@@ -30,7 +29,7 @@ type Collection struct {
 	sgbucket.DataStoreNameImpl // Fully qualified name (scope and collection)
 	bucket                     *Bucket
 	id                         CollectionID // Row ID in collections table; public ID + 1
-	mutex                      sync.Mutex
+	mutex                      mutex
 	viewCache                  map[viewKey]*rosmarView
 }
 
