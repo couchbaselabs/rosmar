@@ -41,8 +41,8 @@ func (q *queue[T]) push(value T) (ok bool) {
 }
 
 // Removes the last/oldest value from the queue; if the queue is empty, blocks.
-// If the queue is closed while blocking, returns a default-initialized T.
-func (q *queue[T]) pull() (result T) {
+// If the queue is closed while blocking, returns a default-initialized T and ok=false.
+func (q *queue[T]) pull() (result T, ok bool) {
 	q.cond.L.Lock()
 	defer q.cond.L.Unlock()
 	for q.list != nil && q.list.Len() == 0 {
@@ -52,15 +52,9 @@ func (q *queue[T]) pull() (result T) {
 		last := q.list.Back()
 		q.list.Remove(last)
 		result = last.Value.(T)
+		ok = true
 	}
 	return
-}
-
-// closed returns true if the queue was closed, rather than drained to its end-of-feed marker.
-func (q *queue[T]) closed() bool {
-	q.cond.L.Lock()
-	defer q.cond.L.Unlock()
-	return q.list == nil
 }
 
 func (q *queue[T]) close() {

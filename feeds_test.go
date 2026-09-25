@@ -158,14 +158,16 @@ func TestCheckpoint(t *testing.T) {
 	assert.False(t, ok)
 }
 
-// TestDumpDeletesCheckpoint verifies that a dump feed deletes its checkpoint once it has streamed
-// everything, so a second dump feed with the same CheckpointPrefix replays the collection from the
-// start rather than resuming.
+// TestDumpDeletesCheckpoint verifies that a resumed dump feed leaves no checkpoint once it has streamed
+// everything, so a later dump feed with the same CheckpointPrefix replays the collection from the start.
 func TestDumpDeletesCheckpoint(t *testing.T) {
 	ensureNoLeakedFeeds(t)
 	bucket := makeTestBucket(t)
 	ctx := t.Context()
 	c := bucket.DefaultDataStore(ctx)
+	// keep the checkpoint out of the streamed collection, so its writes are not in the events
+	metadataStore, err := bucket.getOrCreateCollection(sgbucket.DataStoreNameImpl{Scope: "S", Collection: "Meta"}, true)
+	require.NoError(t, err)
 
 	addToCollection(t, c, "able", 0, "A")
 	addToCollection(t, c, "baker", 0, "B")
@@ -178,11 +180,12 @@ func TestDumpDeletesCheckpoint(t *testing.T) {
 		},
 		ID:               "myID",
 		Backfill:         sgbucket.FeedResume,
-		Dump:             true,
+		Terminator:       make(chan bool),
 		CheckpointPrefix: prefix,
+		MetadataStore:    metadataStore,
 	}
 
-	// A dump feed ends on its own once it has streamed everything.
+	// A terminated feed leaves a checkpoint for the dump to resume from.
 	events, doneChan := startFeedWithArgs(t, bucket, args)
 
 	event := <-events
@@ -191,28 +194,45 @@ func TestDumpDeletesCheckpoint(t *testing.T) {
 	event = <-events
 	assert.Equal(t, sgbucket.FeedOpEndBackfill, event.Opcode)
 
+	close(args.Terminator)
 	_, ok := <-doneChan
 	assert.False(t, ok)
 
-	// The checkpoint is spent, so the feed removed it.
 	var checkpt checkpoint
-	_, err := c.Get(ctx, prefix, &checkpt)
+	_, err = metadataStore.Get(ctx, prefix, &checkpt)
+	require.NoError(t, err)
+
+	addToCollection(t, c, "delta", 0, "D")
+
+	// The dump resumes after charlie and streams to the end, so it has nothing left to resume.
+	t.Logf("---- Dump feed, resuming from checkpoint ---")
+	args.Terminator = nil
+	args.Dump = true
+	events, doneChan = startFeedWithArgs(t, bucket, args)
+
+	event = <-events
+	assert.Equal(t, sgbucket.FeedOpBeginBackfill, event.Opcode)
+	event = <-events
+	assert.Equal(t, "delta", string(event.Key))
+	event = <-events
+	assert.Equal(t, sgbucket.FeedOpEndBackfill, event.Opcode)
+
+	_, ok = <-doneChan
+	assert.False(t, ok)
+
+	_, err = metadataStore.Get(ctx, prefix, &checkpt)
 	require.Error(t, err)
 	require.IsType(t, sgbucket.MissingError{}, err)
 
-	// With no checkpoint to resume from, a second dump feed replays the same documents.
+	// With no checkpoint to resume from, a second dump feed replays every document.
 	t.Logf("---- Second dump feed, no checkpoint to resume from ---")
 	events, doneChan = startFeedWithArgs(t, bucket, args)
 
 	event = <-events
 	assert.Equal(t, sgbucket.FeedOpBeginBackfill, event.Opcode)
 	readExpectedEventsABC(t, events)
-
-	// the first feed wrote a checkpoint before the feed deleted it, so its tombstone is in the backfill
-	e := <-events
-	assert.Equal(t, sgbucket.FeedOpDeletion, e.Opcode)
-	assert.Equal(t, prefix, string(e.Key))
-
+	event = <-events
+	assert.Equal(t, "delta", string(event.Key))
 	event = <-events
 	assert.Equal(t, sgbucket.FeedOpEndBackfill, event.Opcode)
 
@@ -220,12 +240,13 @@ func TestDumpDeletesCheckpoint(t *testing.T) {
 	assert.False(t, ok)
 }
 
-// TestDumpWithoutMetadataStore verifies that a dump feed given a checkpoint prefix but no metadata
-// store finishes without panicking. Such a feed never wrote a checkpoint, so there is none to delete.
+// TestDumpWithoutMetadataStore verifies that a dump feed given a checkpoint prefix but no metadata store
+// streams its documents without panicking, because it has nowhere to write a checkpoint.
 func TestDumpWithoutMetadataStore(t *testing.T) {
 	ensureNoLeakedFeeds(t)
 	bucket := makeTestBucket(t)
 	ctx := t.Context()
+	addToCollection(t, bucket.DefaultDataStore(ctx), "able", 0, "A")
 
 	doneChan := make(chan struct{})
 	args := sgbucket.FeedArguments{
@@ -239,9 +260,24 @@ func TestDumpWithoutMetadataStore(t *testing.T) {
 	<-doneChan
 }
 
-// TestDumpAcrossCollectionsDeletesCheckpointOnlyWhenAllComplete verifies that the checkpoint shared by
-// a multi-collection feed survives while any collection is still using it. The feed runs one goroutine
-// per collection, so one collection finishing must not drop the document the others depend on.
+// TestResumeWithoutMetadataStore verifies that a FeedResume feed with no metadata store fails to start,
+// rather than silently replaying from the start.
+func TestResumeWithoutMetadataStore(t *testing.T) {
+	ensureNoLeakedFeeds(t)
+	bucket := makeTestBucket(t)
+
+	args := sgbucket.FeedArguments{
+		ID:               "myID",
+		Backfill:         sgbucket.FeedResume,
+		Dump:             true,
+		CheckpointPrefix: "NoMetadataStoreCheckpoint",
+	}
+	err := bucket.StartDCPFeed(t.Context(), args, func(sgbucket.FeedEvent) bool { return true }, nil)
+	require.ErrorContains(t, err, "no MetadataStore given")
+}
+
+// TestDumpAcrossCollectionsDeletesCheckpointOnlyWhenAllComplete verifies that the checkpoint shared by a
+// multi-collection feed survives while any of its collections was cut short.
 func TestDumpAcrossCollectionsDeletesCheckpointOnlyWhenAllComplete(t *testing.T) {
 	const prefix = "MultiCollectionDumpCheckpoint"
 	scopes := map[string][]string{"scope1": {"collection1", "collection2"}}
@@ -316,6 +352,8 @@ func TestDumpAcrossCollectionsDeletesCheckpointOnlyWhenAllComplete(t *testing.T)
 		for range 3 {
 			step <- struct{}{}
 		}
+		// collection1 is not stepped, so wait for its feed to reach the end before stopping collection2
+		require.Eventually(t, func() bool { return atomic.LoadInt32(&activeFeedCount) == 1 }, 10*time.Second, time.Millisecond)
 		close(terminator)
 		for done := false; !done; {
 			select {
@@ -325,11 +363,23 @@ func TestDumpAcrossCollectionsDeletesCheckpointOnlyWhenAllComplete(t *testing.T)
 			}
 		}
 
-		// collection2 was cut short, so the shared checkpoint is still needed
+		// collection2 was cut short, so the shared checkpoint keeps both collections' progress
 		var checkpt checkpoint
 		_, err := metadataStore.Get(ctx, prefix, &checkpt)
 		require.NoError(t, err)
-		assert.NotEmpty(t, checkpt.LastCas)
+		assert.Len(t, checkpt.LastCas, 2)
+
+		// resumed without a terminator, both collections stream to the end and remove their entries
+		args = newArgs(nil)
+		args.MetadataStore = metadataStore
+		doneChan = make(chan struct{})
+		args.DoneChan = doneChan
+		require.NoError(t, bucket.StartDCPFeed(ctx, args, func(sgbucket.FeedEvent) bool { return true }, nil))
+		<-doneChan
+
+		_, err = metadataStore.Get(ctx, prefix, &checkpt)
+		require.Error(t, err)
+		require.IsType(t, sgbucket.MissingError{}, err)
 	})
 }
 
@@ -395,6 +445,100 @@ func TestDumpKeepsCheckpointWhenTerminated(t *testing.T) {
 	_, err := c.Get(ctx, prefix, &checkpt)
 	require.NoError(t, err)
 	assert.NotEmpty(t, checkpt.LastCas)
+}
+
+// TestDumpKeepsOtherFeedsCheckpointEntries verifies that a completed dump removes only its own collection's
+// entry from a checkpoint document that a feed on another collection shares.
+func TestDumpKeepsOtherFeedsCheckpointEntries(t *testing.T) {
+	ensureNoLeakedFeeds(t)
+	bucket := makeTestBucket(t)
+	ctx := t.Context()
+	c1 := bucket.DefaultDataStore(ctx).(*Collection)
+	c2, err := bucket.getOrCreateCollection(sgbucket.DataStoreNameImpl{Scope: "S", Collection: "C"}, true)
+	require.NoError(t, err)
+	addToCollection(t, c1, "c1-doc", 0, "V1")
+	addToCollection(t, c2, "c2-doc", 0, "V2")
+
+	const prefix = "SharedDumpCheckpoint"
+	runFeedToEndOfBackfill(t, bucket, sgbucket.FeedArguments{ID: "id1", Backfill: sgbucket.FeedResume, CheckpointPrefix: prefix})
+	runFeedToEndOfBackfill(t, bucket, sgbucket.FeedArguments{ID: "id2", Backfill: sgbucket.FeedResume, CheckpointPrefix: prefix,
+		Scopes: map[string][]string{"S": {"C"}}})
+
+	var checkpt checkpoint
+	_, err = c1.Get(ctx, prefix, &checkpt)
+	require.NoError(t, err)
+	require.Len(t, checkpt.LastCas, 2)
+	c2LastCas := checkpt.LastCas[c2.GetCollectionID()]
+
+	runFeedToEndOfBackfill(t, bucket, sgbucket.FeedArguments{ID: "id1", Backfill: sgbucket.FeedResume, Dump: true, CheckpointPrefix: prefix})
+
+	checkpt = checkpoint{}
+	_, err = c1.Get(ctx, prefix, &checkpt)
+	require.NoError(t, err)
+	assert.Equal(t, map[uint32]uint64{c2.GetCollectionID(): c2LastCas}, checkpt.LastCas)
+}
+
+// TestDumpWithoutResumeKeepsCheckpoint verifies that a dump that did not resume from the checkpoint leaves
+// it in place for the feed that did write it.
+func TestDumpWithoutResumeKeepsCheckpoint(t *testing.T) {
+	ensureNoLeakedFeeds(t)
+	bucket := makeTestBucket(t)
+	ctx := t.Context()
+	c := bucket.DefaultDataStore(ctx)
+	addToCollection(t, c, "able", 0, "A")
+
+	const prefix = "NonResumeDumpCheckpoint"
+	runFeedToEndOfBackfill(t, bucket, sgbucket.FeedArguments{ID: "id1", Backfill: sgbucket.FeedResume, CheckpointPrefix: prefix})
+	runFeedToEndOfBackfill(t, bucket, sgbucket.FeedArguments{ID: "id2", Backfill: 0, Dump: true, CheckpointPrefix: prefix})
+
+	var checkpt checkpoint
+	_, err := c.Get(ctx, prefix, &checkpt)
+	require.NoError(t, err)
+	assert.NotEmpty(t, checkpt.LastCas)
+}
+
+// TestDumpStoppedByCorruptEventKeepsCheckpoint verifies that a dump that stops on an event it cannot convert
+// counts as cut short, so it keeps the progress it made for the next resume.
+func TestDumpStoppedByCorruptEventKeepsCheckpoint(t *testing.T) {
+	ensureNoLeakedFeeds(t)
+	bucket := makeTestBucket(t)
+	ctx := t.Context()
+	c := bucket.DefaultDataStore(ctx).(*Collection)
+
+	addToCollection(t, c, "able", 0, "A")
+	addToCollection(t, c, "corrupt", 0, "B")
+	_, err := c.db().Exec(`UPDATE documents SET xattrs=? WHERE collection=? AND key=?`,
+		[]byte(`not valid json`), c.id, "corrupt")
+	require.NoError(t, err)
+
+	const prefix = "CorruptDumpCheckpoint"
+	runFeedToEndOfBackfill(t, bucket, sgbucket.FeedArguments{ID: "id1", Backfill: sgbucket.FeedResume, Dump: true, CheckpointPrefix: prefix})
+
+	ableCas, err := c.Get(ctx, "able", nil)
+	require.NoError(t, err)
+	var checkpt checkpoint
+	_, err = c.Get(ctx, prefix, &checkpt)
+	require.NoError(t, err)
+	assert.Equal(t, map[uint32]uint64{c.GetCollectionID(): ableCas}, checkpt.LastCas)
+}
+
+// runFeedToEndOfBackfill runs a feed that discards its events, and waits until it stops. A feed that is not a
+// dump is terminated once its backfill ends.
+func runFeedToEndOfBackfill(t *testing.T, bucket *Bucket, args sgbucket.FeedArguments) {
+	args.DoneChan = make(chan struct{})
+	args.MetadataStore = bucket.DefaultDataStore(t.Context())
+	terminator := make(chan bool)
+	if !args.Dump {
+		args.Terminator = terminator
+	}
+	callback := func(event sgbucket.FeedEvent) bool {
+		if event.Opcode == sgbucket.FeedOpEndBackfill && !args.Dump {
+			close(terminator)
+		}
+		return true
+	}
+	require.NoError(t, bucket.StartDCPFeed(t.Context(), args, callback, nil))
+	<-args.DoneChan
 }
 
 // TestResumeFromCheckpoint verifies that a resumed feed delivers only the documents written while it

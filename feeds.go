@@ -79,12 +79,9 @@ func (bucket *Bucket) StartDCPFeed(ctx context.Context, args sgbucket.FeedArgume
 		for _, collection := range requestedCollections {
 			<-doneChans[collection]
 		}
-		// The checkpoint is shared by every collection in the feed, so drop it only once they have all
-		// streamed to the end. A single terminated collection means it is still needed to resume.
-		if args.Dump && allFeedsCompleted(startedFeeds) {
-			if err := startedFeeds[0].deleteCheckpoint(); err != nil {
-				logError("Error deleting checkpoint %q: %v", args.CheckpointPrefix, err)
-			}
+		// The collections share one checkpoint document, so a dump saves it once they have all stopped.
+		if args.Dump {
+			_ = saveDumpCheckpoint(startedFeeds)
 		}
 		if doneChan != nil {
 			close(doneChan)
@@ -118,6 +115,9 @@ func (c *Collection) startDCPFeed(ctx context.Context, args sgbucket.FeedArgumen
 		if args.Backfill == sgbucket.FeedResume {
 			if args.CheckpointPrefix == "" {
 				return nil, fmt.Errorf("feed's Backfill is FeedResume but no CheckpointPrefix given")
+			}
+			if args.MetadataStore == nil {
+				return nil, fmt.Errorf("feed's Backfill is FeedResume but no MetadataStore given")
 			}
 			if err := feed.readCheckpoint(); err != nil {
 				return nil, fmt.Errorf("couldn't read DCP feed checkpoint: %w", err)
@@ -235,15 +235,20 @@ func (feed *dcpFeed) checkpointKey() string {
 	return feed.args.CheckpointPrefix
 }
 
+// usesCheckpoint reports whether the feed has somewhere to keep a checkpoint.
+func (feed *dcpFeed) usesCheckpoint() bool {
+	return feed.args.CheckpointPrefix != "" && feed.metadataStore != nil
+}
+
 // Reads the feed's lastCas from the checkpoint document, if there is one.
 func (feed *dcpFeed) readCheckpoint() (err error) {
-	if feed.args.CheckpointPrefix == "" {
+	if !feed.usesCheckpoint() {
 		return
 	}
 	key := feed.checkpointKey()
 	var checkpt checkpoint
 	if _, err = feed.metadataStore.Get(feed.ctx, key, &checkpt); err != nil {
-		if _, ok := err.(sgbucket.MissingError); ok {
+		if _, ok := errors.AsType[sgbucket.MissingError](err); ok {
 			err = nil
 			debug("%s checkpoint %q missing", feed, key)
 		} else {
@@ -260,14 +265,32 @@ func (feed *dcpFeed) readCheckpoint() (err error) {
 }
 
 // Writes the feed's lastCas to the checkpoint document, if there is one.
-func (feed *dcpFeed) writeCheckpoint() (err error) {
-	if feed.args.CheckpointPrefix == "" || !feed.lastCasChanged {
-		return
+func (feed *dcpFeed) writeCheckpoint() error {
+	if !feed.lastCasChanged {
+		return nil
+	}
+	return updateCheckpoint([]*dcpFeed{feed}, false)
+}
+
+// saveDumpCheckpoint records a dump's progress. A resumed dump whose collections all streamed to the end has
+// nothing left to resume, so it removes their entries instead.
+func saveDumpCheckpoint(feeds []*dcpFeed) error {
+	if len(feeds) == 0 {
+		return nil
+	}
+	remove := feeds[0].args.Backfill == sgbucket.FeedResume && allFeedsCompleted(feeds)
+	return updateCheckpoint(feeds, remove)
+}
+
+// updateCheckpoint writes each feed's lastCas to their shared checkpoint document in one update. With remove,
+// it drops the feeds' entries instead, and deletes the document once none are left.
+func updateCheckpoint(feeds []*dcpFeed, remove bool) error {
+	feed := feeds[0]
+	if !feed.usesCheckpoint() {
+		return nil
 	}
 	key := feed.checkpointKey()
-	colID := feed.collection.GetCollectionID()
-
-	_, err = feed.metadataStore.Update(feed.ctx, key, 0, func(current []byte) (updated []byte, expiry *uint32, delete bool, err error) {
+	_, err := feed.metadataStore.Update(feed.ctx, key, 0, func(current []byte) (updated []byte, expiry *uint32, del bool, err error) {
 		var checkpt checkpoint
 		if current != nil {
 			if err := json.Unmarshal(current, &checkpt); err != nil {
@@ -277,8 +300,24 @@ func (feed *dcpFeed) writeCheckpoint() (err error) {
 		if checkpt.LastCas == nil {
 			checkpt.LastCas = make(map[uint32]uint64)
 		}
-		checkpt.LastCas[colID] = feed.lastCas
-
+		changed := false
+		for _, f := range feeds {
+			colID := f.collection.GetCollectionID()
+			if remove {
+				_, found := checkpt.LastCas[colID]
+				changed = changed || found
+				delete(checkpt.LastCas, colID)
+			} else if f.lastCasChanged {
+				checkpt.LastCas[colID] = f.lastCas
+				changed = true
+			}
+		}
+		if !changed {
+			return nil, nil, false, nil // cancels the update
+		}
+		if len(checkpt.LastCas) == 0 {
+			return nil, nil, true, nil
+		}
 		updated, err = json.Marshal(checkpt)
 		if err != nil {
 			return nil, nil, false, fmt.Errorf("failed to marshal checkpoint: %w", err)
@@ -287,9 +326,9 @@ func (feed *dcpFeed) writeCheckpoint() (err error) {
 	})
 
 	if err == nil {
-		debug("%s wrote lastCas 0x%x to %q", feed, feed.lastCas, key)
+		debug("%s updated checkpoint %q, remove=%v", feed, key, remove)
 	} else {
-		logError("%s failed to write checkpoint to %q: %v", feed, key, err)
+		logError("%s failed to update checkpoint %q: %v", feed, key, err)
 	}
 	return err
 }
@@ -313,33 +352,33 @@ func (feed *dcpFeed) run() {
 	collectionID := feed.collection.GetCollectionID()
 	feedContent := feed.args.FeedContent
 	for {
-		if e := feed.events.pull(); e != nil {
-			feedEvent, err := e.asFeedEvent(collectionID, feedContent)
-			if err != nil {
-				logError("Fatal error converting %s event to feed event: %v", feed, err)
-				break
-			}
-			feed.callback(*feedEvent)
-			if feedEvent.Cas > feed.lastCas {
-				feed.lastCas = feedEvent.Cas
-				feed.lastCasChanged = true
-				debug("%s lastCas = 0x%x", feed, feed.lastCas)
-				// TODO: Set a timer to write the checkpoint "soon"
-			}
-		} else {
+		e, ok := feed.events.pull()
+		if !ok {
+			break // terminated
+		}
+		if e == nil {
+			// Stored before the deferred close of DoneChan, so a waiter sees a settled value.
+			feed.completed.Store(true)
 			break
+		}
+		feedEvent, err := e.asFeedEvent(collectionID, feedContent)
+		if err != nil {
+			logError("Fatal error converting %s event to feed event: %v", feed, err)
+			break
+		}
+		feed.callback(*feedEvent)
+		if feedEvent.Cas > feed.lastCas {
+			feed.lastCas = feedEvent.Cas
+			feed.lastCasChanged = true
+			debug("%s lastCas = 0x%x", feed, feed.lastCas)
+			// TODO: Set a timer to write the checkpoint "soon"
 		}
 	}
 	debug("%s stopping", feed)
 
-	// Recorded before the deferred close of DoneChan, so a waiter sees a settled value. The checkpoint
-	// is shared by every collection in the feed, so only StartDCPFeed can decide to delete it.
-	feed.completed.Store(!feed.events.closed())
-
-	if feed.lastCasChanged {
-		if err := feed.writeCheckpoint(); err != nil {
-			logError("Error saving %s checkpoint: %v", feed, err)
-		}
+	// A dump saves its checkpoint in StartDCPFeed, once all of its collections stop.
+	if !feed.args.Dump {
+		_ = feed.writeCheckpoint()
 	}
 }
 
@@ -350,20 +389,7 @@ func allFeedsCompleted(feeds []*dcpFeed) bool {
 			return false
 		}
 	}
-	return len(feeds) > 0
-}
-
-// Deletes the feed's checkpoint document, if there is one. A feed given no metadata store never wrote
-// one, so there is nothing to delete.
-func (feed *dcpFeed) deleteCheckpoint() error {
-	if feed.args.CheckpointPrefix == "" || feed.metadataStore == nil {
-		return nil
-	}
-	err := feed.metadataStore.Delete(feed.ctx, feed.checkpointKey())
-	if _, ok := errors.AsType[sgbucket.MissingError](err); ok {
-		return nil
-	}
-	return err
+	return true
 }
 
 func (feed *dcpFeed) close() {
