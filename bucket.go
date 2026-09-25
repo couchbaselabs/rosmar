@@ -101,6 +101,8 @@ func OpenBucket(urlStr string, bucketName string, mode OpenMode) (b *Bucket, err
 	}
 	urlStr = u.String()
 
+	cluster.openLock.Lock()
+	defer cluster.openLock.Unlock()
 	bucket, err := getCachedBucket(bucketName, urlStr, mode)
 	if err != nil {
 		return nil, err
@@ -205,17 +207,12 @@ func OpenBucket(urlStr string, bucketName string, mode OpenMode) (b *Bucket, err
 
 	hlc.UpdateFloor(bucket.getLastTimestamp())
 
-	exists, bucketCopy := registerBucket(bucket)
-	// someone else beat registered the bucket in the registry, that's OK we'll close ours
-	if exists {
-		bucket.Close(ctx)
-	}
-	// only schedule expiration if bucket is not new. This doesn't need to be locked because only one bucket will execute this code.
+	// only schedule expiration if bucket is not new
 	if vers != 0 {
-		bucket._scheduleExpiration()
+		bucket.scheduleExpiration()
 	}
 
-	return bucketCopy, err
+	return registerBucket(bucket), nil
 }
 
 // Creates or re-opens a bucket, like OpenBucket.
