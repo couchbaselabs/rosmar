@@ -1249,6 +1249,49 @@ func TestDeleteWithXattrs(t *testing.T) {
 
 	require.NoError(t, col.DeleteWithXattrs(ctx, docID, []string{"_systemXattr"}))
 }
+
+// TestTombstoneRemovesUserXattrs checks that each way of deleting a doc keeps system xattrs and removes user xattrs.
+func TestTombstoneRemovesUserXattrs(t *testing.T) {
+	testCases := []struct {
+		name     string
+		deleteFn func(t *testing.T, c *Collection, key string, cas CAS)
+	}{
+		{
+			name: "Delete",
+			deleteFn: func(t *testing.T, c *Collection, key string, _ CAS) {
+				require.NoError(t, c.Delete(t.Context(), key))
+			},
+		},
+		{
+			name: "WriteCasNilValue",
+			deleteFn: func(t *testing.T, c *Collection, key string, cas CAS) {
+				_, err := c.WriteCas(t.Context(), key, 0, cas, nil, 0)
+				require.NoError(t, err)
+			},
+		},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := t.Context()
+			col := makeTestBucket(t).DefaultDataStore(ctx).(*Collection)
+			docID := t.Name()
+
+			cas, err := col.WriteWithXattrs(ctx, docID, 0, 0, []byte(`{"foo":"bar"}`),
+				map[string][]byte{"_sync": []byte(`{"rev":"1-a"}`), "user": []byte(`{"a":1}`)}, nil, nil)
+			require.NoError(t, err)
+
+			tc.deleteFn(t, col, docID, cas)
+
+			xattrs, _, err := col.GetXattrs(ctx, docID, []string{"_sync"})
+			require.NoError(t, err)
+			require.JSONEq(t, `{"rev":"1-a"}`, string(xattrs["_sync"]))
+
+			_, _, err = col.GetXattrs(ctx, docID, []string{"user"})
+			require.ErrorAs(t, err, &sgbucket.XattrMissingError{})
+		})
+	}
+}
+
 func mustMarshalJSON(t *testing.T, obj any) []byte {
 	bytes, err := json.Marshal(obj)
 	require.NoError(t, err)

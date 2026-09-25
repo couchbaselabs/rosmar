@@ -533,3 +533,101 @@ func TestTestLoggingIsRestored(t *testing.T) {
 	info("logging after the subtest finished")
 	require.NotZero(t, logged, "makeTestBucket left LoggingCallback bound to a finished test")
 }
+
+type docRow struct {
+	cas       CAS
+	exp       Exp
+	tombstone bool
+	revSeqNo  uint64
+	hasValue  bool
+}
+
+func getDocRow(t *testing.T, c *Collection, key string) docRow {
+	var row docRow
+	require.NoError(t, scan(c.db().QueryRow(
+		`SELECT cas, exp, tombstone, revSeqNo, value IS NOT NULL FROM documents WHERE collection=? AND key=?`, c.id, key),
+		&row.cas, &row.exp, &row.tombstone, &row.revSeqNo, &row.hasValue))
+	return row
+}
+
+func TestExpirationSkipsTombstones(t *testing.T) {
+	testCases := []struct {
+		name     string
+		deleteFn func(t *testing.T, c *Collection, key string, cas CAS, exp Exp)
+		keepsExp bool // tombstone keeps the expiry passed to the delete call
+	}{
+		{
+			name: "Delete",
+			deleteFn: func(t *testing.T, c *Collection, key string, _ CAS, _ Exp) {
+				require.NoError(t, c.Delete(t.Context(), key))
+			},
+		},
+		{
+			name: "DeleteWithXattrs",
+			deleteFn: func(t *testing.T, c *Collection, key string, _ CAS, _ Exp) {
+				require.NoError(t, c.DeleteWithXattrs(t.Context(), key, nil))
+			},
+		},
+		{
+			name:     "UpdateXattrDeleteBody",
+			keepsExp: true,
+			deleteFn: func(t *testing.T, c *Collection, key string, cas CAS, exp Exp) {
+				_, err := c.UpdateXattrDeleteBody(t.Context(), key, "_sync", exp, cas, map[string]any{"foo": "bar"}, nil)
+				require.NoError(t, err)
+			},
+		},
+		{
+			name:     "WriteTombstoneWithXattrs",
+			keepsExp: true,
+			deleteFn: func(t *testing.T, c *Collection, key string, cas CAS, exp Exp) {
+				_, err := c.WriteTombstoneWithXattrs(t.Context(), key, exp, cas, map[string][]byte{"_sync": []byte(`{"foo":"bar"}`)}, nil, true, nil)
+				require.NoError(t, err)
+			},
+		},
+		{
+			name:     "DeleteWithMeta",
+			keepsExp: true,
+			deleteFn: func(t *testing.T, c *Collection, key string, cas CAS, exp Exp) {
+				require.NoError(t, c.DeleteWithMeta(t.Context(), key, cas, cas+1, exp, nil))
+			},
+		},
+		{
+			name:     "WriteCasNilValue",
+			keepsExp: true,
+			deleteFn: func(t *testing.T, c *Collection, key string, cas CAS, exp Exp) {
+				_, err := c.WriteCas(t.Context(), key, exp, cas, nil, 0)
+				require.NoError(t, err)
+			},
+		},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				ensureNoLeaks(t)
+				bucket := makeTestBucket(t)
+				c := bucket.DefaultDataStore(t.Context()).(*Collection)
+				key := "doc1"
+
+				exp := Exp(time.Now().Add(2 * time.Second).Unix())
+				cas, err := c.WriteCas(t.Context(), key, exp, 0, []byte(`{"foo":"bar"}`), 0)
+				require.NoError(t, err)
+
+				tc.deleteFn(t, c, key, cas, exp)
+				before := getDocRow(t, c, key)
+				t.Logf("tombstone row: %+v", before)
+				require.False(t, before.hasValue)
+				assert.True(t, before.tombstone, "tombstone flag not set")
+				if tc.keepsExp {
+					assert.Equal(t, exp, before.exp)
+				} else {
+					assert.Equal(t, Exp(0), before.exp)
+				}
+
+				time.Sleep(3 * time.Second)
+				synctest.Wait()
+
+				require.Equal(t, before, getDocRow(t, c, key), "expirer modified tombstone")
+			})
+		})
+	}
+}

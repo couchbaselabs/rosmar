@@ -362,7 +362,7 @@ func (c *Collection) WriteCas(_ context.Context, key string, exp Exp, cas CAS, v
 			}
 		} else {
 			// Regular write:
-			sql = `UPDATE documents SET value=?1, cas=?2, exp=?6, isJSON=?7, revSeqNo=?8,
+			sql = `UPDATE documents SET value=?1, cas=?2, exp=?6, isJSON=?7, revSeqNo=?8, tombstone=(?1 IS NULL),
 						xattrs=iif(tombstone != 0, null, xattrs)
 				   WHERE collection=?3 AND key=?4 AND cas=?5`
 		}
@@ -387,6 +387,12 @@ func (c *Collection) WriteCas(_ context.Context, key string, exp Exp, cas CAS, v
 		xattrs, err := c.getRawXattrs(txn, key) // needed for the DCP event
 		if err != nil {
 			return nil, err
+		}
+		if raw == nil {
+			xattrs = processXattrs(xattrs, removeUserXattrs)
+			if _, err := txn.Exec(`UPDATE documents SET xattrs=?1 WHERE collection=?2 AND key=?3`, xattrs, c.id, key); err != nil {
+				return nil, err
+			}
 		}
 		casOut = newCas
 		return &event{
@@ -437,20 +443,7 @@ func (c *Collection) remove(key string, ifCas *CAS) (casOut CAS, err error) {
 		revSeqNo++
 
 		// Deleting a doc removes user xattrs but not system ones:
-		if len(rawXattrs) > 0 {
-			var xattrs map[string]json.RawMessage
-			_ = json.Unmarshal(rawXattrs, &xattrs)
-			for k := range xattrs {
-				if k == "" || k[0] != '_' {
-					delete(xattrs, k)
-				}
-			}
-			if len(xattrs) > 0 {
-				rawXattrs, _ = json.Marshal(xattrs)
-			} else {
-				rawXattrs = nil
-			}
-		}
+		rawXattrs = processXattrs(rawXattrs, removeUserXattrs)
 		// Now update, setting value=null, isJSON=false, and updating the xattrs:
 		_, err = txn.Exec(
 			`UPDATE documents SET value=null, cas=?1, exp=0, isJSON=0, xattrs=?2, tombstone=1, revSeqNo=?3
@@ -569,7 +562,7 @@ func (c *Collection) expireDocuments(ctx context.Context) (count int64, err erro
 	// First find all the expired docs and collect their keys:
 	exp := nowAsExpiry()
 	rows, err := c.db().Query(`SELECT key FROM documents
-								WHERE collection = ?1 AND exp > 0 AND exp <= ?2`, c.id, exp)
+								WHERE collection = ?1 AND tombstone = 0 AND exp > 0 AND exp <= ?2`, c.id, exp)
 	if err != nil {
 		return
 	}
