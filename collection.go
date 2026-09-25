@@ -349,13 +349,16 @@ func (c *Collection) WriteCas(_ context.Context, key string, exp Exp, cas CAS, v
 		if (opt & sgbucket.Append) != 0 {
 			// Append:
 			sql = `UPDATE documents SET value=value || ?1, cas=?2, exp=?6, isJSON=?7,revSeqNo=?8,
-						xattrs=iif(tombstone != 0, null, xattrs)
+						tombstone=((value || ?1) IS NULL),
+						xattrs=iif(tombstone != 0 AND (value || ?1) IS NOT NULL, null, xattrs)
 				   WHERE collection=?3 AND key=?4 AND cas=?5`
 		} else if (opt&sgbucket.AddOnly) != 0 || cas == 0 {
 			// Insert, but fall back to Update if the doc is a tombstone
-			sql = `INSERT INTO documents (collection, key, value, cas, exp, isJSON,revSeqNo) VALUES(?3,?4,?1,?2,?6,?7,?8)
+			sql = `INSERT INTO documents (collection, key, value, cas, exp, isJSON, revSeqNo, tombstone)
+					VALUES(?3,?4,?1,?2,?6,?7,?8,(?1 IS NULL))
 					ON CONFLICT(collection,key) DO
-						UPDATE SET value=?1, xattrs=null, cas=?2, exp=?6, isJSON=?7, tombstone=0, revSeqNo=?8
+						UPDATE SET value=?1, xattrs=iif(?1 IS NULL, xattrs, null), cas=?2, exp=?6, isJSON=?7,
+							tombstone=(?1 IS NULL), revSeqNo=?8
 						WHERE tombstone == 1`
 			if !wasTombstone && cas != 0 {
 				sql += ` AND cas=?5`
@@ -363,7 +366,7 @@ func (c *Collection) WriteCas(_ context.Context, key string, exp Exp, cas CAS, v
 		} else {
 			// Regular write:
 			sql = `UPDATE documents SET value=?1, cas=?2, exp=?6, isJSON=?7, revSeqNo=?8, tombstone=(?1 IS NULL),
-						xattrs=iif(tombstone != 0, null, xattrs)
+						xattrs=iif(tombstone != 0 AND ?1 IS NOT NULL, null, xattrs)
 				   WHERE collection=?3 AND key=?4 AND cas=?5`
 		}
 		result, err := txn.Exec(sql, raw, newCas, c.id, key, cas, exp, isJSON, revSeqNo)

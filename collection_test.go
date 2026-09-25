@@ -1297,3 +1297,75 @@ func mustMarshalJSON(t *testing.T, obj any) []byte {
 	require.NoError(t, err)
 	return bytes
 }
+
+// TestWriteCasNilOnTombstoneKeepsSystemXattrs checks that a nil WriteCas on an existing tombstone keeps its system xattrs.
+func TestWriteCasNilOnTombstoneKeepsSystemXattrs(t *testing.T) {
+	ctx := t.Context()
+	col := makeTestBucket(t).DefaultDataStore(ctx).(*Collection)
+	docID := t.Name()
+
+	_, err := col.WriteWithXattrs(ctx, docID, 0, 0, []byte(`{"foo":"bar"}`),
+		map[string][]byte{"_sync": []byte(`{"rev":"1-a"}`)}, nil, nil)
+	require.NoError(t, err)
+	require.NoError(t, col.Delete(ctx, docID))
+
+	_, err = col.WriteCas(ctx, docID, 0, getDocRow(t, col, docID).cas, nil, 0)
+	require.NoError(t, err)
+
+	xattrs, _, err := col.GetXattrs(ctx, docID, []string{"_sync"})
+	require.NoError(t, err)
+	require.JSONEq(t, `{"rev":"1-a"}`, string(xattrs["_sync"]))
+}
+
+// TestWriteCasNilSetsTombstone checks that every WriteCas branch marks a nil write as a tombstone.
+func TestWriteCasNilSetsTombstone(t *testing.T) {
+	testCases := []struct {
+		name    string
+		setupFn func(t *testing.T, c *Collection, key string) CAS
+		opt     sgbucket.WriteOptions
+	}{
+		{
+			name:    "InsertNewKey",
+			setupFn: func(t *testing.T, c *Collection, key string) CAS { return 0 },
+		},
+		{
+			name:    "AddOnlyNewKey",
+			setupFn: func(t *testing.T, c *Collection, key string) CAS { return 0 },
+			opt:     sgbucket.AddOnly,
+		},
+		{
+			name: "InsertOverTombstone",
+			setupFn: func(t *testing.T, c *Collection, key string) CAS {
+				_, err := c.WriteCas(t.Context(), key, 0, 0, []byte(`{"foo":"bar"}`), 0)
+				require.NoError(t, err)
+				require.NoError(t, c.Delete(t.Context(), key))
+				return 0
+			},
+		},
+		{
+			name: "Append",
+			setupFn: func(t *testing.T, c *Collection, key string) CAS {
+				cas, err := c.WriteCas(t.Context(), key, 0, 0, []byte(`foo`), sgbucket.Raw)
+				require.NoError(t, err)
+				return cas
+			},
+			opt: sgbucket.Append,
+		},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := t.Context()
+			col := makeTestBucket(t).DefaultDataStore(ctx).(*Collection)
+			docID := t.Name()
+
+			cas := tc.setupFn(t, col, docID)
+			_, err := col.WriteCas(ctx, docID, 0, cas, nil, tc.opt)
+			require.NoError(t, err)
+
+			row := getDocRow(t, col, docID)
+			t.Logf("row: %+v", row)
+			require.False(t, row.hasValue)
+			assert.True(t, row.tombstone, "tombstone flag not set")
+		})
+	}
+}
