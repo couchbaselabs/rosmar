@@ -115,6 +115,7 @@ func (c *Collection) getRaw(q queryable, key string) (val []byte, cas CAS, revSe
 	if err = scan(row, &val, &cas, &revSeqNo); err != nil {
 		err = remapKeyError(err, key)
 	} else if val == nil {
+		cas = 0 // Like Couchbase Server, a tombstone has no CAS to read
 		err = sgbucket.MissingError{Key: key}
 	}
 	return
@@ -242,7 +243,7 @@ func (c *Collection) _set(txn *sql.Tx, key string, exp Exp, opts *sgbucket.Upser
 	if err = scan(row, &wasTombstone, &xattrs, &oldExp, &revSeqNo); err == nil {
 		exists = true
 		if wasTombstone {
-			xattrs = nil // xattrs are cleared whenever resurrecting a tombstone
+			xattrs, oldExp = nil, 0 // xattrs and expiry are cleared whenever resurrecting a tombstone
 		}
 	} else if err != sql.ErrNoRows {
 		err = remapKeyError(err, key)
@@ -344,37 +345,35 @@ func (c *Collection) WriteCas(_ context.Context, key string, exp Exp, cas CAS, v
 	}
 
 	err = c.withNewCas(func(txn *sql.Tx, newCas CAS) (*event, error) {
-		wasTombstone := false
+		var wasTombstone bool
 		var revSeqNo uint64
 		row := txn.QueryRow("SELECT revSeqNo, tombstone FROM documents WHERE collection=? AND key=?", c.id, key)
 		if err := scan(row, &revSeqNo, &wasTombstone); err != nil && (cas != 0 || err != sql.ErrNoRows) {
 			return nil, remapKeyError(err, key)
+		} else if wasTombstone && cas != 0 {
+			return nil, sgbucket.MissingError{Key: key} // Couchbase Server can't CAS-write a tombstone
 		}
 		revSeqNo++
 		exp = absoluteExpiry(exp)
-		var sql string
+		// A non-zero CAS reaches the SQL only for a live document, so only the insert branch can meet a tombstone.
+		var stmt string
 		if (opt & sgbucket.Append) != 0 {
 			// Append:
-			sql = `UPDATE documents SET value=value || ?1, cas=?2, exp=?6, isJSON=?7,revSeqNo=?8,
-						xattrs=iif(tombstone != 0, null, xattrs)
+			stmt = `UPDATE documents SET value=value || ?1, cas=?2, exp=?6, isJSON=?7,revSeqNo=?8
 				   WHERE collection=?3 AND key=?4 AND cas=?5`
 		} else if (opt&sgbucket.AddOnly) != 0 || cas == 0 {
 			// Insert, but fall back to Update if the doc is a tombstone
-			sql = `INSERT INTO documents (collection, key, value, cas, exp, isJSON, revSeqNo, tombstone)
+			stmt = `INSERT INTO documents (collection, key, value, cas, exp, isJSON, revSeqNo, tombstone)
 					VALUES(?3,?4,?1,?2,?6,?7,?8,0)
 					ON CONFLICT(collection,key) DO
 						UPDATE SET value=?1, xattrs=null, cas=?2, exp=?6, isJSON=?7, tombstone=0, revSeqNo=?8
 						WHERE tombstone == 1`
-			if !wasTombstone && cas != 0 {
-				sql += ` AND cas=?5`
-			}
 		} else {
 			// Regular write:
-			sql = `UPDATE documents SET value=?1, cas=?2, exp=?6, isJSON=?7, revSeqNo=?8, tombstone=0,
-						xattrs=iif(tombstone != 0, null, xattrs)
+			stmt = `UPDATE documents SET value=?1, cas=?2, exp=?6, isJSON=?7, revSeqNo=?8
 				   WHERE collection=?3 AND key=?4 AND cas=?5`
 		}
-		result, err := txn.Exec(sql, raw, newCas, c.id, key, cas, exp, isJSON, revSeqNo)
+		result, err := txn.Exec(stmt, raw, newCas, c.id, key, cas, exp, isJSON, revSeqNo)
 		if err != nil {
 			return nil, err
 		}
@@ -433,12 +432,15 @@ func (c *Collection) remove(key string, ifCas *CAS) (casOut CAS, err error) {
 		var cas CAS
 		var rawXattrs []byte
 		var revSeqNo uint64
+		var tombstone int
 		row := txn.QueryRow(
-			`SELECT cas, xattrs, revSeqNo FROM documents WHERE collection=?1 AND key=?2`,
+			`SELECT cas, xattrs, revSeqNo, tombstone FROM documents WHERE collection=?1 AND key=?2`,
 			c.id, key)
-		if err = scan(row, &cas, &rawXattrs, &revSeqNo); err != nil {
+		if err = scan(row, &cas, &rawXattrs, &revSeqNo, &tombstone); err != nil {
 			return nil, remapKeyError(err, key)
-		} else if ifCas != nil && cas != *ifCas {
+		} else if tombstone != 0 {
+			return nil, sgbucket.MissingError{Key: key}
+		} else if ifCas != nil && *ifCas != 0 && cas != *ifCas {
 			return nil, sgbucket.CasMismatchErr{Expected: *ifCas, Actual: cas}
 		}
 		revSeqNo++
