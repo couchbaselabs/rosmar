@@ -596,7 +596,11 @@ func (c *Collection) DeleteWithXattrs(ctx context.Context, key string, xattrKeys
 			return nil, remapKeyError(err, key)
 		}
 		// Like Couchbase Server, a missing xattr fails the combined delete, leaving only the body delete on a live doc.
-		if missing := missingSubDocPaths(e.xattrs, xattrKeys); len(missing) > 0 {
+		missing, err := missingSubDocPaths(e.xattrs, xattrKeys)
+		if err != nil {
+			return nil, err
+		}
+		if len(missing) > 0 {
 			if !bodyExists {
 				if len(missing) == len(xattrKeys) {
 					return nil, sgbucket.MissingError{Key: key}
@@ -904,17 +908,20 @@ func deleteSubDocPaths(rawXattrs []byte, paths ...string) ([]byte, error) {
 }
 
 // missingSubDocPaths returns the paths that are not present in the raw xattrs JSON.
-func missingSubDocPaths(rawXattrs []byte, paths []string) (missing []string) {
+func missingSubDocPaths(rawXattrs []byte, paths []string) (missing []string, err error) {
 	for _, path := range paths {
 		found := false
 		processXattrs(rawXattrs, func(xattrs semiParsedXattrs) {
-			found, _ = deleteNestedKey(xattrs, strings.Split(path, "."))
+			found, err = deleteNestedKey(xattrs, strings.Split(path, "."))
 		})
+		if err != nil {
+			return nil, err
+		}
 		if !found {
 			missing = append(missing, path)
 		}
 	}
-	return missing
+	return missing, nil
 }
 
 // deleteSubDocPath removes a single subdoc path from the raw xattrs JSON.
@@ -952,7 +959,7 @@ func deleteNestedKey(obj map[string]json.RawMessage, keys []string) (found bool,
 	}
 	var nested map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &nested); err != nil {
-		return false, fmt.Errorf("path component %q is not a JSON object: %w", keys[0], err)
+		return false, fmt.Errorf("path component %q is not a JSON object: %w", keys[0], sgbucket.ErrPathMismatch)
 	}
 	found, err = deleteNestedKey(nested, keys[1:])
 	if err != nil || !found {

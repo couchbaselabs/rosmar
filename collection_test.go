@@ -1622,6 +1622,27 @@ func TestDeleteWithXattrsMissingXattr(t *testing.T) {
 	}
 }
 
+// TestDeleteWithXattrsPathMismatch checks that a path through a scalar xattr value fails without deleting the body.
+func TestDeleteWithXattrsPathMismatch(t *testing.T) {
+	ctx := t.Context()
+	ensureNoLeaks(t)
+	coll := makeTestBucket(t).DefaultDataStore(ctx)
+
+	key := t.Name()
+	body := []byte(`{"foo":"bar"}`)
+	cas, err := coll.WriteWithXattrs(ctx, key, 0, 0, body, map[string][]byte{"_sync": []byte(`"scalar"`)}, nil, nil)
+	require.NoError(t, err)
+
+	err = coll.DeleteWithXattrs(ctx, key, []string{"_sync.rev"})
+	require.ErrorIs(t, err, sgbucket.ErrPathMismatch)
+
+	rawBody, xattrs, getCas, err := coll.GetWithXattrs(ctx, key, []string{"_sync"})
+	require.NoError(t, err)
+	require.Equal(t, cas, getCas)
+	require.JSONEq(t, string(body), string(rawBody))
+	require.JSONEq(t, `"scalar"`, string(xattrs["_sync"]))
+}
+
 // TestWriteCasNil checks that a nil WriteCas value never creates a tombstone: an untyped nil writes a null JSON body
 // and a nil []byte writes an empty body.
 func TestWriteCasNil(t *testing.T) {
