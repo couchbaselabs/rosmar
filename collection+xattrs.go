@@ -122,7 +122,7 @@ func (c *Collection) SetXattrs(_ context.Context, key string, xattrs map[string]
 	for k, v := range xattrs {
 		payloadXattrs[k] = payload{marshaled: v}
 	}
-	casOut, err := c.writeWithXattrs(key, nil, payloadXattrs, nil, nil, writeXattrOptions{}, nil)
+	casOut, err := c.writeWithXattrs(key, nil, payloadXattrs, nil, nil, writeXattrOptions{createBody: true}, nil)
 	traceExit("SetXattr", err, "0x%x", casOut)
 	return casOut, err
 }
@@ -132,7 +132,11 @@ func (c *Collection) RemoveXattrs(_ context.Context, key string, xattrKeys []str
 	for _, xattrKey := range xattrKeys {
 		removedXattrs[xattrKey] = payload{}
 	}
-	_, err := c.writeWithXattrs(key, nil, removedXattrs, &cas, nil, writeXattrOptions{}, nil)
+	var ifCas *CAS
+	if cas != 0 {
+		ifCas = &cas
+	}
+	_, err := c.writeWithXattrs(key, nil, removedXattrs, ifCas, nil, writeXattrOptions{requireExistingDoc: true}, nil)
 	return err
 }
 
@@ -159,7 +163,9 @@ func (c *Collection) DeleteSubDocPaths(
 		if err != nil {
 			return nil, remapKeyError(err, key)
 		}
-		e.isDeletion = tombstone != 0
+		if tombstone != 0 {
+			return nil, sgbucket.MissingError{Key: key}
+		}
 		if rawXattrs, err = deleteSubDocPaths(rawXattrs, xattrKeys...); err != nil {
 			return nil, err
 		}
@@ -277,7 +283,6 @@ func (c *Collection) WriteUpdateWithXattrs(
 			}
 			return previous.Cas, err
 		}
-		var exp Exp
 		if updatedDoc.Expiry != nil {
 			exp = *updatedDoc.Expiry
 		}
@@ -301,7 +306,8 @@ func (c *Collection) WriteUpdateWithXattrs(
 			}
 		}
 
-		if _, ok := err.(sgbucket.CasMismatchErr); !ok && !errors.Is(err, sgbucket.ErrKeyExists) {
+		// Like Couchbase Server, a doc deleted since it was read is reported as missing, so retry that as well.
+		if _, ok := err.(sgbucket.CasMismatchErr); !ok && !errors.Is(err, sgbucket.ErrKeyExists) && !errors.As(err, &sgbucket.MissingError{}) {
 			// Exit loop on success or failure
 			return casOut, err
 		}
@@ -327,7 +333,11 @@ func (c *Collection) UpdateXattrs(
 	for xattrKey, xattrVal := range xattrs {
 		xv[xattrKey] = payload{parsed: xattrVal}
 	}
-	return c.writeWithXattrs(key, nil, xv, &cas, &exp, writeXattrOptions{}, opts)
+	var ifCas *CAS
+	if cas != 0 {
+		ifCas = &cas
+	}
+	return c.writeWithXattrs(key, nil, xv, ifCas, &exp, writeXattrOptions{requireExistingDoc: true}, opts)
 }
 
 func (c *Collection) WriteTombstoneWithXattrs(
@@ -365,8 +375,16 @@ func (c *Collection) WriteTombstoneWithXattrs(
 		xattrs[xattrKey] = payload{}
 	}
 	checkCas := &cas
+	if deleteBody && cas == 0 {
+		checkCas = nil
+	}
+	// Without deleteBody, a non-zero CAS only updates the xattrs of the existing document, as on Couchbase Server.
+	body := &payload{}
+	if !deleteBody && cas != 0 {
+		body = nil
+	}
 	requireExistingDoc := deleteBody || cas != 0
-	return c.writeWithXattrs(key, &payload{}, xattrs, checkCas, &exp, writeXattrOptions{requireExistingDoc: requireExistingDoc, deleteBody: deleteBody}, opts)
+	return c.writeWithXattrs(key, body, xattrs, checkCas, &exp, writeXattrOptions{requireExistingDoc: requireExistingDoc, deleteBody: deleteBody}, opts)
 }
 
 // WriteResurrectionWithXattrs creates an alive document with a given tombstone and xattrs.
@@ -438,7 +456,7 @@ func (c *Collection) getRawWithXattrs(key string, xattrKeys []string) (sgbucket.
 	}
 	for _, xattrKey := range xattrKeys {
 		if xattrKey == virtualXattrName {
-			rawDoc.Xattrs[xattrKey] = []byte(fmt.Sprintf(`{"value_crc32c":%q,"%s":"%d","%s":"0x%s"}`, encodedCRC32c(rawDoc.Body), virtualXattrRevSeqNo, revSeqNo, virtualXattrCAS, strconv.FormatUint(rawDoc.Cas, 16)))
+			rawDoc.Xattrs[xattrKey] = []byte(fmt.Sprintf(`{"value_crc32c":%q,"%s":"%d","%s":"0x%s","%s":%d,"deleted":%t}`, encodedCRC32c(rawDoc.Body), virtualXattrRevSeqNo, revSeqNo, virtualXattrCAS, strconv.FormatUint(rawDoc.Cas, 16), virtualXattrExpiry, exp, rawDoc.IsTombstone))
 			continue
 		} else if xattrKey == virtualXattrName+"."+virtualXattrRevSeqNo {
 			rawDoc.Xattrs[xattrKey] = []byte(fmt.Sprintf(`"%d"`, revSeqNo))
@@ -560,6 +578,11 @@ func (c *Collection) TouchXattrWithCas(_ context.Context, key, xattrKey, propert
 // simple xattr names (e.g., "_sync") to remove the whole xattr, or dotted paths
 // (e.g., "_sync.rev") to remove a field within an xattr.
 func (c *Collection) DeleteWithXattrs(ctx context.Context, key string, xattrKeys []string) error {
+	for _, xattrKey := range xattrKeys {
+		if err := validateXattrPath(xattrKey); err != nil {
+			return err
+		}
+	}
 	err := c.withNewCas(func(txn *sql.Tx, newCas CAS) (*event, error) {
 		e := &event{
 			key:        key,
@@ -571,9 +594,19 @@ func (c *Collection) DeleteWithXattrs(ctx context.Context, key string, xattrKeys
 		err := scan(row, &e.xattrs, &bodyExists, &e.revSeqNo)
 		if err != nil {
 			return nil, remapKeyError(err, key)
+		}
+		// Like Couchbase Server, a missing xattr fails the combined delete, leaving only the body delete on a live doc.
+		if missing := missingSubDocPaths(e.xattrs, xattrKeys); len(missing) > 0 {
+			if !bodyExists {
+				if len(missing) == len(xattrKeys) {
+					return nil, sgbucket.MissingError{Key: key}
+				}
+				return nil, fmt.Errorf("%v: %w", missing, sgbucket.ErrPathNotFound)
+			}
 		} else if e.xattrs, err = deleteSubDocPaths(e.xattrs, xattrKeys...); err != nil {
 			return nil, err
 		}
+		e.xattrs = processXattrs(e.xattrs, removeUserXattrs) // Deleting the body removes user xattrs
 		e.revSeqNo++
 		_, err = txn.Exec(`UPDATE documents SET value=null, exp=0, isJSON=0, tombstone=1, xattrs=?1, cas=?2, revSeqNo=?3 WHERE collection=?4 AND key=?5`, e.xattrs, newCas, e.revSeqNo, c.id, key)
 		return e, err
@@ -589,6 +622,7 @@ type writeXattrOptions struct {
 	isDelete           bool // Allow ressurecting a tombstone
 	requireExistingDoc bool // Return KeyNotFoundError if doc doesn't already exist
 	deleteBody         bool // Delete the body along with updating tombstone
+	createBody         bool // Create a missing doc with an empty JSON body, as a Couchbase Server upsert does
 }
 
 // checkCasXattr checks the cas supplied against the current cas of the document. existingCas is the current Cas of the document (will be 0 if no document) and expectedCas is the expected value. Returns CasMismatchErr on an unsuccesful CAS check.
@@ -639,21 +673,26 @@ func (c *Collection) writeWithXattrs(
 		row := txn.QueryRow(`SELECT value, isJSON, cas, exp, xattrs, tombstone, revSeqNo FROM documents WHERE collection=?1 AND key=?2`,
 			c.id, key)
 		var prevCas CAS
+		checkCas := ifCas
 		if err := scan(row, &e.value, &e.isJSON, &prevCas, &e.exp, &e.xattrs, &wasTombstone, &e.revSeqNo); err == nil {
 			if wasTombstone == 1 && (val != nil && !val.isNil()) {
-				// couchbase server can't perform a cas check on a tombstone so we return ErrKeyExists
+				// Couchbase Server can't perform a cas check on a tombstone, so it reports the doc as missing
 				if ifCas != nil && *ifCas != 0 {
-					return nil, sgbucket.ErrKeyExists
+					return nil, sgbucket.MissingError{Key: key}
 				}
-				e.xattrs = nil // xattrs are cleared whenever resurrecting a tombstone
+				e.xattrs, e.exp = nil, 0 // xattrs and expiry are cleared whenever resurrecting a tombstone
+				checkCas = nil           // a CAS of 0 resurrects the tombstone, as on Couchbase Server
 			} else if opts.insertDoc {
-				return nil, sgbucket.ErrKeyExists
+				return nil, sgbucket.CasMismatchErr{Expected: 0, Actual: prevCas} // Couchbase Server reports key exists
 			}
 		} else if errors.Is(err, sql.ErrNoRows) {
 			if opts.requireExistingDoc {
 				return nil, sgbucket.MissingError{Key: key}
 			} else if ifCas != nil && *ifCas != 0 {
 				return nil, sgbucket.CasMismatchErr{Expected: *ifCas, Actual: 0}
+			}
+			if opts.createBody {
+				e.value, e.isJSON = []byte(`{}`), true
 			}
 		} else {
 			return nil, remapKeyError(err, key)
@@ -663,7 +702,7 @@ func (c *Collection) writeWithXattrs(
 			return nil, fmt.Errorf("Calling deleteBody=true when the document is a tombstone: %w", sgbucket.MissingError{Key: key})
 		}
 
-		err := checkCasXattr(&prevCas, ifCas, opts)
+		err := checkCasXattr(&prevCas, checkCas, opts)
 		if err != nil {
 			return nil, err
 		}
@@ -862,6 +901,20 @@ func deleteSubDocPaths(rawXattrs []byte, paths ...string) ([]byte, error) {
 	return rawXattrs, nil
 }
 
+// missingSubDocPaths returns the paths that are not present in the raw xattrs JSON.
+func missingSubDocPaths(rawXattrs []byte, paths []string) (missing []string) {
+	for _, path := range paths {
+		found := false
+		processXattrs(rawXattrs, func(xattrs semiParsedXattrs) {
+			found, _ = deleteNestedKey(xattrs, strings.Split(path, "."))
+		})
+		if !found {
+			missing = append(missing, path)
+		}
+	}
+	return missing
+}
+
 // deleteSubDocPath removes a single subdoc path from the raw xattrs JSON.
 func deleteSubDocPath(rawXattrs []byte, path string) ([]byte, error) {
 	if err := validateXattrPath(path); err != nil {
@@ -870,7 +923,7 @@ func deleteSubDocPath(rawXattrs []byte, path string) ([]byte, error) {
 	keys := strings.Split(path, ".")
 	var outerErr error
 	result := processXattrs(rawXattrs, func(xattrs semiParsedXattrs) {
-		// DeleteSubDocPaths/DeleteWithXattrs treat deleting an already-absent path as a no-op,
+		// DeleteSubDocPaths treats deleting an already-absent path as a no-op,
 		// so the "found" return is intentionally ignored here.
 		_, outerErr = deleteNestedKey(xattrs, keys)
 	})
