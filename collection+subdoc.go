@@ -78,6 +78,9 @@ func (c *Collection) subdocWrite(ctx context.Context, key string, subdocKey stri
 		if err != nil && !(!insert && errors.As(err, &missingError)) {
 			return 0, err // SubdocInsert should fail if doc doesn't exist; WriteSubDoc doesn't
 		}
+		if err != nil && c.isTombstone(c.db(), key) {
+			cas, casOut = 0, 0 // Couchbase Server ignores the CAS of a tombstone for an upsert
+		}
 		if cas != 0 && casOut != cas {
 			return 0, sgbucket.CasMismatchErr{Expected: cas, Actual: casOut}
 		}
