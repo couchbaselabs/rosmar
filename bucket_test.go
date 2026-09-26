@@ -569,6 +569,13 @@ func TestExpirationSkipsTombstones(t *testing.T) {
 			},
 		},
 		{
+			name: "UpdateDelete",
+			deleteFn: func(t *testing.T, c *Collection, key string, _ CAS, _ Exp) {
+				_, err := c.Update(t.Context(), key, 0, func([]byte) ([]byte, *uint32, bool, error) { return nil, nil, true, nil })
+				require.NoError(t, err)
+			},
+		},
+		{
 			name:     "UpdateXattrDeleteBody",
 			keepsExp: true,
 			deleteFn: func(t *testing.T, c *Collection, key string, cas CAS, exp Exp) {
@@ -589,14 +596,6 @@ func TestExpirationSkipsTombstones(t *testing.T) {
 			keepsExp: true,
 			deleteFn: func(t *testing.T, c *Collection, key string, cas CAS, exp Exp) {
 				require.NoError(t, c.DeleteWithMeta(t.Context(), key, cas, cas+1, exp, nil))
-			},
-		},
-		{
-			name:     "WriteCasNilValue",
-			keepsExp: true,
-			deleteFn: func(t *testing.T, c *Collection, key string, cas CAS, exp Exp) {
-				_, err := c.WriteCas(t.Context(), key, exp, cas, nil, 0)
-				require.NoError(t, err)
 			},
 		},
 	}
