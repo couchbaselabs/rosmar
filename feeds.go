@@ -27,14 +27,14 @@ var activeFeedCount int32 // for tests
 func (bucket *Bucket) StartDCPFeed(ctx context.Context, args sgbucket.FeedArguments, callback sgbucket.FeedEventCallbackFunc, dbStats *expvar.Map) error {
 	traceEnter("StartDCPFeed", "bucket=%s, args=%+v", bucket.GetName(), args)
 	// Validate requested collections exist before starting feeds. No scopes means the default
-	// collection, if it exists.
-	requestedCollections := make([]*Collection, 0)
+	// collection, if it exists. A collection named twice gets one feed.
+	requestedCollections := map[*Collection]struct{}{}
 	if len(args.Scopes) == 0 {
 		collection, err := bucket.getCollection(defaultDataStoreName)
 		if err != nil {
 			return err
 		}
-		requestedCollections = append(requestedCollections, collection)
+		requestedCollections[collection] = struct{}{}
 	}
 	for scopeName, collections := range args.Scopes {
 		for _, collectionName := range collections {
@@ -42,14 +42,14 @@ func (bucket *Bucket) StartDCPFeed(ctx context.Context, args sgbucket.FeedArgume
 			if err != nil {
 				return fmt.Errorf("couldn't open collection %s:%s for DCP feed: %w", scopeName, collectionName, err)
 			}
-			requestedCollections = append(requestedCollections, collection)
+			requestedCollections[collection] = struct{}{}
 		}
 	}
 
 	doneChan := args.DoneChan
-	doneChans := map[*Collection]chan struct{}{}
+	doneChans := make(map[*Collection]chan struct{}, len(requestedCollections))
 	startedFeeds := make([]*dcpFeed, 0, len(requestedCollections))
-	for _, collection := range requestedCollections {
+	for collection := range requestedCollections {
 		// Not bothering to remove scopes from args for the single collection feeds
 		// here because it's ignored by Collection.startDCPFeed
 		collectionID := collection.GetCollectionID()
@@ -76,8 +76,8 @@ func (bucket *Bucket) StartDCPFeed(ctx context.Context, args sgbucket.FeedArgume
 
 	// coalesce doneChans
 	go func() {
-		for _, collection := range requestedCollections {
-			<-doneChans[collection]
+		for _, done := range doneChans {
+			<-done
 		}
 		// The collections share one checkpoint document, so a dump saves it once they have all stopped.
 		if args.Dump {
@@ -352,6 +352,10 @@ func (feed *dcpFeed) run() {
 	collectionID := feed.collection.GetCollectionID()
 	feedContent := feed.args.FeedContent
 	for {
+		// Stop before the next event once the Terminator is closed, without waiting for the goroutine above.
+		if feed.terminated() {
+			break
+		}
 		e, ok := feed.events.pull()
 		if !ok {
 			break // terminated
@@ -379,6 +383,16 @@ func (feed *dcpFeed) run() {
 	// A dump saves its checkpoint in StartDCPFeed, once all of its collections stop.
 	if !feed.args.Dump {
 		_ = feed.writeCheckpoint()
+	}
+}
+
+// terminated reports whether the feed's Terminator is closed. A feed with no Terminator is never terminated.
+func (feed *dcpFeed) terminated() bool {
+	select {
+	case <-feed.args.Terminator:
+		return true
+	default:
+		return false
 	}
 }
 

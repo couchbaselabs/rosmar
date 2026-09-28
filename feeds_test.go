@@ -341,9 +341,12 @@ func TestDumpAcrossCollectionsDeletesCheckpointOnlyWhenAllComplete(t *testing.T)
 
 		// step collection2 one event at a time, so it is still running when the feed is stopped
 		step := make(chan struct{})
+		var c1BackfillEnded atomic.Bool
 		callback := func(event sgbucket.FeedEvent) bool {
 			if event.CollectionID == c2ID && event.Opcode == sgbucket.FeedOpMutation {
 				<-step
+			} else if event.CollectionID != c2ID && event.Opcode == sgbucket.FeedOpEndBackfill {
+				c1BackfillEnded.Store(true)
 			}
 			return true
 		}
@@ -352,8 +355,11 @@ func TestDumpAcrossCollectionsDeletesCheckpointOnlyWhenAllComplete(t *testing.T)
 		for range 3 {
 			step <- struct{}{}
 		}
-		// collection1 is not stepped, so wait for its feed to reach the end before stopping collection2
-		require.Eventually(t, func() bool { return atomic.LoadInt32(&activeFeedCount) == 1 }, 10*time.Second, time.Millisecond)
+		// collection1 is not stepped, so wait for its feed to reach the end and stop before stopping collection2.
+		// The feed count alone can also be 1 before collection1's feed has started.
+		require.Eventually(t, func() bool {
+			return c1BackfillEnded.Load() && atomic.LoadInt32(&activeFeedCount) == 1
+		}, 10*time.Second, time.Millisecond)
 		close(terminator)
 		for done := false; !done; {
 			select {
@@ -1337,6 +1343,45 @@ func TestStartDCPFeedUnknownCollection(t *testing.T) {
 	require.NotContains(t, stores, dsName("scope1", "collection2"), "the feed created the collection")
 
 	requireNoRegisteredFeeds(t, bucket)
+}
+
+// TestStartDCPFeedDuplicateCollection verifies that a bucket-level feed that names a collection twice runs one
+// feed on it, so each document is delivered once.
+func TestStartDCPFeedDuplicateCollection(t *testing.T) {
+	ctx := t.Context()
+	ensureNoLeakedFeeds(t)
+	bucket := makeTestBucket(t)
+
+	c, err := bucket.NamedDataStore(ctx, dsName("scope1", "collection1"))
+	require.NoError(t, err)
+	addToCollection(t, c, "able", 0, "A")
+	addToCollection(t, c, "baker", 0, "B")
+
+	var mutex sync.Mutex
+	delivered := map[string]int{}
+	callback := func(event sgbucket.FeedEvent) bool {
+		if event.Opcode == sgbucket.FeedOpMutation {
+			mutex.Lock()
+			delivered[string(event.Key)]++
+			mutex.Unlock()
+		}
+		return true
+	}
+	doneChan := make(chan struct{})
+	args := sgbucket.FeedArguments{
+		Backfill: 0,
+		Dump:     true,
+		Scopes:   map[string][]string{"scope1": {"collection1", "collection1"}},
+		DoneChan: doneChan,
+	}
+	require.NoError(t, bucket.StartDCPFeed(ctx, args, callback, nil))
+	<-doneChan
+	// wait for every feed goroutine, so the deliveries of a second feed are counted too
+	require.Eventually(t, func() bool { return atomic.LoadInt32(&activeFeedCount) == 0 }, 10*time.Second, time.Millisecond)
+
+	mutex.Lock()
+	defer mutex.Unlock()
+	assert.Equal(t, map[string]int{"able": 1, "baker": 1}, delivered)
 }
 
 // TestStartDCPFeedMissingDefaultCollection verifies that a bucket-level feed with no scopes fails when the
