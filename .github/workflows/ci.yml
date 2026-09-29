@@ -27,7 +27,7 @@ env:
   ACTIONS_SETUP_GO_VERSION: &actions_setup_go_version actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
   ACTIONS_GOLANGCI_LINT_VERSION: &actions_golangci_lint_version golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
   ACTIONS_GO_TEST_ANNOTATIONS_VERSION: &actions_go_test_annotations_version guyarb/golang-test-annotations@96fc379b171c49932041d6c789e73331a7bdeec1 # v0.9.0
-  GO_VERSION: &go_version 1.26.6
+  GO_VERSION: &go_version 1.27.1
 
 jobs:
   addlicense:
@@ -38,8 +38,7 @@ jobs:
       - uses: *actions_setup_go_version
         with:
           go-version: *go_version
-      - run: go install github.com/google/addlicense@latest
-      - run: addlicense -check -f licenses/addlicense.tmpl .
+      - run: go tool addlicense -check -f licenses/addlicense.tmpl .
 
   test:
     runs-on: ${{ matrix.os }}
@@ -74,7 +73,7 @@ jobs:
       - name: golangci-lint
         uses: *actions_golangci_lint_version
         with:
-          version: v2.12.2
+          version: v2.14.0
 
   test-race:
     runs-on: ${{ matrix.os }}

@@ -12,13 +12,13 @@ repos:
       - id: addlicense
         name: addlicense
         language: system
-        entry: go run github.com/google/addlicense@latest -f licenses/addlicense.tmpl
+        entry: go tool addlicense -f licenses/addlicense.tmpl
         types_or: [go, python]
 
       - id: goimports
         name: goimports
         language: system
-        entry: go run golang.org/x/tools/cmd/goimports@latest
+        entry: go tool goimports
         args: [-w]
         types: [go]
 
@@ -26,7 +26,10 @@ repos:
         name: golangci-lint
         language: system
         # version must match .github/workflows/ci.yml golangci job
-        entry: go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2
-        args: [run, --config=.golangci.yml, --fix=false]
+        # Cache per checkout: a shared cache serves results from other clones of this module,
+        # which report findings against that clone's file paths.
+        entry: sh -c 'export GOLANGCI_LINT_CACHE="$(git rev-parse --absolute-git-dir)/golangci-lint-cache";
+               exec go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.14.0
+               run --config=.golangci.yml --fix=false'
         types: [go]
         pass_filenames: false
