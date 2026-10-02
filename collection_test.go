@@ -1249,8 +1249,187 @@ func TestDeleteWithXattrs(t *testing.T) {
 
 	require.NoError(t, col.DeleteWithXattrs(ctx, docID, []string{"_systemXattr"}))
 }
+
+// TestTombstoneRemovesUserXattrs checks that each way of deleting a doc keeps system xattrs and removes user xattrs.
+func TestTombstoneRemovesUserXattrs(t *testing.T) {
+	testCases := []struct {
+		name     string
+		deleteFn func(t *testing.T, c *Collection, key string, cas CAS)
+	}{
+		{
+			name: "Delete",
+			deleteFn: func(t *testing.T, c *Collection, key string, _ CAS) {
+				require.NoError(t, c.Delete(t.Context(), key))
+			},
+		},
+		{
+			name: "WriteCasNilValue",
+			deleteFn: func(t *testing.T, c *Collection, key string, cas CAS) {
+				_, err := c.WriteCas(t.Context(), key, 0, cas, nil, 0)
+				require.NoError(t, err)
+			},
+		},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := t.Context()
+			col := makeTestBucket(t).DefaultDataStore(ctx).(*Collection)
+			docID := t.Name()
+
+			cas, err := col.WriteWithXattrs(ctx, docID, 0, 0, []byte(`{"foo":"bar"}`),
+				map[string][]byte{"_sync": []byte(`{"rev":"1-a"}`), "user": []byte(`{"a":1}`)}, nil, nil)
+			require.NoError(t, err)
+
+			tc.deleteFn(t, col, docID, cas)
+
+			xattrs, _, err := col.GetXattrs(ctx, docID, []string{"_sync"})
+			require.NoError(t, err)
+			require.JSONEq(t, `{"rev":"1-a"}`, string(xattrs["_sync"]))
+
+			_, _, err = col.GetXattrs(ctx, docID, []string{"user"})
+			require.ErrorAs(t, err, &sgbucket.XattrMissingError{})
+		})
+	}
+}
+
 func mustMarshalJSON(t *testing.T, obj any) []byte {
 	bytes, err := json.Marshal(obj)
 	require.NoError(t, err)
 	return bytes
+}
+
+// TestWriteCasNilOnTombstoneKeepsSystemXattrs checks that a nil WriteCas on an existing tombstone keeps its system xattrs.
+func TestWriteCasNilOnTombstoneKeepsSystemXattrs(t *testing.T) {
+	ctx := t.Context()
+	col := makeTestBucket(t).DefaultDataStore(ctx).(*Collection)
+	docID := t.Name()
+
+	_, err := col.WriteWithXattrs(ctx, docID, 0, 0, []byte(`{"foo":"bar"}`),
+		map[string][]byte{"_sync": []byte(`{"rev":"1-a"}`)}, nil, nil)
+	require.NoError(t, err)
+	require.NoError(t, col.Delete(ctx, docID))
+
+	_, err = col.WriteCas(ctx, docID, 0, getDocRow(t, col, docID).cas, nil, 0)
+	require.NoError(t, err)
+
+	xattrs, _, err := col.GetXattrs(ctx, docID, []string{"_sync"})
+	require.NoError(t, err)
+	require.JSONEq(t, `{"rev":"1-a"}`, string(xattrs["_sync"]))
+}
+
+// TestWriteCasNilSetsTombstone checks that every WriteCas branch marks a nil write as a tombstone.
+func TestWriteCasNilSetsTombstone(t *testing.T) {
+	testCases := []struct {
+		name    string
+		setupFn func(t *testing.T, c *Collection, key string) CAS
+		opt     sgbucket.WriteOptions
+	}{
+		{
+			name:    "InsertNewKey",
+			setupFn: func(t *testing.T, c *Collection, key string) CAS { return 0 },
+		},
+		{
+			name:    "AddOnlyNewKey",
+			setupFn: func(t *testing.T, c *Collection, key string) CAS { return 0 },
+			opt:     sgbucket.AddOnly,
+		},
+		{
+			name: "InsertOverTombstone",
+			setupFn: func(t *testing.T, c *Collection, key string) CAS {
+				_, err := c.WriteCas(t.Context(), key, 0, 0, []byte(`{"foo":"bar"}`), 0)
+				require.NoError(t, err)
+				require.NoError(t, c.Delete(t.Context(), key))
+				return 0
+			},
+		},
+		{
+			name: "Append",
+			setupFn: func(t *testing.T, c *Collection, key string) CAS {
+				cas, err := c.WriteCas(t.Context(), key, 0, 0, []byte(`foo`), sgbucket.Raw)
+				require.NoError(t, err)
+				return cas
+			},
+			opt: sgbucket.Append,
+		},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := t.Context()
+			col := makeTestBucket(t).DefaultDataStore(ctx).(*Collection)
+			docID := t.Name()
+
+			cas := tc.setupFn(t, col, docID)
+			_, err := col.WriteCas(ctx, docID, 0, cas, nil, tc.opt)
+			require.NoError(t, err)
+
+			row := getDocRow(t, col, docID)
+			t.Logf("row: %+v", row)
+			require.False(t, row.hasValue)
+			assert.True(t, row.tombstone, "tombstone flag not set")
+		})
+	}
+}
+
+// TestTombstoneFlagMatchesBody checks that writes over a tombstone keep the tombstone flag in step with the body.
+func TestTombstoneFlagMatchesBody(t *testing.T) {
+	testCases := []struct {
+		name    string
+		writeFn func(t *testing.T, c *Collection, key string, cas CAS)
+	}{
+		{
+			name: "Add",
+			writeFn: func(t *testing.T, c *Collection, key string, _ CAS) {
+				added, err := c.Add(t.Context(), key, 0, map[string]any{"new": true})
+				require.NoError(t, err)
+				require.True(t, added)
+			},
+		},
+		{
+			name: "Set",
+			writeFn: func(t *testing.T, c *Collection, key string, _ CAS) {
+				require.NoError(t, c.Set(t.Context(), key, 0, nil, map[string]any{"new": true}))
+			},
+		},
+		{
+			name: "SetXattrs",
+			writeFn: func(t *testing.T, c *Collection, key string, _ CAS) {
+				_, err := c.SetXattrs(t.Context(), key, map[string][]byte{"_sync": []byte(`{"rev":"2-a"}`)})
+				require.NoError(t, err)
+			},
+		},
+		{
+			name: "UpdateXattrs",
+			writeFn: func(t *testing.T, c *Collection, key string, cas CAS) {
+				_, err := c.UpdateXattrs(t.Context(), key, 0, cas, map[string][]byte{"_sync": []byte(`{"rev":"2-a"}`)}, nil)
+				require.NoError(t, err)
+			},
+		},
+		{
+			name: "WriteWithXattrsNilBody",
+			writeFn: func(t *testing.T, c *Collection, key string, cas CAS) {
+				_, err := c.WriteWithXattrs(t.Context(), key, 0, cas, nil, map[string][]byte{"_sync": []byte(`{"rev":"2-a"}`)}, nil, nil)
+				require.NoError(t, err)
+			},
+		},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := t.Context()
+			col := makeTestBucket(t).DefaultDataStore(ctx).(*Collection)
+			docID := t.Name()
+
+			_, err := col.WriteWithXattrs(ctx, docID, 0, 0, []byte(`{"foo":"bar"}`),
+				map[string][]byte{"_sync": []byte(`{"rev":"1-a"}`)}, nil, nil)
+			require.NoError(t, err)
+			require.NoError(t, col.Delete(ctx, docID))
+			before := getDocRow(t, col, docID)
+
+			tc.writeFn(t, col, docID, before.cas)
+
+			after := getDocRow(t, col, docID)
+			t.Logf("row: %+v", after)
+			assert.Equal(t, !after.hasValue, after.tombstone, "tombstone flag does not match body")
+			assert.Greater(t, after.revSeqNo, before.revSeqNo)
+		})
+	}
 }

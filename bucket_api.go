@@ -336,7 +336,7 @@ func (bucket *Bucket) dropCollection(name sgbucket.DataStoreNameImpl) error {
 // nextExpiration returns the earliest expiration time of any document, or 0 if none.
 func (bucket *Bucket) nextExpiration() (exp Exp, err error) {
 	var expVal sql.NullInt64
-	row := bucket.db().QueryRow(`SELECT min(exp) FROM documents WHERE exp > 0`)
+	row := bucket.db().QueryRow(`SELECT min(exp) FROM documents WHERE tombstone = 0 AND exp > 0`)
 	err = scan(row, &expVal)
 	if expVal.Valid {
 		exp = Exp(expVal.Int64)

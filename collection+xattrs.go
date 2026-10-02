@@ -575,7 +575,7 @@ func (c *Collection) DeleteWithXattrs(ctx context.Context, key string, xattrKeys
 			return nil, err
 		}
 		e.revSeqNo++
-		_, err = txn.Exec(`UPDATE documents SET value=null, xattrs=?1, cas=?2, revSeqNo=?3 WHERE collection=?4 AND key=?5`, e.xattrs, newCas, e.revSeqNo, c.id, key)
+		_, err = txn.Exec(`UPDATE documents SET value=null, exp=0, isJSON=0, tombstone=1, xattrs=?1, cas=?2, revSeqNo=?3 WHERE collection=?4 AND key=?5`, e.xattrs, newCas, e.revSeqNo, c.id, key)
 		return e, err
 	})
 	return err
@@ -811,6 +811,8 @@ func (c *Collection) writeWithXattrs(
 		if exp != nil {
 			e.exp = absoluteExpiry(*exp)
 		}
+		// An xattr-only write to a tombstone leaves it a tombstone.
+		e.isDeletion = e.value == nil
 
 		err = c.storeDocument(txn, e)
 		if err != nil {
