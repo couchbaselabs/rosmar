@@ -171,9 +171,9 @@ func (c *Collection) add(key string, exp Exp, val []byte, isJSON bool) (added bo
 		exp = absoluteExpiry(exp)
 		var revSeqNo uint64
 		err = txn.QueryRow(
-			`INSERT INTO documents (collection,key,value,cas,exp,isJSON,revSeqNo,tombstone) VALUES (?1,?2,?3,?4,?5,?6,1,(?3 IS NULL))
+			`INSERT INTO documents (collection,key,value,cas,exp,isJSON,revSeqNo,tombstone) VALUES (?1,?2,?3,?4,?5,?6,1,0)
 				ON CONFLICT(collection,key) DO
-					UPDATE SET value=?3, xattrs=null, cas=?4, exp=?5, isJSON=?6, revSeqNo=revSeqNo+1, tombstone=(?3 IS NULL)
+					UPDATE SET value=?3, xattrs=null, cas=?4, exp=?5, isJSON=?6, revSeqNo=revSeqNo+1, tombstone=0
 					WHERE tombstone != 0
 				RETURNING revSeqNo`,
 			c.id, key, val, newCas, exp, isJSON).Scan(&revSeqNo)
@@ -235,13 +235,13 @@ func (c *Collection) _set(txn *sql.Tx, key string, exp Exp, opts *sgbucket.Upser
 
 	// First get the existing xattrs and exp, and check whether the doc is a tombstone:
 	exists := false
-	hadValue := false
+	wasTombstone := false
 	var oldExp Exp = 0
-	row := txn.QueryRow(`SELECT value NOT NULL, xattrs, exp, revSeqNo FROM documents
+	row := txn.QueryRow(`SELECT tombstone, xattrs, exp, revSeqNo FROM documents
 						WHERE collection=? AND key=?`, c.id, key)
-	if err = scan(row, &hadValue, &xattrs, &oldExp, &revSeqNo); err == nil {
+	if err = scan(row, &wasTombstone, &xattrs, &oldExp, &revSeqNo); err == nil {
 		exists = true
-		if !hadValue {
+		if wasTombstone {
 			xattrs = nil // xattrs are cleared whenever resurrecting a tombstone
 		}
 	} else if err != sql.ErrNoRows {
@@ -256,11 +256,11 @@ func (c *Collection) _set(txn *sql.Tx, key string, exp Exp, opts *sgbucket.Upser
 		if opts != nil && opts.PreserveExpiry {
 			exp = oldExp
 		}
-		stmt = `UPDATE documents SET value=?3, xattrs=?4, cas=?5, exp=?6, isJSON=?7, revSeqNo=?8, tombstone=(?3 IS NULL)
+		stmt = `UPDATE documents SET value=?3, xattrs=?4, cas=?5, exp=?6, isJSON=?7, revSeqNo=?8, tombstone=0
 				WHERE collection=?1 AND key=?2`
 	} else {
 		stmt = `INSERT INTO documents (collection,key,value,xattrs,cas,exp,isJSON,revSeqNo,tombstone)
-				VALUES (?1,?2,?3,?4,?5,?6,?7,?8,(?3 IS NULL))`
+				VALUES (?1,?2,?3,?4,?5,?6,?7,?8,0)`
 	}
 	_, err = txn.Exec(stmt, c.id, key, val, xattrs, newCas, exp, isJSON, revSeqNo)
 	return

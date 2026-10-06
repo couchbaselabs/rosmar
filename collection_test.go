@@ -1370,11 +1370,12 @@ func TestWriteCasNilSetsTombstone(t *testing.T) {
 	}
 }
 
-// TestTombstoneFlagMatchesBody checks that writes over a tombstone keep the tombstone flag in step with the body.
-func TestTombstoneFlagMatchesBody(t *testing.T) {
+// TestWritesOverTombstone checks that body writes resurrect a tombstone and xattr-only writes leave it a tombstone.
+func TestWritesOverTombstone(t *testing.T) {
 	testCases := []struct {
-		name    string
-		writeFn func(t *testing.T, c *Collection, key string, cas CAS)
+		name            string
+		writeFn         func(t *testing.T, c *Collection, key string, cas CAS)
+		expectTombstone bool
 	}{
 		{
 			name: "Add",
@@ -1396,6 +1397,7 @@ func TestTombstoneFlagMatchesBody(t *testing.T) {
 				_, err := c.SetXattrs(t.Context(), key, map[string][]byte{"_sync": []byte(`{"rev":"2-a"}`)})
 				require.NoError(t, err)
 			},
+			expectTombstone: true,
 		},
 		{
 			name: "UpdateXattrs",
@@ -1403,6 +1405,7 @@ func TestTombstoneFlagMatchesBody(t *testing.T) {
 				_, err := c.UpdateXattrs(t.Context(), key, 0, cas, map[string][]byte{"_sync": []byte(`{"rev":"2-a"}`)}, nil)
 				require.NoError(t, err)
 			},
+			expectTombstone: true,
 		},
 		{
 			name: "WriteWithXattrsNilBody",
@@ -1410,6 +1413,7 @@ func TestTombstoneFlagMatchesBody(t *testing.T) {
 				_, err := c.WriteWithXattrs(t.Context(), key, 0, cas, nil, map[string][]byte{"_sync": []byte(`{"rev":"2-a"}`)}, nil, nil)
 				require.NoError(t, err)
 			},
+			expectTombstone: true,
 		},
 	}
 	for _, tc := range testCases {
@@ -1428,8 +1432,76 @@ func TestTombstoneFlagMatchesBody(t *testing.T) {
 
 			after := getDocRow(t, col, docID)
 			t.Logf("row: %+v", after)
-			assert.Equal(t, !after.hasValue, after.tombstone, "tombstone flag does not match body")
+			assert.Equal(t, tc.expectTombstone, after.tombstone)
+			assert.Equal(t, tc.expectTombstone, !after.hasValue)
 			assert.Greater(t, after.revSeqNo, before.revSeqNo)
+		})
+	}
+}
+
+// TestWritesToMissingKeyNeverCreateTombstone checks that a nil value or an xattr-only write to a missing key does not
+// create a tombstone. Couchbase Server stores each of these as a live document.
+func TestWritesToMissingKeyNeverCreateTombstone(t *testing.T) {
+	testCases := []struct {
+		name  string
+		write func(t *testing.T, c *Collection, key string)
+	}{
+		{
+			name: "Set",
+			write: func(t *testing.T, c *Collection, key string) {
+				require.NoError(t, c.Set(t.Context(), key, 0, nil, nil))
+			},
+		},
+		{
+			name: "SetRaw",
+			write: func(t *testing.T, c *Collection, key string) {
+				require.NoError(t, c.SetRaw(t.Context(), key, 0, nil, nil))
+			},
+		},
+		{
+			name: "Add",
+			write: func(t *testing.T, c *Collection, key string) {
+				added, err := c.Add(t.Context(), key, 0, nil)
+				require.NoError(t, err)
+				require.True(t, added)
+			},
+		},
+		{
+			name: "AddRaw",
+			write: func(t *testing.T, c *Collection, key string) {
+				added, err := c.AddRaw(t.Context(), key, 0, nil)
+				require.NoError(t, err)
+				require.True(t, added)
+			},
+		},
+		{
+			name: "SetXattrs",
+			write: func(t *testing.T, c *Collection, key string) {
+				_, err := c.SetXattrs(t.Context(), key, map[string][]byte{"_sync": []byte(`{"rev":"1-a"}`)})
+				require.NoError(t, err)
+			},
+		},
+		{
+			name: "WriteWithXattrsNilBody",
+			write: func(t *testing.T, c *Collection, key string) {
+				_, err := c.WriteWithXattrs(t.Context(), key, 0, 0, nil, map[string][]byte{"_sync": []byte(`{"rev":"1-a"}`)}, nil, nil)
+				require.NoError(t, err)
+			},
+		},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			bucket := makeTestBucket(t)
+			c := bucket.DefaultDataStore(t.Context()).(*Collection)
+			events, _ := startFeed(t, bucket)
+			key := t.Name()
+
+			tc.write(t, c, key)
+
+			require.False(t, c.isTombstone(c.db(), key), "write created a tombstone")
+			event := <-events
+			require.Equal(t, key, string(event.Key))
+			require.Equal(t, sgbucket.FeedOpMutation, event.Opcode)
 		})
 	}
 }
