@@ -164,6 +164,7 @@ func (c *Collection) AddRaw(_ context.Context, key string, exp Exp, val []byte) 
 
 // Common implementation of Add and AddRaw.
 func (c *Collection) add(key string, exp Exp, val []byte, isJSON bool) (added bool, err error) {
+	val = nilBody(val, isJSON)
 	if err = checkDocSize(len(val)); err != nil {
 		return false, err
 	}
@@ -209,6 +210,7 @@ func (c *Collection) SetRaw(_ context.Context, key string, exp Exp, opts *sgbuck
 
 // Common implementation of Set and SetRaw.
 func (c *Collection) set(key string, exp Exp, opts *sgbucket.UpsertOptions, val []byte, isJSON bool) (err error) {
+	val = nilBody(val, isJSON)
 	if err = checkDocSize(len(val)); err != nil {
 		return err
 	}
@@ -228,6 +230,16 @@ func (c *Collection) set(key string, exp Exp, opts *sgbucket.UpsertOptions, val 
 			revSeqNo: revSeqNo,
 		}, err
 	})
+}
+
+// nilBody returns the body Couchbase Server stores for a nil value: null for JSON, otherwise an empty body.
+func nilBody(val []byte, isJSON bool) []byte {
+	if val != nil {
+		return val
+	} else if isJSON {
+		return []byte("null")
+	}
+	return []byte{}
 }
 
 // Core code of Set/SetRaw/Incr. Must be in a transaction when called.

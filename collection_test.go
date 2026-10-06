@@ -2248,6 +2248,83 @@ func TestWritesToMissingKeyNeverCreateTombstone(t *testing.T) {
 	}
 }
 
+// TestNilWritesStoreBody checks that Set, SetRaw, Add, AddRaw and WriteWithXattrs with a nil value write
+// a live document, as Couchbase Server does: an untyped nil writes a null JSON body and a nil []byte writes an empty body.
+func TestNilWritesStoreBody(t *testing.T) {
+	ctx := t.Context()
+	dataStore := makeTestBucket(t).DefaultDataStore(ctx).(*Collection)
+
+	testCases := []struct {
+		name         string
+		live         bool // write over a live doc with a system and a user xattr
+		write        func(t *testing.T, key string)
+		expectedBody string
+	}{
+		{
+			name:         "Set",
+			write:        func(t *testing.T, key string) { require.NoError(t, dataStore.Set(ctx, key, 0, nil, nil)) },
+			expectedBody: "null",
+		},
+		{
+			name:         "SetOverLive",
+			live:         true,
+			write:        func(t *testing.T, key string) { require.NoError(t, dataStore.Set(ctx, key, 0, nil, nil)) },
+			expectedBody: "null",
+		},
+		{
+			name:  "SetRaw",
+			write: func(t *testing.T, key string) { require.NoError(t, dataStore.SetRaw(ctx, key, 0, nil, nil)) },
+		},
+		{
+			name: "Add",
+			write: func(t *testing.T, key string) {
+				added, err := dataStore.Add(ctx, key, 0, nil)
+				require.NoError(t, err)
+				require.True(t, added)
+			},
+			expectedBody: "null",
+		},
+		{
+			name: "AddRaw",
+			write: func(t *testing.T, key string) {
+				added, err := dataStore.AddRaw(ctx, key, 0, nil)
+				require.NoError(t, err)
+				require.True(t, added)
+			},
+		},
+		{
+			name: "WriteWithXattrsNilBody",
+			write: func(t *testing.T, key string) {
+				_, err := dataStore.WriteWithXattrs(ctx, key, 0, 0, nil, map[string][]byte{"_sync": []byte(`{"rev":"1-a"}`)}, nil, nil)
+				require.NoError(t, err)
+			},
+			expectedBody: "null",
+		},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			key := t.Name()
+			if tc.live {
+				_, err := dataStore.WriteWithXattrs(ctx, key, 0, 0, []byte(`{"foo":"bar"}`),
+					map[string][]byte{"_sync": []byte(`{"rev":"1-a"}`), "user": []byte(`{"u":1}`)}, nil, nil)
+				require.NoError(t, err)
+			}
+			tc.write(t, key)
+
+			assert.False(t, getDocRow(t, dataStore, key).tombstone, "nil write created a tombstone")
+			body, _, err := dataStore.GetRaw(ctx, key)
+			require.NoError(t, err)
+			require.Equal(t, tc.expectedBody, string(body))
+			if tc.live {
+				xattrs, _, err := dataStore.GetXattrs(ctx, key, []string{"_sync", "user"})
+				require.NoError(t, err)
+				require.JSONEq(t, `{"rev":"1-a"}`, string(xattrs["_sync"]))
+				require.JSONEq(t, `{"u":1}`, string(xattrs["user"]))
+			}
+		})
+	}
+}
+
 func TestUpdateDelete(t *testing.T) {
 	ctx := t.Context()
 	dataStore := makeTestBucket(t).DefaultDataStore(ctx)

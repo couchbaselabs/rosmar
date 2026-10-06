@@ -697,6 +697,8 @@ func (c *Collection) writeWithXattrs(
 			}
 			if opts.createBody {
 				e.value, e.isJSON = []byte(`{}`), true
+			} else if val == nil {
+				e.value, e.isJSON = []byte(`null`), true // Like Couchbase Server, inserting only xattrs writes a null body
 			}
 		} else {
 			return nil, remapKeyError(err, key)
