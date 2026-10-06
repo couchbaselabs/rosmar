@@ -591,14 +591,6 @@ func TestExpirationSkipsTombstones(t *testing.T) {
 				require.NoError(t, c.DeleteWithMeta(t.Context(), key, cas, cas+1, exp, nil))
 			},
 		},
-		{
-			name:     "WriteCasNilValue",
-			keepsExp: true,
-			deleteFn: func(t *testing.T, c *Collection, key string, cas CAS, exp Exp) {
-				_, err := c.WriteCas(t.Context(), key, exp, cas, nil, 0)
-				require.NoError(t, err)
-			},
-		},
 	}
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {

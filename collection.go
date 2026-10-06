@@ -326,24 +326,29 @@ func (c *Collection) WriteCas(_ context.Context, key string, exp Exp, cas CAS, v
 	if err != nil {
 		return 0, err
 	}
+	// Like Couchbase Server, a nil value never creates a tombstone: a nil []byte writes an empty body.
+	if raw == nil {
+		if val != nil {
+			raw, isJSON = []byte{}, false
+		} else if !isJSON {
+			return 0, fmt.Errorf("raw value must be []byte")
+		} else {
+			raw = []byte("null")
+		}
+	}
 	if err = checkDocSize(len(raw)); err != nil {
 		return
 	}
-	if raw == nil {
-		isJSON = false
-	} else if (opt & sgbucket.Raw) != 0 {
+	if (opt&sgbucket.Raw) != 0 && len(raw) > 0 {
 		isJSON = json.Valid(raw)
 	}
 
 	err = c.withNewCas(func(txn *sql.Tx, newCas CAS) (*event, error) {
 		wasTombstone := false
 		var revSeqNo uint64
-		if cas != 0 {
-			row := txn.QueryRow("SELECT revSeqNo, tombstone FROM documents WHERE collection=? AND key=?", c.id, key)
-			err = scan(row, &revSeqNo, &wasTombstone)
-			if err != nil {
-				return nil, remapKeyError(err, key)
-			}
+		row := txn.QueryRow("SELECT revSeqNo, tombstone FROM documents WHERE collection=? AND key=?", c.id, key)
+		if err := scan(row, &revSeqNo, &wasTombstone); err != nil && (cas != 0 || err != sql.ErrNoRows) {
+			return nil, remapKeyError(err, key)
 		}
 		revSeqNo++
 		exp = absoluteExpiry(exp)
@@ -351,24 +356,22 @@ func (c *Collection) WriteCas(_ context.Context, key string, exp Exp, cas CAS, v
 		if (opt & sgbucket.Append) != 0 {
 			// Append:
 			sql = `UPDATE documents SET value=value || ?1, cas=?2, exp=?6, isJSON=?7,revSeqNo=?8,
-						tombstone=((value || ?1) IS NULL),
-						xattrs=iif(tombstone != 0 AND (value || ?1) IS NOT NULL, null, xattrs)
+						xattrs=iif(tombstone != 0, null, xattrs)
 				   WHERE collection=?3 AND key=?4 AND cas=?5`
 		} else if (opt&sgbucket.AddOnly) != 0 || cas == 0 {
 			// Insert, but fall back to Update if the doc is a tombstone
 			sql = `INSERT INTO documents (collection, key, value, cas, exp, isJSON, revSeqNo, tombstone)
-					VALUES(?3,?4,?1,?2,?6,?7,?8,(?1 IS NULL))
+					VALUES(?3,?4,?1,?2,?6,?7,?8,0)
 					ON CONFLICT(collection,key) DO
-						UPDATE SET value=?1, xattrs=iif(?1 IS NULL, xattrs, null), cas=?2, exp=?6, isJSON=?7,
-							tombstone=(?1 IS NULL), revSeqNo=?8
+						UPDATE SET value=?1, xattrs=null, cas=?2, exp=?6, isJSON=?7, tombstone=0, revSeqNo=?8
 						WHERE tombstone == 1`
 			if !wasTombstone && cas != 0 {
 				sql += ` AND cas=?5`
 			}
 		} else {
 			// Regular write:
-			sql = `UPDATE documents SET value=?1, cas=?2, exp=?6, isJSON=?7, revSeqNo=?8, tombstone=(?1 IS NULL),
-						xattrs=iif(tombstone != 0 AND ?1 IS NOT NULL, null, xattrs)
+			sql = `UPDATE documents SET value=?1, cas=?2, exp=?6, isJSON=?7, revSeqNo=?8, tombstone=0,
+						xattrs=iif(tombstone != 0, null, xattrs)
 				   WHERE collection=?3 AND key=?4 AND cas=?5`
 		}
 		result, err := txn.Exec(sql, raw, newCas, c.id, key, cas, exp, isJSON, revSeqNo)
@@ -393,22 +396,15 @@ func (c *Collection) WriteCas(_ context.Context, key string, exp Exp, cas CAS, v
 		if err != nil {
 			return nil, err
 		}
-		if raw == nil {
-			xattrs = processXattrs(xattrs, removeUserXattrs)
-			if _, err := txn.Exec(`UPDATE documents SET xattrs=?1 WHERE collection=?2 AND key=?3`, xattrs, c.id, key); err != nil {
-				return nil, err
-			}
-		}
 		casOut = newCas
 		return &event{
-			key:        key,
-			value:      raw,
-			isDeletion: (raw == nil),
-			cas:        newCas,
-			exp:        exp,
-			isJSON:     isJSON,
-			revSeqNo:   revSeqNo,
-			xattrs:     xattrs,
+			key:      key,
+			value:    raw,
+			cas:      newCas,
+			exp:      exp,
+			isJSON:   isJSON,
+			revSeqNo: revSeqNo,
+			xattrs:   xattrs,
 		}, nil
 	})
 	return
