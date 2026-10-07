@@ -1494,3 +1494,38 @@ func TestWriteCasNil(t *testing.T) {
 		})
 	}
 }
+
+func TestUpdateDelete(t *testing.T) {
+	ctx := t.Context()
+	dataStore := makeTestBucket(t).DefaultDataStore(ctx)
+	key := t.Name()
+	require.NoError(t, dataStore.Set(ctx, key, 0, nil, []byte(`{"foo":"bar"}`)))
+
+	_, err := dataStore.Update(ctx, key, 0, func([]byte) ([]byte, *uint32, bool, error) {
+		return nil, nil, true, nil
+	})
+	require.NoError(t, err)
+
+	_, _, err = dataStore.GetRaw(ctx, key)
+	require.ErrorAs(t, err, &sgbucket.MissingError{})
+}
+
+func TestUpdateExpiryOnly(t *testing.T) {
+	ctx := t.Context()
+	dataStore := makeTestBucket(t).DefaultDataStore(ctx)
+	key := t.Name()
+	require.NoError(t, dataStore.Set(ctx, key, 0, nil, []byte(`{"foo":"bar"}`)))
+
+	exp := uint32(time.Now().Add(time.Hour).Unix())
+	_, err := dataStore.Update(ctx, key, 0, func([]byte) ([]byte, *uint32, bool, error) {
+		return nil, &exp, false, nil
+	})
+	require.NoError(t, err)
+
+	body, _, err := dataStore.GetRaw(ctx, key)
+	require.NoError(t, err)
+	require.JSONEq(t, `{"foo":"bar"}`, string(body))
+	gotExp, err := dataStore.GetExpiry(ctx, key)
+	require.NoError(t, err)
+	require.Equal(t, exp, gotExp)
+}
