@@ -490,9 +490,6 @@ func (c *Collection) Update(ctx context.Context, key string, exp Exp, callback s
 		if newRaw == nil && newExp == nil && !delete {
 			return 0, nil // Callback canceled
 		}
-		if newRaw != nil {
-			raw = newRaw
-		}
 		if newExp != nil {
 			exp = *newExp
 		}
@@ -502,7 +499,7 @@ func (c *Collection) Update(ctx context.Context, key string, exp Exp, callback s
 			casOut, err = c.remove(key, &cas)
 		} else {
 			var opt sgbucket.WriteOptions = 0 // Hardcoded; callback cannot customize this :(
-			casOut, err = c.WriteCas(ctx, key, exp, cas, raw, opt)
+			casOut, err = c.WriteCas(ctx, key, exp, cas, newRaw, opt)
 		}
 		if err == nil {
 			break

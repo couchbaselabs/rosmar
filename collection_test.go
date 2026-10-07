@@ -1510,7 +1510,8 @@ func TestUpdateDelete(t *testing.T) {
 	require.ErrorAs(t, err, &sgbucket.MissingError{})
 }
 
-func TestUpdateExpiryOnly(t *testing.T) {
+// Like Couchbase Server, a nil value with a new expiry replaces the body with an empty body.
+func TestUpdateNilValueWithExpiry(t *testing.T) {
 	ctx := t.Context()
 	dataStore := makeTestBucket(t).DefaultDataStore(ctx)
 	key := t.Name()
@@ -1524,7 +1525,7 @@ func TestUpdateExpiryOnly(t *testing.T) {
 
 	body, _, err := dataStore.GetRaw(ctx, key)
 	require.NoError(t, err)
-	require.JSONEq(t, `{"foo":"bar"}`, string(body))
+	require.Empty(t, body)
 	gotExp, err := dataStore.GetExpiry(ctx, key)
 	require.NoError(t, err)
 	require.Equal(t, exp, gotExp)
