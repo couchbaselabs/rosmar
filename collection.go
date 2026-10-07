@@ -490,15 +490,20 @@ func (c *Collection) Update(ctx context.Context, key string, exp Exp, callback s
 		if newRaw == nil && newExp == nil && !delete {
 			return 0, nil // Callback canceled
 		}
-		if newRaw != nil || delete {
+		if newRaw != nil {
 			raw = newRaw
 		}
 		if newExp != nil {
 			exp = *newExp
 		}
 
-		var opt sgbucket.WriteOptions = 0 // Hardcoded; callback cannot customize this :(
-		casOut, err = c.WriteCas(ctx, key, exp, cas, raw, opt)
+		// Like Couchbase Server, a missing doc or a tombstone is always inserted, even for a delete.
+		if delete && newRaw == nil && cas != 0 {
+			casOut, err = c.remove(key, &cas)
+		} else {
+			var opt sgbucket.WriteOptions = 0 // Hardcoded; callback cannot customize this :(
+			casOut, err = c.WriteCas(ctx, key, exp, cas, raw, opt)
+		}
 		if err == nil {
 			break
 		} else if _, ok := err.(sgbucket.CasMismatchErr); !ok {
