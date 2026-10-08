@@ -1517,10 +1517,10 @@ func TestDataStoreOperationErrors(t *testing.T) {
 // remaining document, when it is asked to delete an xattr that the document does not have.
 func TestDeleteWithXattrsMissingXattr(t *testing.T) {
 	const (
-		success     = "success"
-		notFound    = "not found"
-		otherError  = "other error"
-		missingName = "_missingxattr"
+		success      = "success"
+		notFound     = "not found"
+		pathNotFound = "path not found"
+		missingName  = "_missingxattr"
 	)
 	ctx := t.Context()
 	ensureNoLeaks(t)
@@ -1565,7 +1565,7 @@ func TestDeleteWithXattrsMissingXattr(t *testing.T) {
 			tombstone:         true,
 			xattrs:            []string{"_xattr1"},
 			deleteXattrs:      []string{"_xattr1", missingName},
-			expected:          otherError,
+			expected:          pathNotFound,
 			expectedRemaining: []string{"_xattr1"},
 		},
 		{
@@ -1603,9 +1603,8 @@ func TestDeleteWithXattrsMissingXattr(t *testing.T) {
 				require.NoError(t, err)
 			case notFound:
 				require.ErrorAs(t, err, &sgbucket.MissingError{})
-			case otherError:
-				require.Error(t, err)
-				require.NotErrorAs(t, err, &sgbucket.MissingError{})
+			case pathNotFound:
+				require.ErrorIs(t, err, sgbucket.ErrPathNotFound)
 			}
 
 			_, _, err = coll.GetRaw(ctx, key)
@@ -1622,25 +1621,81 @@ func TestDeleteWithXattrsMissingXattr(t *testing.T) {
 	}
 }
 
-// TestDeleteWithXattrsPathMismatch checks that a path through a scalar xattr value fails without deleting the body.
+// TestDeleteWithXattrsPathMismatch checks that DeleteWithXattrs treats a path through a scalar xattr like a missing
+// xattr, as Couchbase Server does.
 func TestDeleteWithXattrsPathMismatch(t *testing.T) {
+	const (
+		success  = "success"
+		notFound = "not found"
+		mismatch = "mismatch"
+	)
 	ctx := t.Context()
 	ensureNoLeaks(t)
 	coll := makeTestBucket(t).DefaultDataStore(ctx)
 
-	key := t.Name()
-	body := []byte(`{"foo":"bar"}`)
-	cas, err := coll.WriteWithXattrs(ctx, key, 0, 0, body, map[string][]byte{"_sync": []byte(`"scalar"`)}, nil, nil)
-	require.NoError(t, err)
+	testCases := []struct {
+		name         string
+		tombstone    bool
+		xattrs       map[string][]byte
+		deleteXattrs []string
+		expected     string
+	}{
+		{
+			name:         "live doc, scalar xattr",
+			xattrs:       map[string][]byte{"_sync": []byte(`"scalar"`)},
+			deleteXattrs: []string{"_sync.rev"},
+			expected:     success,
+		},
+		{
+			name:         "live doc, scalar xattr and present xattr",
+			xattrs:       map[string][]byte{"_sync": []byte(`"scalar"`), "_xattr1": []byte(`{"seq":1}`)},
+			deleteXattrs: []string{"_sync.rev", "_xattr1"},
+			expected:     success,
+		},
+		{
+			name:         "tombstone, scalar xattr",
+			tombstone:    true,
+			xattrs:       map[string][]byte{"_sync": []byte(`"scalar"`)},
+			deleteXattrs: []string{"_sync.rev"},
+			expected:     notFound,
+		},
+		{
+			name:         "tombstone, scalar xattr and present xattr",
+			tombstone:    true,
+			xattrs:       map[string][]byte{"_sync": []byte(`"scalar"`), "_xattr1": []byte(`{"seq":1}`)},
+			deleteXattrs: []string{"_sync.rev", "_xattr1"},
+			expected:     mismatch,
+		},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			key := t.Name()
+			cas, err := coll.WriteWithXattrs(ctx, key, 0, 0, []byte(`{"foo":"bar"}`), tc.xattrs, nil, nil)
+			require.NoError(t, err)
+			if tc.tombstone {
+				_, err = coll.Remove(ctx, key, cas)
+				require.NoError(t, err)
+			}
 
-	err = coll.DeleteWithXattrs(ctx, key, []string{"_sync.rev"})
-	require.ErrorIs(t, err, sgbucket.ErrPathMismatch)
+			err = coll.DeleteWithXattrs(ctx, key, tc.deleteXattrs)
+			switch tc.expected {
+			case success:
+				require.NoError(t, err)
+			case notFound:
+				require.ErrorAs(t, err, &sgbucket.MissingError{})
+			case mismatch:
+				require.ErrorIs(t, err, sgbucket.ErrPathMismatch)
+			}
 
-	rawBody, xattrs, getCas, err := coll.GetWithXattrs(ctx, key, []string{"_sync"})
-	require.NoError(t, err)
-	require.Equal(t, cas, getCas)
-	require.JSONEq(t, string(body), string(rawBody))
-	require.JSONEq(t, `"scalar"`, string(xattrs["_sync"]))
+			_, _, err = coll.GetRaw(ctx, key)
+			require.ErrorAs(t, err, &sgbucket.MissingError{})
+			for xattrName, value := range tc.xattrs {
+				xattrs, _, err := coll.GetXattrs(ctx, key, []string{xattrName})
+				require.NoError(t, err)
+				require.JSONEq(t, string(value), string(xattrs[xattrName]))
+			}
+		})
+	}
 }
 
 // TestWriteCasNil checks that a nil WriteCas value never creates a tombstone: an untyped nil writes a null JSON body

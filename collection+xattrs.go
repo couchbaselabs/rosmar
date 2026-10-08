@@ -595,17 +595,17 @@ func (c *Collection) DeleteWithXattrs(ctx context.Context, key string, xattrKeys
 		if err != nil {
 			return nil, remapKeyError(err, key)
 		}
-		// Like Couchbase Server, a missing xattr fails the combined delete, leaving only the body delete on a live doc.
-		missing, err := missingSubDocPaths(e.xattrs, xattrKeys)
+		// Like Couchbase Server, a failed xattr path fails the combined delete, leaving only the body delete on a live doc.
+		failed, failedErr, err := failedSubDocPaths(e.xattrs, xattrKeys)
 		if err != nil {
 			return nil, err
 		}
-		if len(missing) > 0 {
+		if len(failed) > 0 {
 			if !bodyExists {
-				if len(missing) == len(xattrKeys) {
+				if len(failed) == len(xattrKeys) {
 					return nil, sgbucket.MissingError{Key: key}
 				}
-				return nil, fmt.Errorf("%v: %w", missing, sgbucket.ErrPathNotFound)
+				return nil, fmt.Errorf("%v: %w", failed, failedErr)
 			}
 		} else if e.xattrs, err = deleteSubDocPaths(e.xattrs, xattrKeys...); err != nil {
 			return nil, err
@@ -909,21 +909,24 @@ func deleteSubDocPaths(rawXattrs []byte, paths ...string) ([]byte, error) {
 	return rawXattrs, nil
 }
 
-// missingSubDocPaths returns the paths that are not present in the raw xattrs JSON.
-func missingSubDocPaths(rawXattrs []byte, paths []string) (missing []string, err error) {
-	for _, path := range paths {
-		found := false
-		processXattrs(rawXattrs, func(xattrs semiParsedXattrs) {
-			found, err = deleteNestedKey(xattrs, strings.Split(path, "."))
-		})
-		if err != nil {
-			return nil, err
-		}
-		if !found {
-			missing = append(missing, path)
+// failedSubDocPaths returns the paths that a Couchbase Server subdoc remove fails on, and the error for the first of
+// them: ErrPathNotFound for a missing path, or ErrPathMismatch for a path through a value that is not a JSON object.
+func failedSubDocPaths(rawXattrs []byte, paths []string) (failed []string, firstErr error, err error) {
+	var xattrs map[string]any
+	if len(rawXattrs) > 0 {
+		if err := json.Unmarshal(rawXattrs, &xattrs); err != nil {
+			return nil, nil, err
 		}
 	}
-	return missing, nil
+	for _, path := range paths {
+		if _, pathErr := evalSubdocPath(xattrs, strings.Split(path, ".")); pathErr != nil {
+			failed = append(failed, path)
+			if firstErr == nil {
+				firstErr = pathErr
+			}
+		}
+	}
+	return failed, firstErr, nil
 }
 
 // deleteSubDocPath removes a single subdoc path from the raw xattrs JSON.
