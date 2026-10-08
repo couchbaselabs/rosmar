@@ -168,19 +168,21 @@ func (c *Collection) add(key string, exp Exp, val []byte, isJSON bool) (added bo
 	var casOut CAS
 	err = c.withNewCas(func(txn *sql.Tx, newCas CAS) (e *event, err error) {
 		exp = absoluteExpiry(exp)
-		var revSeqNo uint64 = 1
-		result, err := txn.Exec(
-			`INSERT INTO documents (collection,key,value,cas,exp,isJSON, revSeqNo) VALUES (?1,?2,?3,?4,?5,?6,?7)
+		var revSeqNo uint64
+		err = txn.QueryRow(
+			`INSERT INTO documents (collection,key,value,cas,exp,isJSON,revSeqNo,tombstone) VALUES (?1,?2,?3,?4,?5,?6,1,0)
 				ON CONFLICT(collection,key) DO
-					UPDATE SET value=?3, xattrs=null, cas=?4, exp=?5, isJSON=?6
-					WHERE tombstone != 0`,
-			c.id, key, val, newCas, exp, isJSON, 1, revSeqNo)
-		if err != nil {
+					UPDATE SET value=?3, xattrs=null, cas=?4, exp=?5, isJSON=?6, revSeqNo=revSeqNo+1, tombstone=0
+					WHERE tombstone != 0
+				RETURNING revSeqNo`,
+			c.id, key, val, newCas, exp, isJSON).Scan(&revSeqNo)
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		} else if err != nil {
 			return
 		}
 		casOut = newCas
-		n, _ := result.RowsAffected()
-		added = (n > 0)
+		added = true
 
 		e = &event{
 			key:      key,
@@ -232,13 +234,13 @@ func (c *Collection) _set(txn *sql.Tx, key string, exp Exp, opts *sgbucket.Upser
 
 	// First get the existing xattrs and exp, and check whether the doc is a tombstone:
 	exists := false
-	hadValue := false
+	wasTombstone := false
 	var oldExp Exp = 0
-	row := txn.QueryRow(`SELECT value NOT NULL, xattrs, exp, revSeqNo FROM documents
+	row := txn.QueryRow(`SELECT tombstone, xattrs, exp, revSeqNo FROM documents
 						WHERE collection=? AND key=?`, c.id, key)
-	if err = scan(row, &hadValue, &xattrs, &oldExp, &revSeqNo); err == nil {
+	if err = scan(row, &wasTombstone, &xattrs, &oldExp, &revSeqNo); err == nil {
 		exists = true
-		if !hadValue {
+		if wasTombstone {
 			xattrs = nil // xattrs are cleared whenever resurrecting a tombstone
 		}
 	} else if err != sql.ErrNoRows {
@@ -253,11 +255,11 @@ func (c *Collection) _set(txn *sql.Tx, key string, exp Exp, opts *sgbucket.Upser
 		if opts != nil && opts.PreserveExpiry {
 			exp = oldExp
 		}
-		stmt = `UPDATE documents SET value=?3, xattrs=?4, cas=?5, exp=?6, isJSON=?7, revSeqNo=?8
+		stmt = `UPDATE documents SET value=?3, xattrs=?4, cas=?5, exp=?6, isJSON=?7, revSeqNo=?8, tombstone=0
 				WHERE collection=?1 AND key=?2`
 	} else {
-		stmt = `INSERT INTO documents (collection,key,value,xattrs,cas,exp,isJSON,revSeqNo)
-				VALUES (?1,?2,?3,?4,?5,?6,?7,?8)`
+		stmt = `INSERT INTO documents (collection,key,value,xattrs,cas,exp,isJSON,revSeqNo,tombstone)
+				VALUES (?1,?2,?3,?4,?5,?6,?7,?8,0)`
 	}
 	_, err = txn.Exec(stmt, c.id, key, val, xattrs, newCas, exp, isJSON, revSeqNo)
 	return
@@ -323,24 +325,29 @@ func (c *Collection) WriteCas(_ context.Context, key string, exp Exp, cas CAS, v
 	if err != nil {
 		return 0, err
 	}
+	// Like Couchbase Server, a nil value never creates a tombstone: a nil []byte writes an empty body.
+	if raw == nil {
+		if val != nil {
+			raw, isJSON = []byte{}, false
+		} else if !isJSON {
+			return 0, fmt.Errorf("raw value must be []byte")
+		} else {
+			raw = []byte("null")
+		}
+	}
 	if err = checkDocSize(len(raw)); err != nil {
 		return
 	}
-	if raw == nil {
-		isJSON = false
-	} else if (opt & sgbucket.Raw) != 0 {
+	if (opt&sgbucket.Raw) != 0 && len(raw) > 0 {
 		isJSON = json.Valid(raw)
 	}
 
 	err = c.withNewCas(func(txn *sql.Tx, newCas CAS) (*event, error) {
 		wasTombstone := false
 		var revSeqNo uint64
-		if cas != 0 {
-			row := txn.QueryRow("SELECT revSeqNo, tombstone FROM documents WHERE collection=? AND key=?", c.id, key)
-			err = scan(row, &revSeqNo, &wasTombstone)
-			if err != nil {
-				return nil, remapKeyError(err, key)
-			}
+		row := txn.QueryRow("SELECT revSeqNo, tombstone FROM documents WHERE collection=? AND key=?", c.id, key)
+		if err := scan(row, &revSeqNo, &wasTombstone); err != nil && (cas != 0 || err != sql.ErrNoRows) {
+			return nil, remapKeyError(err, key)
 		}
 		revSeqNo++
 		exp = absoluteExpiry(exp)
@@ -352,7 +359,8 @@ func (c *Collection) WriteCas(_ context.Context, key string, exp Exp, cas CAS, v
 				   WHERE collection=?3 AND key=?4 AND cas=?5`
 		} else if (opt&sgbucket.AddOnly) != 0 || cas == 0 {
 			// Insert, but fall back to Update if the doc is a tombstone
-			sql = `INSERT INTO documents (collection, key, value, cas, exp, isJSON,revSeqNo) VALUES(?3,?4,?1,?2,?6,?7,?8)
+			sql = `INSERT INTO documents (collection, key, value, cas, exp, isJSON, revSeqNo, tombstone)
+					VALUES(?3,?4,?1,?2,?6,?7,?8,0)
 					ON CONFLICT(collection,key) DO
 						UPDATE SET value=?1, xattrs=null, cas=?2, exp=?6, isJSON=?7, tombstone=0, revSeqNo=?8
 						WHERE tombstone == 1`
@@ -361,7 +369,7 @@ func (c *Collection) WriteCas(_ context.Context, key string, exp Exp, cas CAS, v
 			}
 		} else {
 			// Regular write:
-			sql = `UPDATE documents SET value=?1, cas=?2, exp=?6, isJSON=?7, revSeqNo=?8,
+			sql = `UPDATE documents SET value=?1, cas=?2, exp=?6, isJSON=?7, revSeqNo=?8, tombstone=0,
 						xattrs=iif(tombstone != 0, null, xattrs)
 				   WHERE collection=?3 AND key=?4 AND cas=?5`
 		}
@@ -389,14 +397,13 @@ func (c *Collection) WriteCas(_ context.Context, key string, exp Exp, cas CAS, v
 		}
 		casOut = newCas
 		return &event{
-			key:        key,
-			value:      raw,
-			isDeletion: (raw == nil),
-			cas:        newCas,
-			exp:        exp,
-			isJSON:     isJSON,
-			revSeqNo:   revSeqNo,
-			xattrs:     xattrs,
+			key:      key,
+			value:    raw,
+			cas:      newCas,
+			exp:      exp,
+			isJSON:   isJSON,
+			revSeqNo: revSeqNo,
+			xattrs:   xattrs,
 		}, nil
 	})
 	return
@@ -436,20 +443,7 @@ func (c *Collection) remove(key string, ifCas *CAS) (casOut CAS, err error) {
 		revSeqNo++
 
 		// Deleting a doc removes user xattrs but not system ones:
-		if len(rawXattrs) > 0 {
-			var xattrs map[string]json.RawMessage
-			_ = json.Unmarshal(rawXattrs, &xattrs)
-			for k := range xattrs {
-				if k == "" || k[0] != '_' {
-					delete(xattrs, k)
-				}
-			}
-			if len(xattrs) > 0 {
-				rawXattrs, _ = json.Marshal(xattrs)
-			} else {
-				rawXattrs = nil
-			}
-		}
+		rawXattrs = processXattrs(rawXattrs, removeUserXattrs)
 		// Now update, setting value=null, isJSON=false, and updating the xattrs:
 		_, err = txn.Exec(
 			`UPDATE documents SET value=null, cas=?1, exp=0, isJSON=0, xattrs=?2, tombstone=1, revSeqNo=?3
@@ -495,15 +489,17 @@ func (c *Collection) Update(ctx context.Context, key string, exp Exp, callback s
 		if newRaw == nil && newExp == nil && !delete {
 			return 0, nil // Callback canceled
 		}
-		if newRaw != nil || delete {
-			raw = newRaw
-		}
 		if newExp != nil {
 			exp = *newExp
 		}
 
-		var opt sgbucket.WriteOptions = 0 // Hardcoded; callback cannot customize this :(
-		casOut, err = c.WriteCas(ctx, key, exp, cas, raw, opt)
+		// Like Couchbase Server, a missing doc or a tombstone is always inserted, even for a delete.
+		if delete && newRaw == nil && cas != 0 {
+			casOut, err = c.remove(key, &cas)
+		} else {
+			var opt sgbucket.WriteOptions = 0 // Hardcoded; callback cannot customize this :(
+			casOut, err = c.WriteCas(ctx, key, exp, cas, newRaw, opt)
+		}
 		if err == nil {
 			break
 		} else if _, ok := err.(sgbucket.CasMismatchErr); !ok {
@@ -568,7 +564,7 @@ func (c *Collection) expireDocuments(ctx context.Context) (count int64, err erro
 	// First find all the expired docs and collect their keys:
 	exp := nowAsExpiry()
 	rows, err := c.db().Query(`SELECT key FROM documents
-								WHERE collection = ?1 AND exp > 0 AND exp <= ?2`, c.id, exp)
+								WHERE collection = ?1 AND tombstone = 0 AND exp > 0 AND exp <= ?2`, c.id, exp)
 	if err != nil {
 		return
 	}

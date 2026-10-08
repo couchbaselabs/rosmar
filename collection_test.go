@@ -1249,8 +1249,284 @@ func TestDeleteWithXattrs(t *testing.T) {
 
 	require.NoError(t, col.DeleteWithXattrs(ctx, docID, []string{"_systemXattr"}))
 }
+
+// TestTombstoneRemovesUserXattrs checks that each way of deleting a doc keeps system xattrs and removes user xattrs.
+func TestTombstoneRemovesUserXattrs(t *testing.T) {
+	testCases := []struct {
+		name     string
+		deleteFn func(t *testing.T, c *Collection, key string, cas CAS)
+	}{
+		{
+			name: "Delete",
+			deleteFn: func(t *testing.T, c *Collection, key string, _ CAS) {
+				require.NoError(t, c.Delete(t.Context(), key))
+			},
+		},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := t.Context()
+			col := makeTestBucket(t).DefaultDataStore(ctx).(*Collection)
+			docID := t.Name()
+
+			cas, err := col.WriteWithXattrs(ctx, docID, 0, 0, []byte(`{"foo":"bar"}`),
+				map[string][]byte{"_sync": []byte(`{"rev":"1-a"}`), "user": []byte(`{"a":1}`)}, nil, nil)
+			require.NoError(t, err)
+
+			tc.deleteFn(t, col, docID, cas)
+
+			xattrs, _, err := col.GetXattrs(ctx, docID, []string{"_sync"})
+			require.NoError(t, err)
+			require.JSONEq(t, `{"rev":"1-a"}`, string(xattrs["_sync"]))
+
+			_, _, err = col.GetXattrs(ctx, docID, []string{"user"})
+			require.ErrorAs(t, err, &sgbucket.XattrMissingError{})
+		})
+	}
+}
+
 func mustMarshalJSON(t *testing.T, obj any) []byte {
 	bytes, err := json.Marshal(obj)
 	require.NoError(t, err)
 	return bytes
+}
+
+// TestWritesOverTombstone checks that body writes resurrect a tombstone and xattr-only writes leave it a tombstone.
+func TestWritesOverTombstone(t *testing.T) {
+	testCases := []struct {
+		name            string
+		writeFn         func(t *testing.T, c *Collection, key string, cas CAS)
+		expectTombstone bool
+	}{
+		{
+			name: "Add",
+			writeFn: func(t *testing.T, c *Collection, key string, _ CAS) {
+				added, err := c.Add(t.Context(), key, 0, map[string]any{"new": true})
+				require.NoError(t, err)
+				require.True(t, added)
+			},
+		},
+		{
+			name: "Set",
+			writeFn: func(t *testing.T, c *Collection, key string, _ CAS) {
+				require.NoError(t, c.Set(t.Context(), key, 0, nil, map[string]any{"new": true}))
+			},
+		},
+		{
+			name: "SetXattrs",
+			writeFn: func(t *testing.T, c *Collection, key string, _ CAS) {
+				_, err := c.SetXattrs(t.Context(), key, map[string][]byte{"_sync": []byte(`{"rev":"2-a"}`)})
+				require.NoError(t, err)
+			},
+			expectTombstone: true,
+		},
+		{
+			name: "UpdateXattrs",
+			writeFn: func(t *testing.T, c *Collection, key string, cas CAS) {
+				_, err := c.UpdateXattrs(t.Context(), key, 0, cas, map[string][]byte{"_sync": []byte(`{"rev":"2-a"}`)}, nil)
+				require.NoError(t, err)
+			},
+			expectTombstone: true,
+		},
+		{
+			name: "WriteWithXattrsNilBody",
+			writeFn: func(t *testing.T, c *Collection, key string, cas CAS) {
+				_, err := c.WriteWithXattrs(t.Context(), key, 0, cas, nil, map[string][]byte{"_sync": []byte(`{"rev":"2-a"}`)}, nil, nil)
+				require.NoError(t, err)
+			},
+			expectTombstone: true,
+		},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := t.Context()
+			col := makeTestBucket(t).DefaultDataStore(ctx).(*Collection)
+			docID := t.Name()
+
+			_, err := col.WriteWithXattrs(ctx, docID, 0, 0, []byte(`{"foo":"bar"}`),
+				map[string][]byte{"_sync": []byte(`{"rev":"1-a"}`)}, nil, nil)
+			require.NoError(t, err)
+			require.NoError(t, col.Delete(ctx, docID))
+			before := getDocRow(t, col, docID)
+
+			tc.writeFn(t, col, docID, before.cas)
+
+			after := getDocRow(t, col, docID)
+			t.Logf("row: %+v", after)
+			assert.Equal(t, tc.expectTombstone, after.tombstone)
+			assert.Equal(t, tc.expectTombstone, !after.hasValue)
+			assert.Greater(t, after.revSeqNo, before.revSeqNo)
+		})
+	}
+}
+
+// TestWritesToMissingKeyNeverCreateTombstone checks that a nil value or an xattr-only write to a missing key does not
+// create a tombstone. Couchbase Server stores each of these as a live document.
+func TestWritesToMissingKeyNeverCreateTombstone(t *testing.T) {
+	testCases := []struct {
+		name  string
+		write func(t *testing.T, c *Collection, key string)
+	}{
+		{
+			name: "Set",
+			write: func(t *testing.T, c *Collection, key string) {
+				require.NoError(t, c.Set(t.Context(), key, 0, nil, nil))
+			},
+		},
+		{
+			name: "SetRaw",
+			write: func(t *testing.T, c *Collection, key string) {
+				require.NoError(t, c.SetRaw(t.Context(), key, 0, nil, nil))
+			},
+		},
+		{
+			name: "Add",
+			write: func(t *testing.T, c *Collection, key string) {
+				added, err := c.Add(t.Context(), key, 0, nil)
+				require.NoError(t, err)
+				require.True(t, added)
+			},
+		},
+		{
+			name: "AddRaw",
+			write: func(t *testing.T, c *Collection, key string) {
+				added, err := c.AddRaw(t.Context(), key, 0, nil)
+				require.NoError(t, err)
+				require.True(t, added)
+			},
+		},
+		{
+			name: "SetXattrs",
+			write: func(t *testing.T, c *Collection, key string) {
+				_, err := c.SetXattrs(t.Context(), key, map[string][]byte{"_sync": []byte(`{"rev":"1-a"}`)})
+				require.NoError(t, err)
+			},
+		},
+		{
+			name: "WriteWithXattrsNilBody",
+			write: func(t *testing.T, c *Collection, key string) {
+				_, err := c.WriteWithXattrs(t.Context(), key, 0, 0, nil, map[string][]byte{"_sync": []byte(`{"rev":"1-a"}`)}, nil, nil)
+				require.NoError(t, err)
+			},
+		},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			bucket := makeTestBucket(t)
+			c := bucket.DefaultDataStore(t.Context()).(*Collection)
+			events, _ := startFeed(t, bucket)
+			key := t.Name()
+
+			tc.write(t, c, key)
+
+			require.False(t, c.isTombstone(c.db(), key), "write created a tombstone")
+			event := <-events
+			require.Equal(t, key, string(event.Key))
+			require.Equal(t, sgbucket.FeedOpMutation, event.Opcode)
+		})
+	}
+}
+
+// TestWriteCasNil checks that a nil WriteCas value never creates a tombstone: an untyped nil writes a null JSON body
+// and a nil []byte writes an empty body.
+func TestWriteCasNil(t *testing.T) {
+	type docState string
+	const (
+		missing   docState = "missing"
+		tombstone docState = "tombstone"
+		live      docState = "live"
+	)
+	ctx := t.Context()
+	dataStore := makeTestBucket(t).DefaultDataStore(ctx).(*Collection)
+
+	getRevSeqNo := func(t *testing.T, key string) uint64 {
+		xattrs, _, err := dataStore.GetXattrs(ctx, key, []string{"$document.revid"})
+		require.NoError(t, err)
+		var revSeqNo string
+		require.NoError(t, json.Unmarshal(xattrs["$document.revid"], &revSeqNo))
+		n, err := strconv.ParseUint(revSeqNo, 10, 64)
+		require.NoError(t, err)
+		return n
+	}
+	testCases := []struct {
+		name         string
+		state        docState
+		value        any
+		opt          sgbucket.WriteOptions
+		expectedBody string
+	}{
+		{name: "untypedNil", state: missing, expectedBody: "null"},
+		{name: "untypedNil", state: tombstone, expectedBody: "null"},
+		{name: "untypedNil", state: live, expectedBody: "null"},
+		{name: "nilBytes", state: missing, value: []byte(nil)},
+		{name: "nilBytes", state: live, value: []byte(nil)},
+		{name: "nilBytesRaw", state: missing, value: []byte(nil), opt: sgbucket.Raw},
+		{name: "nilBytesRaw", state: live, value: []byte(nil), opt: sgbucket.Raw},
+	}
+	for _, tc := range testCases {
+		t.Run(fmt.Sprintf("%s/%s", tc.name, tc.state), func(t *testing.T) {
+			key := t.Name()
+			var cas, revSeqNo uint64
+			if tc.state != missing {
+				var err error
+				cas, err = dataStore.WriteWithXattrs(ctx, key, 0, 0, []byte(`{"foo":"bar"}`), map[string][]byte{"_sync": []byte(`{"rev":"1-a"}`)}, nil, nil)
+				require.NoError(t, err)
+				if tc.state == tombstone {
+					require.NoError(t, dataStore.Delete(ctx, key))
+					cas = 0
+				}
+				revSeqNo = getRevSeqNo(t, key)
+			}
+			_, err := dataStore.WriteCas(ctx, key, 0, cas, tc.value, tc.opt)
+			require.NoError(t, err)
+
+			body, _, err := dataStore.GetRaw(ctx, key)
+			require.NoError(t, err)
+			require.Equal(t, tc.expectedBody, string(body))
+			require.Equal(t, revSeqNo+1, getRevSeqNo(t, key))
+			xattrs, _, err := dataStore.GetXattrs(ctx, key, []string{"_sync"})
+			if tc.state == live {
+				require.NoError(t, err)
+				require.JSONEq(t, `{"rev":"1-a"}`, string(xattrs["_sync"]))
+			} else {
+				require.ErrorAs(t, err, &sgbucket.XattrMissingError{})
+			}
+		})
+	}
+}
+
+func TestUpdateDelete(t *testing.T) {
+	ctx := t.Context()
+	dataStore := makeTestBucket(t).DefaultDataStore(ctx)
+	key := t.Name()
+	require.NoError(t, dataStore.Set(ctx, key, 0, nil, []byte(`{"foo":"bar"}`)))
+
+	_, err := dataStore.Update(ctx, key, 0, func([]byte) ([]byte, *uint32, bool, error) {
+		return nil, nil, true, nil
+	})
+	require.NoError(t, err)
+
+	_, _, err = dataStore.GetRaw(ctx, key)
+	require.ErrorAs(t, err, &sgbucket.MissingError{})
+}
+
+// Like Couchbase Server, a nil value with a new expiry replaces the body with an empty body.
+func TestUpdateNilValueWithExpiry(t *testing.T) {
+	ctx := t.Context()
+	dataStore := makeTestBucket(t).DefaultDataStore(ctx)
+	key := t.Name()
+	require.NoError(t, dataStore.Set(ctx, key, 0, nil, []byte(`{"foo":"bar"}`)))
+
+	exp := uint32(time.Now().Add(time.Hour).Unix())
+	_, err := dataStore.Update(ctx, key, 0, func([]byte) ([]byte, *uint32, bool, error) {
+		return nil, &exp, false, nil
+	})
+	require.NoError(t, err)
+
+	body, _, err := dataStore.GetRaw(ctx, key)
+	require.NoError(t, err)
+	require.Empty(t, body)
+	gotExp, err := dataStore.GetExpiry(ctx, key)
+	require.NoError(t, err)
+	require.Equal(t, exp, gotExp)
 }
