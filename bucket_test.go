@@ -569,6 +569,13 @@ func TestExpirationSkipsTombstones(t *testing.T) {
 			},
 		},
 		{
+			name: "UpdateDelete",
+			deleteFn: func(t *testing.T, c *Collection, key string, _ CAS, _ Exp) {
+				_, err := c.Update(t.Context(), key, 0, func([]byte) ([]byte, *uint32, bool, error) { return nil, nil, true, nil })
+				require.NoError(t, err)
+			},
+		},
+		{
 			name:     "UpdateXattrDeleteBody",
 			keepsExp: true,
 			deleteFn: func(t *testing.T, c *Collection, key string, cas CAS, exp Exp) {
