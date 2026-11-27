@@ -12,7 +12,6 @@ import (
 	"context"
 	"fmt"
 	"io/fs"
-	"sync"
 )
 
 // The bucket registry tracks all open Buckets and refcounts them. This represents a cluster of buckets, one per bucket name. When OpenBucket is called, a Bucket instance is added to bucketRegistry, representing the canonical bucket object. This object will not be removed from the bucket registry until:
@@ -20,13 +19,14 @@ import (
 // * In Memory bucket: bucket is not deleted until any Bucket's CloseAndDelete is closed.
 // * On disk bucket: bucket is deleted from registry when all there are no open copies of the bucket in memory. Unlike in memory bucket, the bucket will stay persisted on disk to be reopened.
 //
-// Any Buckets returned by OpenBucket will be a copy of the canonical bucket object, which shares pointers to all mutable objects and copies of immutable objects. The difference between the canonical copy of the bucket is the `closed` state, representing when the bucket is no longer writeable. Sharing the data structures allows a single DCP prodcuer and expiry framework.
+// Any Buckets returned by OpenBucket will be a copy of the canonical bucket object, which shares pointers to all mutable objects and copies of immutable objects. The difference between the canonical copy of the bucket is the `_closed` state, representing when the bucket is no longer writable. Sharing the data structures allows a single DCP producer and expiry framework.
 
 // bucketRegistry tracks all open buckets
 type bucketRegistry struct {
 	bucketCount map[string]uint    // stores a reference count of open buckets
 	buckets     map[string]*Bucket // stores a reference to each open bucket
-	lock        sync.Mutex
+	lock        mutex
+	openLock    mutex // held by OpenBucket from the cache lookup until registration, so only one call opens a bucket
 }
 
 var cluster *bucketRegistry // global cluster registry
@@ -37,19 +37,16 @@ func init() {
 	}
 }
 
-// registerBucket adds a newly opened Bucket to the registry. Returns true if the bucket already exists, and a copy of the bucket to use.
-func (r *bucketRegistry) registerBucket(bucket *Bucket) (bool, *Bucket) {
+// registerBucket adds a newly opened Bucket to the registry and returns a copy of the bucket to use. Requires openLock.
+func (r *bucketRegistry) registerBucket(bucket *Bucket) *Bucket {
 	name := bucket.GetName()
 	debug("_registerBucket %v %s at %s", bucket, name, bucket.url)
 	r.lock.Lock()
 	defer r.lock.Unlock()
 
-	_, ok := r.buckets[name]
-	if !ok {
-		r.buckets[name] = bucket
-	}
+	r.buckets[name] = bucket
 	r.bucketCount[name] += 1
-	return ok, r.buckets[name].copy()
+	return bucket.copy()
 }
 
 // getCachedBucket returns a bucket from the registry if it exists.
@@ -128,8 +125,8 @@ func getCachedBucket(name, url string, mode OpenMode) (*Bucket, error) {
 	return cluster.getCachedBucket(name, url, mode)
 }
 
-// registryBucket adds a copy of a Bucket to the registry. Returns true if the bucket already exists.
-func registerBucket(bucket *Bucket) (bool, *Bucket) {
+// registerBucket adds a Bucket to the registry and returns a copy of it. Requires openLock.
+func registerBucket(bucket *Bucket) *Bucket {
 	return cluster.registerBucket(bucket)
 }
 

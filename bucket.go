@@ -38,18 +38,18 @@ func SetClockForTest(getTime func() uint64) {
 }
 
 // Rosmar implementation of a collection-aware bucket.
-// Implements sgbucket interfaces BucketStore, DynamicDataStoreBucket, DeletableStore, MutationFeedStore2.
+// Implements sgbucket interfaces BucketStore, DynamicDataStoreBucket, DeletableStore, MutationFeedStore.
 type Bucket struct {
 	url             string         // Filesystem path or other URL
 	name            string         // Bucket name
 	collections     collectionsMap // Collections, indexed by DataStoreName
 	collectionFeeds map[sgbucket.DataStoreNameImpl][]*dcpFeed
-	mutex           *sync.Mutex    // mutex for synchronized access to Bucket
+	mutex           *mutex         // mutex for synchronized access to Bucket
 	sqliteDB        *sql.DB        // SQLite database handle (do not access; call db() instead)
 	expManager      *expiryManager // expiration manager for bucket
 	serial          uint32         // Serial number for logging
 	inMemory        bool           // True if it's an in-memory database
-	closed          bool           // represents state when it is closed
+	_closed         bool           // represents state when it is closed; guarded by mutex
 }
 
 type collectionsMap = map[sgbucket.DataStoreNameImpl]*Collection
@@ -101,6 +101,8 @@ func OpenBucket(urlStr string, bucketName string, mode OpenMode) (b *Bucket, err
 	}
 	urlStr = u.String()
 
+	cluster.openLock.Lock()
+	defer cluster.openLock.Unlock()
 	bucket, err := getCachedBucket(bucketName, urlStr, mode)
 	if err != nil {
 		return nil, err
@@ -176,7 +178,7 @@ func OpenBucket(urlStr string, bucketName string, mode OpenMode) (b *Bucket, err
 		sqliteDB:        db,
 		collections:     make(map[sgbucket.DataStoreNameImpl]*Collection),
 		collectionFeeds: make(map[sgbucket.DataStoreNameImpl][]*dcpFeed),
-		mutex:           &sync.Mutex{},
+		mutex:           &mutex{},
 		inMemory:        inMemory,
 		serial:          serial,
 	}
@@ -205,17 +207,12 @@ func OpenBucket(urlStr string, bucketName string, mode OpenMode) (b *Bucket, err
 
 	hlc.UpdateFloor(bucket.getLastTimestamp())
 
-	exists, bucketCopy := registerBucket(bucket)
-	// someone else beat registered the bucket in the registry, that's OK we'll close ours
-	if exists {
-		bucket.Close(ctx)
-	}
-	// only schedule expiration if bucket is not new. This doesn't need to be locked because only one bucket will execute this code.
+	// only schedule expiration if bucket is not new
 	if vers != 0 {
-		bucket._scheduleExpiration()
+		bucket.scheduleExpiration()
 	}
 
-	return bucketCopy, err
+	return registerBucket(bucket), nil
 }
 
 // Creates or re-opens a bucket, like OpenBucket.
@@ -319,6 +316,13 @@ func (bucket *Bucket) initializeSchema(bucketName string) (err error) {
 	return
 }
 
+// isClosed returns true if this copy of the bucket has been closed.
+func (bucket *Bucket) isClosed() bool {
+	bucket.mutex.Lock()
+	defer bucket.mutex.Unlock()
+	return bucket._closed
+}
+
 // db returns the database handle as a `queryable` interface value.
 // If the bucket has been closed, it returns a special `closedDB` value that will return
 // ErrBucketClosed from any call.
@@ -330,7 +334,7 @@ func (bucket *Bucket) db() queryable {
 
 // db returns the database handle as a `queryable` interface value. This is the same as `db()` without locking. This is not safe to call without bucket.mutex being locked the caller.
 func (bucket *Bucket) _db() queryable {
-	if bucket.closed {
+	if bucket._closed {
 		return closedDB{}
 	}
 	return bucket.sqliteDB
@@ -345,7 +349,7 @@ func (bucket *Bucket) inTransaction(fn func(txn *sql.Tx) error) error {
 	bucket.mutex.Lock()
 	defer bucket.mutex.Unlock()
 
-	if bucket.closed {
+	if bucket._closed {
 		return ErrBucketClosed
 	}
 

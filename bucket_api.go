@@ -59,12 +59,11 @@ func (bucket *Bucket) Close(_ context.Context) {
 	bucket.mutex.Lock()
 	defer bucket.mutex.Unlock()
 
-	bucket.closed = true
+	bucket._closed = true
 }
 
 // _closeSqliteDB closes the underlying sqlite database and shuts down dcpFeeds. Must have a lock to call this function.
 func (bucket *Bucket) _closeSqliteDB() error {
-	bucket.expManager.stop()
 	for _, c := range bucket.collections {
 		c.close()
 	}
@@ -86,9 +85,10 @@ func (bucket *Bucket) CloseAndDelete(ctx context.Context) error {
 
 // close a bucket, but doesn't delete its directory or files.
 func (bucket *Bucket) close() error {
+	bucket.expManager.stop()
 	bucket.mutex.Lock()
 	defer bucket.mutex.Unlock()
-	defer func() { bucket.closed = true }()
+	defer func() { bucket._closed = true }()
 	return bucket._closeSqliteDB()
 }
 
@@ -346,7 +346,7 @@ func (bucket *Bucket) dropCollection(name sgbucket.DataStoreNameImpl) error {
 // nextExpiration returns the earliest expiration time of any document, or 0 if none.
 func (bucket *Bucket) nextExpiration() (exp Exp, err error) {
 	var expVal sql.NullInt64
-	row := bucket.db().QueryRow(`SELECT min(exp) FROM documents WHERE exp > 0`)
+	row := bucket.db().QueryRow(`SELECT min(exp) FROM documents WHERE tombstone = 0 AND exp > 0`)
 	err = scan(row, &expVal)
 	if expVal.Valid {
 		exp = Exp(expVal.Int64)
@@ -373,15 +373,15 @@ func (bucket *Bucket) expireDocuments(ctx context.Context) (int64, error) {
 	return count, nil
 }
 
-// scheduleExpiration schedules the next expiration of documents to occur, from the minimum expiration value in the bucket. This requires locking expiration manager.
-func (bucket *Bucket) _scheduleExpiration() {
-	if nextExp, err := bucket.nextExpiration(); err == nil && nextExp > 0 {
-		bucket.expManager._scheduleExpirationAtOrBefore(nextExp)
+// scheduleExpiration schedules the next expiration of documents to occur, from the minimum expiration value in the bucket.
+func (bucket *Bucket) scheduleExpiration() {
+	if nextExp, err := bucket.nextExpiration(); err == nil {
+		bucket.expManager.scheduleExpirationAtOrBefore(nextExp)
 	}
 }
 
 func (bucket *Bucket) doExpiration(ctx context.Context) {
-	bucket.expManager._clearNext()
+	bucket.expManager.clearNext()
 
 	debug("EXP: Running scheduled expiration...")
 	if n, err := bucket.expireDocuments(ctx); err != nil {
@@ -391,7 +391,7 @@ func (bucket *Bucket) doExpiration(ctx context.Context) {
 		info("Bucket %s expired %d docs", bucket, n)
 	}
 
-	bucket._scheduleExpiration()
+	bucket.scheduleExpiration()
 }
 
 // Completely removes all deleted documents (tombstones).
@@ -413,4 +413,5 @@ var (
 	_ sgbucket.BucketStore            = &Bucket{}
 	_ sgbucket.DynamicDataStoreBucket = &Bucket{}
 	_ sgbucket.DeleteableStore        = &Bucket{}
+	_ sgbucket.MutationFeedStore      = &Bucket{}
 )

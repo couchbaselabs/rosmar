@@ -11,6 +11,7 @@ package rosmar
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"expvar"
 	"fmt"
 	"sync/atomic"
@@ -25,28 +26,32 @@ var activeFeedCount int32 // for tests
 
 func (bucket *Bucket) StartDCPFeed(ctx context.Context, args sgbucket.FeedArguments, callback sgbucket.FeedEventCallbackFunc, dbStats *expvar.Map) error {
 	traceEnter("StartDCPFeed", "bucket=%s, args=%+v", bucket.GetName(), args)
-	// If no scopes are specified, return feed for the default collection, if it exists
+	// Validate requested collections exist before starting feeds. No scopes means the default
+	// collection, if it exists. A collection named twice gets one feed.
+	requestedCollections := map[*Collection]struct{}{}
 	if len(args.Scopes) == 0 {
-		return bucket.DefaultDataStore(ctx).(*Collection).StartDCPFeed(ctx, args, callback, dbStats)
+		collection, err := bucket.getCollection(defaultDataStoreName)
+		if err != nil {
+			return err
+		}
+		requestedCollections[collection] = struct{}{}
 	}
-
-	// Validate requested collections exist before starting feeds
-	requestedCollections := make([]*Collection, 0)
 	for scopeName, collections := range args.Scopes {
 		for _, collectionName := range collections {
 			collection, err := bucket.getCollection(sgbucket.DataStoreNameImpl{Scope: scopeName, Collection: collectionName})
 			if err != nil {
-				return fmt.Errorf("DCPFeed args specified unknown collection: %s:%s", scopeName, collectionName)
+				return fmt.Errorf("couldn't open collection %s:%s for DCP feed: %w", scopeName, collectionName, err)
 			}
-			requestedCollections = append(requestedCollections, collection)
+			requestedCollections[collection] = struct{}{}
 		}
 	}
 
 	doneChan := args.DoneChan
-	doneChans := map[*Collection]chan struct{}{}
-	for _, collection := range requestedCollections {
+	doneChans := make(map[*Collection]chan struct{}, len(requestedCollections))
+	startedFeeds := make([]*dcpFeed, 0, len(requestedCollections))
+	for collection := range requestedCollections {
 		// Not bothering to remove scopes from args for the single collection feeds
-		// here because it's ignored by Collection.StartDCPFeed
+		// here because it's ignored by Collection.startDCPFeed
 		collectionID := collection.GetCollectionID()
 		collectionAwareCallback := func(event sgbucket.FeedEvent) bool {
 			event.CollectionID = collectionID
@@ -58,13 +63,25 @@ func (bucket *Bucket) StartDCPFeed(ctx context.Context, args sgbucket.FeedArgume
 		argsCopy := args
 		argsCopy.DoneChan = doneChans[collection]
 
-		_ = collection.StartDCPFeed(ctx, argsCopy, collectionAwareCallback, dbStats)
+		feed, err := collection.startDCPFeed(ctx, argsCopy, collectionAwareCallback, dbStats)
+		if err != nil {
+			// Stop the feeds that did start: no doneChan of theirs is coalesced into the caller's now.
+			for _, started := range startedFeeds {
+				started.stop()
+			}
+			return fmt.Errorf("couldn't start DCP feed on %s: %w", collection.DataStoreNameImpl, err)
+		}
+		startedFeeds = append(startedFeeds, feed)
 	}
 
 	// coalesce doneChans
 	go func() {
-		for _, collection := range requestedCollections {
-			<-doneChans[collection]
+		for _, done := range doneChans {
+			<-done
+		}
+		// The collections share one checkpoint document, so a dump saves it once they have all stopped.
+		if args.Dump {
+			_ = saveDumpCheckpoint(startedFeeds)
 		}
 		if doneChan != nil {
 			close(doneChan)
@@ -76,8 +93,14 @@ func (bucket *Bucket) StartDCPFeed(ctx context.Context, args sgbucket.FeedArgume
 
 //////// COLLECTION API:
 
-func (c *Collection) StartDCPFeed(ctx context.Context, args sgbucket.FeedArguments, callback sgbucket.FeedEventCallbackFunc, dbStats *expvar.Map) error {
-	traceEnter("StartDCPFeed", "collection=%s, args=%+v", c, args)
+// startDCPFeed starts a feed and returns it, so that a caller starting feeds on several collections can stop
+// the ones it already started.
+func (c *Collection) startDCPFeed(ctx context.Context, args sgbucket.FeedArguments, callback sgbucket.FeedEventCallbackFunc, dbStats *expvar.Map) (*dcpFeed, error) {
+	traceEnter("startDCPFeed", "collection=%s, args=%+v", c, args)
+	// Refuse up front on a closed bucket, so no backfill work is done for a feed that can't be registered:
+	if c.bucket.isClosed() {
+		return nil, ErrBucketClosed
+	}
 	feed := &dcpFeed{
 		ctx:           ctx,
 		collection:    c,
@@ -91,10 +114,13 @@ func (c *Collection) StartDCPFeed(ctx context.Context, args sgbucket.FeedArgumen
 		startCas := args.Backfill
 		if args.Backfill == sgbucket.FeedResume {
 			if args.CheckpointPrefix == "" {
-				return fmt.Errorf("feed's Backfill is FeedResume but no CheckpointPrefix given")
+				return nil, fmt.Errorf("feed's Backfill is FeedResume but no CheckpointPrefix given")
+			}
+			if args.MetadataStore == nil {
+				return nil, fmt.Errorf("feed's Backfill is FeedResume but no MetadataStore given")
 			}
 			if err := feed.readCheckpoint(); err != nil {
-				return fmt.Errorf("couldn't read DCP feed checkpoint: %w", err)
+				return nil, fmt.Errorf("couldn't read DCP feed checkpoint: %w", err)
 			}
 			startCas = feed.lastCas + 1
 		}
@@ -103,7 +129,7 @@ func (c *Collection) StartDCPFeed(ctx context.Context, args sgbucket.FeedArgumen
 		feed.events.push(&event{opcode: sgbucket.FeedOpBeginBackfill})
 		err := c.enqueueBackfillEvents(startCas, args.FeedContent, &feed.events)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		debug("%s ended backfill", feed)
 		feed.events.push(&event{opcode: sgbucket.FeedOpEndBackfill})
@@ -112,13 +138,18 @@ func (c *Collection) StartDCPFeed(ctx context.Context, args sgbucket.FeedArgumen
 	if args.Dump {
 		feed.events.push(nil) // push an eof
 	} else {
-		// Register the feed with the collection for future notifications:
+		// Register the feed with the collection for future notifications.  Registering on a closed copy of the
+		// bucket would leave a feed nothing can stop: Close only stops the feeds the copy holds when it closes.
 		c.bucket.mutex.Lock()
+		if c.bucket._closed {
+			c.bucket.mutex.Unlock()
+			return nil, ErrBucketClosed
+		}
 		c.bucket.collectionFeeds[c.DataStoreNameImpl] = append(c.bucket.collectionFeeds[c.DataStoreNameImpl], feed)
 		c.bucket.mutex.Unlock()
 	}
 	go feed.run()
-	return nil
+	return feed, nil
 }
 
 func (c *Collection) enqueueBackfillEvents(startCas uint64, feedContent sgbucket.FeedContent, q *eventQueue) error {
@@ -172,7 +203,7 @@ func (c *Collection) _stopFeeds() {
 	for _, feed := range c.bucket.collectionFeeds[c.DataStoreNameImpl] {
 		feed.close()
 	}
-	c.bucket.collectionFeeds = nil
+	delete(c.bucket.collectionFeeds, c.DataStoreNameImpl)
 }
 
 //////// DCPFEED:
@@ -192,6 +223,8 @@ type dcpFeed struct {
 	events         eventQueue
 	lastCas        CAS
 	lastCasChanged bool
+	// completed reports that the feed drained to its end-of-feed marker, rather than being terminated.
+	completed atomic.Bool
 }
 
 func (feed *dcpFeed) String() string {
@@ -202,15 +235,20 @@ func (feed *dcpFeed) checkpointKey() string {
 	return feed.args.CheckpointPrefix
 }
 
+// usesCheckpoint reports whether the feed has somewhere to keep a checkpoint.
+func (feed *dcpFeed) usesCheckpoint() bool {
+	return feed.args.CheckpointPrefix != "" && feed.metadataStore != nil
+}
+
 // Reads the feed's lastCas from the checkpoint document, if there is one.
 func (feed *dcpFeed) readCheckpoint() (err error) {
-	if feed.args.CheckpointPrefix == "" {
+	if !feed.usesCheckpoint() {
 		return
 	}
 	key := feed.checkpointKey()
 	var checkpt checkpoint
 	if _, err = feed.metadataStore.Get(feed.ctx, key, &checkpt); err != nil {
-		if _, ok := err.(sgbucket.MissingError); ok {
+		if _, ok := errors.AsType[sgbucket.MissingError](err); ok {
 			err = nil
 			debug("%s checkpoint %q missing", feed, key)
 		} else {
@@ -227,14 +265,32 @@ func (feed *dcpFeed) readCheckpoint() (err error) {
 }
 
 // Writes the feed's lastCas to the checkpoint document, if there is one.
-func (feed *dcpFeed) writeCheckpoint() (err error) {
-	if feed.args.CheckpointPrefix == "" || !feed.lastCasChanged {
-		return
+func (feed *dcpFeed) writeCheckpoint() error {
+	if !feed.lastCasChanged {
+		return nil
+	}
+	return updateCheckpoint([]*dcpFeed{feed}, false)
+}
+
+// saveDumpCheckpoint records a dump's progress. A resumed dump whose collections all streamed to the end has
+// nothing left to resume, so it removes their entries instead.
+func saveDumpCheckpoint(feeds []*dcpFeed) error {
+	if len(feeds) == 0 {
+		return nil
+	}
+	remove := feeds[0].args.Backfill == sgbucket.FeedResume && allFeedsCompleted(feeds)
+	return updateCheckpoint(feeds, remove)
+}
+
+// updateCheckpoint writes each feed's lastCas to their shared checkpoint document in one update. With remove,
+// it drops the feeds' entries instead, and deletes the document once none are left.
+func updateCheckpoint(feeds []*dcpFeed, remove bool) error {
+	feed := feeds[0]
+	if !feed.usesCheckpoint() {
+		return nil
 	}
 	key := feed.checkpointKey()
-	colID := feed.collection.GetCollectionID()
-
-	_, err = feed.metadataStore.Update(feed.ctx, key, 0, func(current []byte) (updated []byte, expiry *uint32, delete bool, err error) {
+	_, err := feed.metadataStore.Update(feed.ctx, key, 0, func(current []byte) (updated []byte, expiry *uint32, del bool, err error) {
 		var checkpt checkpoint
 		if current != nil {
 			if err := json.Unmarshal(current, &checkpt); err != nil {
@@ -244,8 +300,24 @@ func (feed *dcpFeed) writeCheckpoint() (err error) {
 		if checkpt.LastCas == nil {
 			checkpt.LastCas = make(map[uint32]uint64)
 		}
-		checkpt.LastCas[colID] = feed.lastCas
-
+		changed := false
+		for _, f := range feeds {
+			colID := f.collection.GetCollectionID()
+			if remove {
+				_, found := checkpt.LastCas[colID]
+				changed = changed || found
+				delete(checkpt.LastCas, colID)
+			} else if f.lastCasChanged {
+				checkpt.LastCas[colID] = f.lastCas
+				changed = true
+			}
+		}
+		if !changed {
+			return nil, nil, false, nil // cancels the update
+		}
+		if len(checkpt.LastCas) == 0 {
+			return nil, nil, true, nil
+		}
 		updated, err = json.Marshal(checkpt)
 		if err != nil {
 			return nil, nil, false, fmt.Errorf("failed to marshal checkpoint: %w", err)
@@ -254,9 +326,9 @@ func (feed *dcpFeed) writeCheckpoint() (err error) {
 	})
 
 	if err == nil {
-		debug("%s wrote lastCas 0x%x to %q", feed, feed.lastCas, key)
+		debug("%s updated checkpoint %q, remove=%v", feed, key, remove)
 	} else {
-		logError("%s failed to write checkpoint to %q: %v", feed, key, err)
+		logError("%s failed to update checkpoint %q: %v", feed, key, err)
 	}
 	return err
 }
@@ -280,34 +352,85 @@ func (feed *dcpFeed) run() {
 	collectionID := feed.collection.GetCollectionID()
 	feedContent := feed.args.FeedContent
 	for {
-		if e := feed.events.pull(); e != nil {
-			feedEvent, err := e.asFeedEvent(collectionID, feedContent)
-			if err != nil {
-				logError("Fatal error converting %s event to feed event: %v", feed, err)
-				break
-			}
-			feed.callback(*feedEvent)
-			if feedEvent.Cas > feed.lastCas {
-				feed.lastCas = feedEvent.Cas
-				feed.lastCasChanged = true
-				debug("%s lastCas = 0x%x", feed, feed.lastCas)
-				// TODO: Set a timer to write the checkpoint "soon"
-			}
-		} else {
+		// Stop before the next event once the Terminator is closed, without waiting for the goroutine above.
+		if feed.terminated() {
 			break
+		}
+		e, ok := feed.events.pull()
+		if !ok {
+			break // terminated
+		}
+		if e == nil {
+			// Stored before the deferred close of DoneChan, so a waiter sees a settled value.
+			feed.completed.Store(true)
+			break
+		}
+		feedEvent, err := e.asFeedEvent(collectionID, feedContent)
+		if err != nil {
+			logError("Fatal error converting %s event to feed event: %v", feed, err)
+			break
+		}
+		feed.callback(*feedEvent)
+		if feedEvent.Cas > feed.lastCas {
+			feed.lastCas = feedEvent.Cas
+			feed.lastCasChanged = true
+			debug("%s lastCas = 0x%x", feed, feed.lastCas)
+			// TODO: Set a timer to write the checkpoint "soon"
 		}
 	}
 	debug("%s stopping", feed)
 
-	if feed.lastCasChanged {
-		if err := feed.writeCheckpoint(); err != nil {
-			logError("Error saving %s checkpoint: %v", feed, err)
+	// A dump saves its checkpoint in StartDCPFeed, once all of its collections stop.
+	if !feed.args.Dump {
+		_ = feed.writeCheckpoint()
+	}
+}
+
+// terminated reports whether the feed's Terminator is closed. A feed with no Terminator is never terminated.
+func (feed *dcpFeed) terminated() bool {
+	select {
+	case <-feed.args.Terminator:
+		return true
+	default:
+		return false
+	}
+}
+
+// allFeedsCompleted reports whether every feed drained to its end-of-feed marker.
+func allFeedsCompleted(feeds []*dcpFeed) bool {
+	for _, feed := range feeds {
+		if !feed.completed.Load() {
+			return false
 		}
 	}
+	return true
 }
 
 func (feed *dcpFeed) close() {
 	feed.events.close()
+}
+
+// stop closes the feed and removes it from its collection's registered feeds, so that nothing keeps pushing
+// events to it.  Must not be called with the bucket's lock held.
+func (feed *dcpFeed) stop() {
+	feed.close()
+
+	c := feed.collection
+	c.bucket.mutex.Lock()
+	defer c.bucket.mutex.Unlock()
+	feeds := c.bucket.collectionFeeds[c.DataStoreNameImpl]
+	// A new slice, rather than deleting in place: postEvent iterates the old one without the lock.
+	remaining := make([]*dcpFeed, 0, len(feeds))
+	for _, f := range feeds {
+		if f != feed {
+			remaining = append(remaining, f)
+		}
+	}
+	if len(remaining) == 0 {
+		delete(c.bucket.collectionFeeds, c.DataStoreNameImpl)
+	} else {
+		c.bucket.collectionFeeds[c.DataStoreNameImpl] = remaining
+	}
 }
 
 //////// EVENTS

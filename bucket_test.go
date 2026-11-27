@@ -11,11 +11,11 @@ package rosmar
 import (
 	"errors"
 	"fmt"
-	"log"
 	"os"
 	"runtime"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	sgbucket "github.com/couchbase/sg-bucket"
@@ -40,10 +40,7 @@ func makeTestBucket(t *testing.T) *Bucket {
 }
 
 func makeTestBucketWithName(t *testing.T, name string) *Bucket {
-	LoggingCallback = func(level LogLevel, fmt string, args ...any) {
-		t.Helper()
-		t.Logf(logLevelNamesPrint[level]+fmt, args...)
-	}
+	logToTest(t)
 	bucket, err := OpenBucket(uriFromPath(testBucketPath(t)), name, CreateNew)
 	require.NoError(t, err)
 	t.Cleanup(func() {
@@ -51,6 +48,19 @@ func makeTestBucketWithName(t *testing.T, name string) *Bucket {
 	})
 
 	return bucket
+}
+
+// logToTest routes rosmar's logging to t.Logf for the duration of the test.  LoggingCallback is a package
+// global, so the previous callback has to be put back afterwards: left bound to a finished test's t, the next
+// log - from a later test, or from a feed or expiry goroutine - panics with "Log in goroutine after ... has
+// completed".  Registered before the bucket's cleanup so that it is restored after the bucket has closed.
+func logToTest(t *testing.T) {
+	previous := LoggingCallback
+	t.Cleanup(func() { LoggingCallback = previous })
+	LoggingCallback = func(level LogLevel, fmt string, args ...any) {
+		t.Helper()
+		t.Logf(logLevelNamesPrint[level]+fmt, args...)
+	}
 }
 
 func dsName(scope string, coll string) sgbucket.DataStoreName {
@@ -358,75 +368,75 @@ func TestGetPersistentMultiCollectionBucket(t *testing.T) {
 }
 
 func TestExpiration(t *testing.T) {
-	ctx := t.Context()
-	ensureNoLeaks(t)
-	bucket := makeTestBucket(t)
-	c := bucket.DefaultDataStore(ctx)
+	synctest.Test(t, func(t *testing.T) {
+		ctx := t.Context()
+		ensureNoLeaks(t)
+		bucket := makeTestBucket(t)
+		c := bucket.DefaultDataStore(ctx)
 
-	exp, err := bucket.nextExpiration()
-	require.NoError(t, err)
-	require.Equal(t, Exp(0), exp)
+		exp, err := bucket.nextExpiration()
+		require.NoError(t, err)
+		require.Equal(t, Exp(0), exp)
 
-	exp2 := Exp(time.Now().Add(-5 * time.Second).Unix())
-	exp4 := Exp(time.Now().Add(2 * time.Second).Unix())
+		pastExp := Exp(time.Now().Add(-5 * time.Second).Unix())
+		futureExp := Exp(time.Now().Add(2 * time.Second).Unix())
 
-	requireAddRaw(t, c, "k1", 0, []byte("v1"))
-	requireAddRaw(t, c, "k2", exp2, []byte("v2"))
-	requireAddRaw(t, c, "k3", 0, []byte("v3"))
-	requireAddRaw(t, c, "k4", exp4, []byte("v4"))
+		requireAddRaw(t, c, "k1", 0, []byte("v1"))
+		requireAddRaw(t, c, "k3", 0, []byte("v3"))
+		requireAddRaw(t, c, "k4", futureExp, []byte("v4"))
 
-	exp, err = bucket.nextExpiration()
-	require.NoError(t, err)
-	// Usually this will return exp2, but if this is slow enough that the expiration goroutine runs to expire document k2, it can return exp4.
-	require.Contains(t, []Exp{exp2, exp4}, exp)
+		exp, err = bucket.nextExpiration()
+		require.NoError(t, err)
+		require.Equal(t, int(futureExp), int(exp))
 
-	log.Printf("... waiting 1 sec ...")
-	time.Sleep(1 * time.Second)
+		// k2 is already expired, so wait for the expiration goroutine to remove it
+		requireAddRaw(t, c, "k2", pastExp, []byte("v2"))
+		synctest.Wait()
 
-	exp, err = bucket.nextExpiration()
-	require.NoError(t, err)
-	require.Equal(t, int(exp4), int(exp))
+		exp, err = bucket.nextExpiration()
+		require.NoError(t, err)
+		require.Equal(t, int(futureExp), int(exp))
 
-	_, _, err = c.GetRaw(ctx, "k1")
-	assert.NoError(t, err)
-	_, _, err = c.GetRaw(ctx, "k2")
-	assert.Error(t, err) // k2 is gone
-	_, _, err = c.GetRaw(ctx, "k3")
-	assert.NoError(t, err)
-	_, _, err = c.GetRaw(ctx, "k4")
-	assert.NoError(t, err)
+		_, _, err = c.GetRaw(ctx, "k1")
+		assert.NoError(t, err)
+		_, _, err = c.GetRaw(ctx, "k2")
+		assert.Error(t, err) // k2 is gone
+		_, _, err = c.GetRaw(ctx, "k3")
+		assert.NoError(t, err)
+		_, _, err = c.GetRaw(ctx, "k4")
+		assert.NoError(t, err)
 
-	log.Printf("... waiting 2 secs ...")
-	time.Sleep(2 * time.Second)
+		time.Sleep(3 * time.Second)
+		synctest.Wait()
 
-	exp, err = bucket.nextExpiration()
-	require.NoError(t, err)
-	assert.Equal(t, uint32(0), exp)
+		exp, err = bucket.nextExpiration()
+		require.NoError(t, err)
+		assert.Equal(t, uint32(0), exp)
 
-	_, _, err = c.GetRaw(ctx, "k4")
-	assert.Error(t, err)
+		_, _, err = c.GetRaw(ctx, "k4")
+		assert.Error(t, err)
 
-	n, err := bucket.PurgeTombstones()
-	assert.NoError(t, err)
-	assert.Equal(t, int64(2), n)
+		n, err := bucket.PurgeTombstones()
+		assert.NoError(t, err)
+		assert.Equal(t, int64(2), n)
+	})
 }
 
 func TestExpirationAfterClose(t *testing.T) {
-	ctx := t.Context()
-	t.Skip("Slow test useful for debugging issues with expiration")
-	bucket, err := OpenBucket(InMemoryURL, strings.ToLower(t.Name()), CreateNew)
-	defer func() {
-		assert.NoError(t, bucket.CloseAndDelete(ctx))
-	}()
-	require.NoError(t, err)
-	c := bucket.DefaultDataStore(ctx)
+	synctest.Test(t, func(t *testing.T) {
+		ctx := t.Context()
+		ensureNoLeaks(t)
+		// a file-based bucket is required: Close leaves the sqlite database open for an in-memory bucket
+		bucket := makeTestBucket(t)
+		c := bucket.DefaultDataStore(ctx)
 
-	// set expiry long enough that Close will happen first
-	exp := Exp(time.Now().Add(1 * time.Second).Unix())
-	requireAddRaw(t, c, "docID", exp, []byte("v1"))
-	bucket.Close(ctx)
-	// sleep to ensure we won't panic
-	time.Sleep(2 * time.Second)
+		// set expiry long enough that Close will happen first
+		exp := Exp(time.Now().Add(1 * time.Second).Unix())
+		requireAddRaw(t, c, "docID", exp, []byte("v1"))
+		bucket.Close(ctx)
+		// pass the expiry time: an expiration left running would panic on the closed database
+		time.Sleep(2 * time.Second)
+	})
 }
 
 func TestUriFromPathWindows(t *testing.T) {
@@ -541,4 +551,125 @@ func TestDropDataStoreThenReCreateFromAnotherCopy(t *testing.T) {
 	// The dropped collection's documents are gone with it:
 	_, err = newColl.Get(ctx, "able", &value)
 	require.Error(t, err)
+}
+
+// TestTestLoggingIsRestored verifies that a test's logging callback is unbound once it finishes.  Left bound to
+// a finished test, rosmar logging from a later test panics with "Log in goroutine after ... has completed",
+// which is why the package could not be run with -count 2.
+func TestTestLoggingIsRestored(t *testing.T) {
+	previousLevel := GetLogLevel()
+	SetLogLevel(LevelInfo)
+	previousCallback := LoggingCallback
+	t.Cleanup(func() {
+		LoggingCallback = previousCallback
+		SetLogLevel(previousLevel)
+	})
+
+	var logged int
+	LoggingCallback = func(LogLevel, string, ...any) { logged++ }
+
+	t.Run("makes a bucket", func(t *testing.T) {
+		makeTestBucket(t) // binds LoggingCallback to this subtest
+	})
+
+	// The subtest has finished, so logging must have come back to this test's callback:
+	info("logging after the subtest finished")
+	require.NotZero(t, logged, "makeTestBucket left LoggingCallback bound to a finished test")
+}
+
+type docRow struct {
+	cas       CAS
+	exp       Exp
+	tombstone bool
+	revSeqNo  uint64
+	hasValue  bool
+}
+
+func getDocRow(t *testing.T, c *Collection, key string) docRow {
+	var row docRow
+	require.NoError(t, scan(c.db().QueryRow(
+		`SELECT cas, exp, tombstone, revSeqNo, value IS NOT NULL FROM documents WHERE collection=? AND key=?`, c.id, key),
+		&row.cas, &row.exp, &row.tombstone, &row.revSeqNo, &row.hasValue))
+	return row
+}
+
+func TestExpirationSkipsTombstones(t *testing.T) {
+	testCases := []struct {
+		name     string
+		deleteFn func(t *testing.T, c *Collection, key string, cas CAS, exp Exp)
+		keepsExp bool // tombstone keeps the expiry passed to the delete call
+	}{
+		{
+			name: "Delete",
+			deleteFn: func(t *testing.T, c *Collection, key string, _ CAS, _ Exp) {
+				require.NoError(t, c.Delete(t.Context(), key))
+			},
+		},
+		{
+			name: "DeleteWithXattrs",
+			deleteFn: func(t *testing.T, c *Collection, key string, _ CAS, _ Exp) {
+				require.NoError(t, c.DeleteWithXattrs(t.Context(), key, nil))
+			},
+		},
+		{
+			name: "UpdateDelete",
+			deleteFn: func(t *testing.T, c *Collection, key string, _ CAS, _ Exp) {
+				_, err := c.Update(t.Context(), key, 0, func([]byte) ([]byte, *uint32, bool, error) { return nil, nil, true, nil })
+				require.NoError(t, err)
+			},
+		},
+		{
+			name:     "UpdateXattrDeleteBody",
+			keepsExp: true,
+			deleteFn: func(t *testing.T, c *Collection, key string, cas CAS, exp Exp) {
+				_, err := c.UpdateXattrDeleteBody(t.Context(), key, "_sync", exp, cas, map[string]any{"foo": "bar"}, nil)
+				require.NoError(t, err)
+			},
+		},
+		{
+			name:     "WriteTombstoneWithXattrs",
+			keepsExp: true,
+			deleteFn: func(t *testing.T, c *Collection, key string, cas CAS, exp Exp) {
+				_, err := c.WriteTombstoneWithXattrs(t.Context(), key, exp, cas, map[string][]byte{"_sync": []byte(`{"foo":"bar"}`)}, nil, true, nil)
+				require.NoError(t, err)
+			},
+		},
+		{
+			name:     "DeleteWithMeta",
+			keepsExp: true,
+			deleteFn: func(t *testing.T, c *Collection, key string, cas CAS, exp Exp) {
+				require.NoError(t, c.DeleteWithMeta(t.Context(), key, cas, cas+1, exp, nil))
+			},
+		},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				ensureNoLeaks(t)
+				bucket := makeTestBucket(t)
+				c := bucket.DefaultDataStore(t.Context()).(*Collection)
+				key := "doc1"
+
+				exp := Exp(time.Now().Add(2 * time.Second).Unix())
+				cas, err := c.WriteCas(t.Context(), key, exp, 0, []byte(`{"foo":"bar"}`), 0)
+				require.NoError(t, err)
+
+				tc.deleteFn(t, c, key, cas, exp)
+				before := getDocRow(t, c, key)
+				t.Logf("tombstone row: %+v", before)
+				require.False(t, before.hasValue)
+				assert.True(t, before.tombstone, "tombstone flag not set")
+				if tc.keepsExp {
+					assert.Equal(t, exp, before.exp)
+				} else {
+					assert.Equal(t, Exp(0), before.exp)
+				}
+
+				time.Sleep(3 * time.Second)
+				synctest.Wait()
+
+				require.Equal(t, before, getDocRow(t, c, key), "expirer modified tombstone")
+			})
+		})
+	}
 }
