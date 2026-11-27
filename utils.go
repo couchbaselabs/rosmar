@@ -11,6 +11,7 @@ package rosmar
 import (
 	"bytes"
 	"database/sql"
+	"errors"
 	"fmt"
 	"hash/crc32"
 	"runtime"
@@ -25,6 +26,9 @@ import (
 
 // Error returned from API calls on a closed Bucket.
 var ErrBucketClosed = fmt.Errorf("this Rosmar bucket has been closed")
+
+// Error for a collection that was dropped, possibly by another copy of the bucket.
+var ErrCollectionDropped = errors.New("collection was dropped")
 
 // An unimplemented feature
 type ErrUnimplemented struct{ reason string }
