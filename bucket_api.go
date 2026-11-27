@@ -287,18 +287,6 @@ func (bucket *Bucket) getOrCreateCollection(name sgbucket.DataStoreNameImpl, orC
 	}
 }
 
-func (bucket *Bucket) getOpenCollectionByID(id CollectionID) *Collection {
-	bucket.mutex.Lock()
-	defer bucket.mutex.Unlock()
-
-	for _, coll := range bucket.collections {
-		if coll.id == id {
-			return coll
-		}
-	}
-	return nil
-}
-
 /*  unused (so far)
 func (bucket *Bucket) getCollectionByID(id CollectionID) (*Collection, error) {
 

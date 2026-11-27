@@ -145,7 +145,7 @@ func (c *Collection) startDCPFeed(ctx context.Context, args sgbucket.FeedArgumen
 			c.bucket.mutex.Unlock()
 			return nil, ErrBucketClosed
 		}
-		c.bucket.collectionFeeds[c.DataStoreNameImpl] = append(c.bucket.collectionFeeds[c.DataStoreNameImpl], feed)
+		c.bucket.collectionFeeds[c.id] = append(c.bucket.collectionFeeds[c.id], feed)
 		c.bucket.mutex.Unlock()
 	}
 	go feed.run()
@@ -187,7 +187,7 @@ func (c *Collection) postNewEvent(e *event) {
 
 func (c *Collection) postEvent(e *event) {
 	c.bucket.mutex.Lock()
-	feeds := c.bucket.collectionFeeds[c.DataStoreNameImpl]
+	feeds := c.bucket.collectionFeeds[c.id]
 	c.bucket.mutex.Unlock()
 
 	for _, feed := range feeds {
@@ -200,10 +200,10 @@ func (c *Collection) postEvent(e *event) {
 
 // stops all feeds. Caller MUST hold the bucket's lock.
 func (c *Collection) _stopFeeds() {
-	for _, feed := range c.bucket.collectionFeeds[c.DataStoreNameImpl] {
+	for _, feed := range c.bucket.collectionFeeds[c.id] {
 		feed.close()
 	}
-	delete(c.bucket.collectionFeeds, c.DataStoreNameImpl)
+	delete(c.bucket.collectionFeeds, c.id)
 }
 
 //////// DCPFEED:
@@ -418,7 +418,7 @@ func (feed *dcpFeed) stop() {
 	c := feed.collection
 	c.bucket.mutex.Lock()
 	defer c.bucket.mutex.Unlock()
-	feeds := c.bucket.collectionFeeds[c.DataStoreNameImpl]
+	feeds := c.bucket.collectionFeeds[c.id]
 	// A new slice, rather than deleting in place: postEvent iterates the old one without the lock.
 	remaining := make([]*dcpFeed, 0, len(feeds))
 	for _, f := range feeds {
@@ -427,9 +427,9 @@ func (feed *dcpFeed) stop() {
 		}
 	}
 	if len(remaining) == 0 {
-		delete(c.bucket.collectionFeeds, c.DataStoreNameImpl)
+		delete(c.bucket.collectionFeeds, c.id)
 	} else {
-		c.bucket.collectionFeeds[c.DataStoreNameImpl] = remaining
+		c.bucket.collectionFeeds[c.id] = remaining
 	}
 }
 

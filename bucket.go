@@ -43,7 +43,7 @@ type Bucket struct {
 	url             string         // Filesystem path or other URL
 	name            string         // Bucket name
 	collections     collectionsMap // Collections, indexed by DataStoreName
-	collectionFeeds map[sgbucket.DataStoreNameImpl][]*dcpFeed
+	collectionFeeds map[CollectionID][]*dcpFeed
 	mutex           *mutex         // mutex for synchronized access to Bucket
 	sqliteDB        *sql.DB        // SQLite database handle (do not access; call db() instead)
 	expManager      *expiryManager // expiration manager for bucket
@@ -177,7 +177,7 @@ func OpenBucket(urlStr string, bucketName string, mode OpenMode) (b *Bucket, err
 		url:             urlStr,
 		sqliteDB:        db,
 		collections:     make(map[sgbucket.DataStoreNameImpl]*Collection),
-		collectionFeeds: make(map[sgbucket.DataStoreNameImpl][]*dcpFeed),
+		collectionFeeds: make(map[CollectionID][]*dcpFeed),
 		mutex:           &mutex{},
 		inMemory:        inMemory,
 		serial:          serial,

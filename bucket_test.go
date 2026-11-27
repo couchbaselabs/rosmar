@@ -673,3 +673,70 @@ func TestExpirationSkipsTombstones(t *testing.T) {
 		})
 	}
 }
+
+func TestStaleCollectionLookupKeepsFeedsOfReCreatedCollection(t *testing.T) {
+	ctx := t.Context()
+	ensureNoLeakedFeeds(t)
+	bucket := makeTestBucket(t)
+
+	name := dsName("scope1", "collection1")
+	_, err := bucket.NamedDataStore(ctx, name)
+	require.NoError(t, err)
+
+	bucket2, err := OpenBucket(bucket.url, strings.ToLower(t.Name()), ReOpenExisting)
+	require.NoError(t, err)
+	t.Cleanup(func() { bucket2.Close(ctx) })
+	_, err = bucket2.NamedDataStore(ctx, name)
+	require.NoError(t, err)
+
+	// The 1st copy drops the collection, and a 3rd copy re-creates it and starts a feed on it:
+	require.NoError(t, bucket.DropDataStore(ctx, name))
+	bucket3, err := OpenBucket(bucket.url, strings.ToLower(t.Name()), ReOpenExisting)
+	require.NoError(t, err)
+	t.Cleanup(func() { bucket3.Close(ctx) })
+	newColl, err := bucket3.NamedDataStore(ctx, name)
+	require.NoError(t, err)
+
+	startFeed := func(coll sgbucket.DataStore) (chan sgbucket.FeedEvent, chan bool) {
+		events := make(chan sgbucket.FeedEvent, 10)
+		terminator := make(chan bool)
+		args := sgbucket.FeedArguments{Backfill: sgbucket.FeedNoBackfill, Terminator: terminator}
+		_, err := coll.(*Collection).startDCPFeed(ctx, args, func(e sgbucket.FeedEvent) bool {
+			events <- e
+			return true
+		}, nil)
+		require.NoError(t, err)
+		t.Cleanup(func() { close(terminator) })
+		return events, terminator
+	}
+	events, _ := startFeed(newColl)
+
+	// The 2nd copy's lookup replaces its stale handle; that must not stop the 1st copy's feed:
+	coll2, err := bucket2.NamedDataStore(ctx, name)
+	require.NoError(t, err)
+
+	addToCollection(t, newColl, "able", 0, "A")
+	select {
+	case e := <-events:
+		require.Equal(t, "able", string(e.Key))
+	case <-time.After(5 * time.Second):
+		require.Fail(t, "feed on the re-created collection stopped receiving events")
+	}
+
+	// The 2nd copy can still start a feed of its own:
+	events2, _ := startFeed(coll2)
+	addToCollection(t, coll2, "baker", 0, "B")
+	select {
+	case e := <-events2:
+		require.Equal(t, "baker", string(e.Key))
+	case <-time.After(5 * time.Second):
+		require.Fail(t, "feed on the 2nd copy received no event")
+	}
+	// Both copies' feeds are on the same row, so the 3rd copy's feed receives the write too:
+	select {
+	case e := <-events:
+		require.Equal(t, "baker", string(e.Key))
+	case <-time.After(5 * time.Second):
+		require.Fail(t, "feed on the 3rd copy did not receive the 2nd copy's write")
+	}
+}
