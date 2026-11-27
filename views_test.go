@@ -10,6 +10,7 @@ package rosmar
 
 import (
 	"errors"
+	"sync"
 	"testing"
 
 	sgbucket "github.com/couchbase/sg-bucket"
@@ -125,4 +126,53 @@ func TestView(t *testing.T) {
 	assert.NoError(t, coll.DeleteDDoc(ctx, "docname"), "DeleteDDoc")
 	_, getErr := coll.GetDDoc(ctx, "docname")
 	assert.True(t, errors.Is(getErr, sgbucket.MissingError{Key: "docname"}))
+}
+
+// TestConcurrentViewsAndDesignDocUpdates queries views from several goroutines while the design doc is being
+// rewritten and deleted.  Every one of these paths touches the collection's cache of compiled map functions --
+// a hit caches, a miss evicts, and a design doc change invalidates -- so this catches unsynchronized access to
+// it. Run with -race.
+func TestConcurrentViewsAndDesignDocUpdates(t *testing.T) {
+	ctx := t.Context()
+	ensureNoLeakedFeeds(t)
+	coll := makeTestBucket(t).DefaultDataStore(ctx).(*Collection)
+	require.NoError(t, setJSON(ctx, coll, "doc1", `{"key": "k1", "value": "v1"}`))
+
+	mapFns := []string{
+		`function(doc){if (doc.key) emit(doc.key,doc.value)}`,
+		`function(doc){if (doc.key) emit(doc.key,null)}`,
+	}
+	putDDoc := func(mapFn string) error {
+		return coll.PutDDoc(ctx, "ddoc", &sgbucket.DesignDoc{
+			Language: "javascript",
+			Views:    sgbucket.ViewMap{"view1": sgbucket.ViewDef{Map: mapFn}},
+		})
+	}
+	require.NoError(t, putDDoc(mapFns[0]))
+
+	// Half the queriers ask for a view that exists, which caches its compiled map function; the other half ask
+	// for one that doesn't, which evicts any cached copy:
+	stop := make(chan struct{})
+	var queriers sync.WaitGroup
+	defer queriers.Wait()
+	defer close(stop)
+	for i := range 8 {
+		queriers.Go(func() {
+			viewName := ifelse(i%2 == 0, "view1", "missingview")
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				_, _ = coll.View(ctx, "ddoc", viewName, nil)
+			}
+		})
+	}
+
+	// Meanwhile rewrite the design doc, which invalidates that cache, and finally delete it:
+	for i := range 50 {
+		require.NoError(t, putDDoc(mapFns[i%2]))
+	}
+	require.NoError(t, coll.DeleteDDoc(ctx, "ddoc"))
 }
