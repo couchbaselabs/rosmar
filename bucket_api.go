@@ -64,8 +64,9 @@ func (bucket *Bucket) Close(_ context.Context) {
 
 // _closeSqliteDB closes the underlying sqlite database and shuts down dcpFeeds. Must have a lock to call this function.
 func (bucket *Bucket) _closeSqliteDB() error {
-	for _, c := range bucket.collections {
-		c.close()
+	// Feeds are shared by all copies, and may be on collections this copy never opened.
+	for id := range bucket.collectionFeeds {
+		bucket._stopFeeds(id, ErrBucketClosed)
 	}
 	if bucket.sqliteDB == nil {
 		return nil
@@ -259,22 +260,24 @@ func (bucket *Bucket) getOrCreateCollection(name sgbucket.DataStoreNameImpl, orC
 	bucket.mutex.Lock()
 	defer bucket.mutex.Unlock()
 
+	cached, isCached := bucket.collections[name]
+	if isCached && bucket._closed {
+		return cached, nil
+	}
+
 	id, err := bucket._getCollectionID(name.Scope, name.Collection)
 	if err == nil {
-		// A cached collection is only usable while it still refers to the same row: another copy of this bucket
-		// may have dropped and re-created the collection, and ids are never reused, so a handle on the dropped
-		// row fails every write with a foreign-key error.
-		if collection, ok := bucket.collections[name]; ok {
-			if collection.id == id {
-				return collection, nil
+		// Ids are never reused, so a cached handle with a different id was dropped by another copy.
+		if isCached {
+			if cached.id == id {
+				return cached, nil
 			}
-			collection.close()
+			bucket._stopFeeds(cached.id, ErrCollectionDropped)
 		}
 		return bucket._initCollection(name, id), nil
-	} else if err == sql.ErrNoRows {
-		if collection, ok := bucket.collections[name]; ok {
-			// The collection was dropped by another copy of the bucket; let go of it.
-			collection.close()
+	} else if errors.Is(err, sql.ErrNoRows) {
+		if isCached {
+			bucket._stopFeeds(cached.id, ErrCollectionDropped)
 			delete(bucket.collections, name)
 		}
 		if orCreate {
@@ -317,12 +320,16 @@ func (bucket *Bucket) dropCollection(name sgbucket.DataStoreNameImpl) error {
 	bucket.mutex.Lock()
 	defer bucket.mutex.Unlock()
 
-	if c := bucket.collections[name]; c != nil {
-		c.close()
-		delete(bucket.collections, name)
+	// Other copies may have feeds on this collection without having it cached here.
+	id, err := bucket._getCollectionID(name.ScopeName(), name.CollectionName())
+	if err == nil {
+		bucket._stopFeeds(id, ErrCollectionDropped)
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return err
 	}
+	delete(bucket.collections, name)
 
-	_, err := bucket._db().Exec(`DELETE FROM collections WHERE scope=? AND name=?`, name.ScopeName(), name.CollectionName())
+	_, err = bucket._db().Exec(`DELETE FROM collections WHERE scope=? AND name=?`, name.ScopeName(), name.CollectionName())
 	if err != nil {
 		return err
 	}

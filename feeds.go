@@ -10,6 +10,7 @@ package rosmar
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"expvar"
@@ -65,11 +66,12 @@ func (bucket *Bucket) StartDCPFeed(ctx context.Context, args sgbucket.FeedArgume
 
 		feed, err := collection.startDCPFeed(ctx, argsCopy, collectionAwareCallback, dbStats)
 		if err != nil {
+			err = fmt.Errorf("couldn't start DCP feed on %s: %w", collection.DataStoreNameImpl, err)
 			// Stop the feeds that did start: no doneChan of theirs is coalesced into the caller's now.
 			for _, started := range startedFeeds {
-				started.stop()
+				started.stop(err)
 			}
-			return fmt.Errorf("couldn't start DCP feed on %s: %w", collection.DataStoreNameImpl, err)
+			return err
 		}
 		startedFeeds = append(startedFeeds, feed)
 	}
@@ -145,6 +147,14 @@ func (c *Collection) startDCPFeed(ctx context.Context, args sgbucket.FeedArgumen
 			c.bucket.mutex.Unlock()
 			return nil, ErrBucketClosed
 		}
+		// Another copy may have dropped the collection since it was looked up.
+		if id, err := c.bucket._getCollectionID(c.Scope, c.Collection); err != nil || id != c.id {
+			c.bucket.mutex.Unlock()
+			if err != nil && !errors.Is(err, sql.ErrNoRows) {
+				return nil, err
+			}
+			return nil, fmt.Errorf("%w: %w", ErrCollectionDropped, sgbucket.MissingError{Key: c.DataStoreNameImpl.String()})
+		}
 		c.bucket.collectionFeeds[c.id] = append(c.bucket.collectionFeeds[c.id], feed)
 		c.bucket.mutex.Unlock()
 	}
@@ -198,12 +208,12 @@ func (c *Collection) postEvent(e *event) {
 	}
 }
 
-// stops all feeds. Caller MUST hold the bucket's lock.
-func (c *Collection) _stopFeeds() {
-	for _, feed := range c.bucket.collectionFeeds[c.id] {
-		feed.close()
+// stops all feeds on a collection, from any copy of the bucket. Caller MUST hold the bucket's lock.
+func (bucket *Bucket) _stopFeeds(id CollectionID, reason error) {
+	for _, feed := range bucket.collectionFeeds[id] {
+		feed.close(reason)
 	}
-	delete(c.bucket.collectionFeeds, c.id)
+	delete(bucket.collectionFeeds, id)
 }
 
 //////// DCPFEED:
@@ -225,6 +235,8 @@ type dcpFeed struct {
 	lastCasChanged bool
 	// completed reports that the feed drained to its end-of-feed marker, rather than being terminated.
 	completed atomic.Bool
+	// stopErr is why the feed was closed, if it was closed by rosmar rather than its Terminator.
+	stopErr atomic.Pointer[error]
 }
 
 func (feed *dcpFeed) String() string {
@@ -378,7 +390,11 @@ func (feed *dcpFeed) run() {
 			// TODO: Set a timer to write the checkpoint "soon"
 		}
 	}
-	debug("%s stopping", feed)
+	if err := feed.err(); err != nil {
+		debug("%s stopped: %v", feed, err)
+	} else {
+		debug("%s stopping", feed)
+	}
 
 	// A dump saves its checkpoint in StartDCPFeed, once all of its collections stop.
 	if !feed.args.Dump {
@@ -406,14 +422,24 @@ func allFeedsCompleted(feeds []*dcpFeed) bool {
 	return true
 }
 
-func (feed *dcpFeed) close() {
+// close ends the feed; only the first reason given is kept.
+func (feed *dcpFeed) close(reason error) {
+	feed.stopErr.CompareAndSwap(nil, &reason)
 	feed.events.close()
+}
+
+// err returns why rosmar closed the feed, or nil if it was not closed by rosmar.
+func (feed *dcpFeed) err() error {
+	if err := feed.stopErr.Load(); err != nil {
+		return *err
+	}
+	return nil
 }
 
 // stop closes the feed and removes it from its collection's registered feeds, so that nothing keeps pushing
 // events to it.  Must not be called with the bucket's lock held.
-func (feed *dcpFeed) stop() {
-	feed.close()
+func (feed *dcpFeed) stop(reason error) {
+	feed.close(reason)
 
 	c := feed.collection
 	c.bucket.mutex.Lock()

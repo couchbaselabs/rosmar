@@ -51,12 +51,6 @@ func (c *Collection) String() string {
 	return fmt.Sprintf("B#%dc%d", c.bucket.serial, c.GetCollectionID())
 }
 
-func (c *Collection) close() {
-	c.mutex.Lock()
-	defer c.mutex.Unlock()
-	c._stopFeeds()
-}
-
 func (c *Collection) db() queryable {
 	return c.bucket.db()
 }

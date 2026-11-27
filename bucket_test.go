@@ -711,7 +711,7 @@ func TestStaleCollectionLookupKeepsFeedsOfReCreatedCollection(t *testing.T) {
 	}
 	events, _ := startFeed(newColl)
 
-	// The 2nd copy's lookup replaces its stale handle; that must not stop the 1st copy's feed:
+	// The 2nd copy's lookup replaces its stale handle; that must not stop the 3rd copy's feed:
 	coll2, err := bucket2.NamedDataStore(ctx, name)
 	require.NoError(t, err)
 
@@ -739,4 +739,110 @@ func TestStaleCollectionLookupKeepsFeedsOfReCreatedCollection(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		require.Fail(t, "feed on the 3rd copy did not receive the 2nd copy's write")
 	}
+}
+
+func TestClosedCopyReturnsCachedDataStores(t *testing.T) {
+	ctx := t.Context()
+	bucket := makeTestBucket(t)
+	name := dsName("scope1", "collection1")
+
+	bucket2, err := OpenBucket(bucket.url, strings.ToLower(t.Name()), ReOpenExisting)
+	require.NoError(t, err)
+	require.NotNil(t, bucket2.DefaultDataStore(ctx))
+	_, err = bucket2.NamedDataStore(ctx, name)
+	require.NoError(t, err)
+
+	bucket2.Close(ctx)
+	require.NotNil(t, bucket2.DefaultDataStore(ctx), "closed copy lost its cached default collection")
+	_, err = bucket2.NamedDataStore(ctx, name)
+	require.NoError(t, err, "closed copy lost its cached named collection")
+}
+
+// startUnterminatedFeed starts a feed with no terminator, so only the bucket can stop it.
+func startUnterminatedFeed(t *testing.T, coll sgbucket.DataStore) (*dcpFeed, chan struct{}) {
+	done := make(chan struct{})
+	args := sgbucket.FeedArguments{Backfill: sgbucket.FeedNoBackfill, DoneChan: done}
+	feed, err := coll.(*Collection).startDCPFeed(t.Context(), args, func(sgbucket.FeedEvent) bool { return true }, nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { feed.close(errors.New("test cleanup")) }) // so a failing test doesn't leak the feed into later tests
+	return feed, done
+}
+
+func requireStopReason(t *testing.T, feed *dcpFeed, expected error) {
+	require.ErrorIs(t, feed.err(), expected)
+}
+
+func requireFeedEnds(t *testing.T, done chan struct{}, msg string) {
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		require.Fail(t, msg)
+	}
+}
+
+func TestLastCopyCloseStopsFeedOnReCreatedCollection(t *testing.T) {
+	ctx := t.Context()
+	ensureNoLeakedFeeds(t)
+	bucket := makeTestBucket(t)
+	name := dsName("scope1", "collection1")
+	_, err := bucket.NamedDataStore(ctx, name)
+	require.NoError(t, err)
+
+	// A 2nd copy drops and re-creates the collection, then starts a feed on it:
+	bucket2, err := OpenBucket(bucket.url, strings.ToLower(t.Name()), ReOpenExisting)
+	require.NoError(t, err)
+	require.NoError(t, bucket2.DropDataStore(ctx, name))
+	newColl, err := bucket2.NamedDataStore(ctx, name)
+	require.NoError(t, err)
+	feed, done := startUnterminatedFeed(t, newColl)
+	bucket2.Close(ctx)
+
+	// The 1st copy, still holding the dropped collection, is the last to close:
+	bucket.Close(ctx)
+	requireFeedEnds(t, done, "closing the last copy did not stop the feed on the re-created collection")
+	requireStopReason(t, feed, ErrBucketClosed)
+}
+
+func TestDropStopsFeedsOfOtherCopies(t *testing.T) {
+	ctx := t.Context()
+	ensureNoLeakedFeeds(t)
+	bucket := makeTestBucket(t)
+	name := dsName("scope1", "collection1")
+
+	bucket2, err := OpenBucket(bucket.url, strings.ToLower(t.Name()), ReOpenExisting)
+	require.NoError(t, err)
+	t.Cleanup(func() { bucket2.Close(ctx) })
+	coll2, err := bucket2.NamedDataStore(ctx, name)
+	require.NoError(t, err)
+	feed, done := startUnterminatedFeed(t, coll2)
+
+	// The 1st copy never opened the collection, but drops it:
+	require.NoError(t, bucket.DropDataStore(ctx, name))
+	requireFeedEnds(t, done, "dropping the collection did not stop another copy's feed on it")
+	requireStopReason(t, feed, ErrCollectionDropped)
+}
+
+// Covers a drop by another copy between StartDCPFeed's collection lookup and its feed registration.
+func TestFeedOnDroppedCollectionFails(t *testing.T) {
+	ctx := t.Context()
+	ensureNoLeakedFeeds(t)
+	bucket := makeTestBucket(t)
+	name := dsName("scope1", "collection1")
+
+	bucket2, err := OpenBucket(bucket.url, strings.ToLower(t.Name()), ReOpenExisting)
+	require.NoError(t, err)
+	t.Cleanup(func() { bucket2.Close(ctx) })
+	coll2, err := bucket2.getOrCreateCollection(name.(sgbucket.DataStoreNameImpl), true)
+	require.NoError(t, err)
+
+	require.NoError(t, bucket.DropDataStore(ctx, name))
+	_, err = bucket.NamedDataStore(ctx, name)
+	require.NoError(t, err)
+
+	terminator := make(chan bool)
+	t.Cleanup(func() { close(terminator) })
+	args := sgbucket.FeedArguments{Backfill: sgbucket.FeedNoBackfill, Terminator: terminator}
+	_, err = coll2.startDCPFeed(ctx, args, func(sgbucket.FeedEvent) bool { return true }, nil)
+	require.ErrorAs(t, err, &sgbucket.MissingError{}, "feed was registered on a dropped collection")
+	require.ErrorIs(t, err, ErrCollectionDropped)
 }
